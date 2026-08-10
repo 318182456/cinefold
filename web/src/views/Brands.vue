@@ -14,6 +14,7 @@ const active = ref('')
 const items = ref([])
 const loading = ref(false)
 const loadingList = ref(false)
+const error = ref('')
 
 // 只看预定发布 / 只看已发布 / 全部
 const filter = ref('all')
@@ -47,10 +48,13 @@ async function select(key) {
   active.value = key
   loadingList.value = true
   items.value = []
+  error.value = ''
   try {
     const data = await getBrandCodes(key)
     items.value = data.items || []
   } catch (err) {
+    // toast 会消失，抓取失败留在页面上更好排查
+    error.value = err.message
     toast.error(err.message)
   } finally {
     loadingList.value = false
@@ -108,6 +112,14 @@ onMounted(load)
       </div>
 
       <LoadingBlock v-if="loadingList" :rows="4" />
+
+      <div v-else-if="error" class="card space-y-1 border border-red-900/50">
+        <p class="text-sm text-red-400">抓取失败</p>
+        <p class="text-xs text-gray-400">{{ error }}</p>
+        <p class="text-[11px] text-gray-600">
+          厂牌官网在境外，服务器直连不通时需要在「其他」里配置代理
+        </p>
+      </div>
 
       <div v-else-if="shown.length" class="grid gap-3 lg:grid-cols-2 2xl:grid-cols-3">
         <div v-for="item in shown" :key="item.code" class="relative">

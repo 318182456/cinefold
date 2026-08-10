@@ -99,8 +99,10 @@ def cache_photos() -> int:
     settings = get_settings()
     if not settings.enable_photo_cache:
         return 0
-    logger.debug("[任务] 图片持久化暂未接入")
-    return 0
+
+    from app import services
+    logger.info("[任务] 开始缓存封面")
+    return services.cache_lack_photos()
 
 
 def save_image(url: str, target: str = "") -> str:
@@ -168,6 +170,7 @@ JOBS: dict[str, dict] = {
 INTERVAL_JOBS: dict[str, dict] = {
     "pt_wait": {"func": pt_wait, "name": "同步下载状态", "minutes": 5},
     "translate_titles": {"func": translate_titles, "name": "翻译标题", "minutes": 30},
+    "cache_photos": {"func": cache_photos, "name": "缓存封面", "minutes": 20},
 }
 
 

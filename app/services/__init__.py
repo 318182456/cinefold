@@ -545,6 +545,86 @@ def fill_lack_codes_by_list(codes: list[str]) -> int:
     return count
 
 
+# 一轮最多拉多少张封面。图源在墙外，量太大会让任务跑很久
+PHOTO_CACHE_LIMIT = 100
+# 并发数。图源对单 IP 的连接数敏感，开太大反而容易被限速
+PHOTO_CACHE_WORKERS = 5
+
+
+def cache_lack_photos(limit: int = PHOTO_CACHE_LIMIT) -> int:
+    """把还没落盘的封面批量拉到本地。
+
+    列表页每张卡都要一张封面，没缓存过的要现场回源，翻一页就得等一批。
+    提前拉下来后 image-local 直接读盘，页面立刻出图。
+    """
+    import httpx
+    from concurrent.futures import ThreadPoolExecutor
+
+    from app.utils import imagecache
+
+    settings = get_settings()
+
+    with session_scope() as session:
+        rows = session.execute(
+            select(Code.code, Code.banner, Code.poster)
+            .where((Code.local_banner.is_(None)) | (Code.local_banner == ""))
+            .where((Code.banner.isnot(None)) & (Code.banner != ""))
+            .limit(limit)
+        ).all()
+
+    pending = [(code, banner or poster) for code, banner, poster in rows]
+    pending = [(code, url) for code, url in pending if url]
+    if not pending:
+        return 0
+
+    def fetch(item: tuple[str, str]) -> tuple[str, str] | None:
+        code, url = item
+        # 已经在盘上但库里没记，直接回填省一次下载
+        hit = imagecache.find_cached(url, code, "banner")
+        if hit is not None:
+            return code, imagecache.relative_of(hit)
+
+        try:
+            with httpx.Client(
+                timeout=httpx.Timeout(20.0, connect=10.0),
+                follow_redirects=True,
+                proxy=settings.proxy or None,
+                headers={
+                    "Referer": "https://www.javbus.com/",
+                    "User-Agent": (
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                        "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+                    ),
+                },
+            ) as client:
+                response = client.get(url)
+                response.raise_for_status()
+                content = response.content
+        except Exception as exc:
+            logger.debug(f"[{code}] 封面下载失败: {exc}")
+            return None
+
+        stored = imagecache.store(content, url, code, "banner")
+        if stored is None:
+            return None
+        return code, imagecache.relative_of(stored)
+
+    with ThreadPoolExecutor(max_workers=PHOTO_CACHE_WORKERS) as pool:
+        results = [r for r in pool.map(fetch, pending) if r and r[1]]
+
+    if not results:
+        return 0
+
+    with session_scope() as session:
+        for code, relative in results:
+            row = session.get(Code, code)
+            if row is not None:
+                row.local_banner = relative
+
+    logger.info(f"已缓存 {len(results)} 张封面")
+    return len(results)
+
+
 def fill_lack_actors(limit: int = 50) -> int:
     with session_scope() as session:
         names = session.scalars(
@@ -685,9 +765,13 @@ def get_brand_items(brand: str, past_days: int = 7, future_days: int = 14) -> li
         except ValueError:
             logger.debug("厂牌缓存解析失败，重新抓取")
 
+    from app.modules.ladysite.brands import BrandUnreachable, crawl_range
+
     try:
-        from app.modules.ladysite.brands import crawl_range
         found = crawl_range(brand, past_days=past_days, future_days=future_days)
+    except BrandUnreachable:
+        # 交给上层转成明确的错误提示，不能静默当成"没有作品"
+        raise
     except Exception as exc:
         logger.warning(f"厂牌 {brand} 抓取失败: {exc}")
         return []
