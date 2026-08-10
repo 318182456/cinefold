@@ -1,3 +1,17 @@
+# ---------------------------------------------------------------- 前端
+# dist 是生成产物，不进仓库，在这里构建。
+FROM node:20-alpine AS web
+
+WORKDIR /web
+# 先只拷依赖清单，依赖没变时这层能复用缓存
+COPY web/package.json web/package-lock.json ./
+RUN npm ci
+
+COPY web/ ./
+RUN npm run build
+
+
+# ---------------------------------------------------------------- 运行
 FROM python:3.12-slim-bookworm
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -26,8 +40,7 @@ COPY app /app/app
 COPY main.py /app/main.py
 COPY VERSION /app/VERSION
 
-# 前端构建产物；目录不存在时由 .dockerignore 之外的占位保证构建不失败
-COPY web/dist /usr/share/nginx/html
+COPY --from=web /web/dist /usr/share/nginx/html
 
 COPY deploy/nginx.conf /etc/nginx/nginx.conf
 COPY deploy/supervisord.conf /etc/supervisord.conf

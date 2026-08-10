@@ -13,5 +13,6 @@ data/
 app.env
 .env
 SPEC.md
+# web/src 需要保留：前端在镜像内的 node 阶段构建
 web/node_modules/
-web/src/
+web/dist/

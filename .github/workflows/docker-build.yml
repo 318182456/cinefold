@@ -53,20 +53,6 @@ jobs:
             echo "VERSION 未变更（$VALUE），跳过 latest"
           fi
 
-      - name: 安装 Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          cache: npm
-          cache-dependency-path: web/package-lock.json
-
-      # Dockerfile 直接复制 web/dist，不在镜像内构建前端
-      - name: 构建前端
-        working-directory: web
-        run: |
-          npm ci
-          npm run build
-
       - name: 设置 QEMU
         uses: docker/setup-qemu-action@v3
 

@@ -11,4 +11,5 @@ app.env
 .env
 
 web/node_modules/
-# web/dist 需要提交：Dockerfile 直接复制它，不在镜像内构建前端
+# 构建产物由 Dockerfile 的 node 阶段生成，不提交
+web/dist/
