@@ -35,8 +35,29 @@ def search_torrents(code: str, use_filter: bool = True) -> list[Torrent]:
     if use_filter:
         torrents = filter_torrents(torrents, settings.default_filter)
 
-    site_priority = [site.name for site in ptsite.get_sites()]
-    return sort_torrents(torrents, settings.default_sort, site_priority)
+    return sort_torrents(torrents, settings.default_sort, build_site_priority())
+
+
+def build_site_priority() -> list[str]:
+    """站点优先级：主站在前，其余按注册顺序补齐。
+
+    主站可能配的是已停用的站，保留在列表里无副作用——排序时不会有它的种子。
+    """
+    settings = get_settings()
+    names = [site.name for site in ptsite.get_sites()]
+    lookup = {name.lower(): name for name in names}
+
+    primary: list[str] = []
+    for raw in (settings.primary_site or "").split(","):
+        raw = raw.strip()
+        if not raw:
+            continue
+        # 用站点自身的大小写，与 Torrent.site 保持一致
+        name = lookup.get(raw.lower(), raw)
+        if name not in primary:
+            primary.append(name)
+
+    return primary + [name for name in names if name not in primary]
 
 
 def find_torrent(code: str) -> Torrent | None:

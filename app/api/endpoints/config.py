@@ -51,6 +51,10 @@ def save_config(body: ConfigRequest, current_user: str = Depends(get_current_use
     from app.scheduler import restart_scheduler
     restart_scheduler()
 
+    # 接收方式或 token 可能改了，按新配置重挂长轮询
+    from app.modules.notify.tgpolling import restart_polling
+    restart_polling()
+
     return ResponseEntity.ok(message=f"已更新 {len(updates)} 项配置")
 
 
@@ -104,6 +108,9 @@ def test_connection(target: str, current_user: str = Depends(get_current_user)):
         "telegram": lambda: _import_notifier("telegram", "TelegramNotifier"),
         "wechat": lambda: _import_notifier("wechat", "WeChatNotifier"),
         "mteam": lambda: _import_site("mteam", "MTeam"),
+        "rousi": lambda: _import_site("rousi", "Rousi"),
+        "ptt": lambda: _import_site("ptt", "PTT"),
+        "nicept": lambda: _import_site("nicept", "NicePT"),
     }
 
     factory = testers.get((target or "").lower())
@@ -124,6 +131,84 @@ def test_connection(target: str, current_user: str = Depends(get_current_user)):
         return ResponseEntity.ok({"success": ok, "message": message})
     except Exception as exc:
         return ResponseEntity.ok({"success": False, "message": str(exc)})
+
+
+@router.get("/ptsites")
+def list_ptsites(current_user: str = Depends(get_current_user)):
+    """已配置的 PT 站点名，供主站下拉使用。"""
+    from app.modules import ptsite
+    return ResponseEntity.ok({"sites": [site.name for site in ptsite.get_sites()]})
+
+
+WEBHOOK_PATH = "/api/v1/message"
+
+
+def _webhook_url(domain: str) -> str:
+    """外网地址 → 完整回调地址。用户通常只填域名。"""
+    domain = (domain or "").strip().rstrip("/")
+    if not domain:
+        return ""
+    if not domain.startswith(("http://", "https://")):
+        domain = f"https://{domain}"
+    if domain.endswith(WEBHOOK_PATH):
+        return domain
+    return f"{domain}{WEBHOOK_PATH}"
+
+
+@router.get("/telegram/receive")
+def telegram_receive_status(current_user: str = Depends(get_current_user)):
+    """当前上行消息的接收状态，供前端展示。"""
+    from app.modules.notify.telegram import TelegramNotifier
+    from app.modules.notify.tgpolling import is_polling
+
+    settings = get_settings()
+    info = TelegramNotifier().get_webhook_info()
+    return ResponseEntity.ok({
+        "mode": settings.telegram_receive_mode,
+        "polling_running": is_polling(),
+        "webhook_url": info.get("url", ""),
+        "pending_update_count": info.get("pending_update_count", 0),
+        "last_error_message": info.get("last_error_message", ""),
+        "suggest_url": _webhook_url(settings.external_domain),
+    })
+
+
+class WebhookRequest(BaseModel):
+    # 留空则用配置里的外网地址
+    url: str = ""
+
+
+@router.post("/telegram/webhook")
+def set_telegram_webhook(
+    body: WebhookRequest, current_user: str = Depends(get_current_user)
+):
+    """设置 webhook。地址留空时取配置里的外网地址。"""
+    from app.modules.notify.telegram import TelegramNotifier
+
+    settings = get_settings()
+    url = _webhook_url(body.url or settings.external_domain)
+    if not url:
+        return ResponseEntity.ok(
+            {"success": False, "message": "请先填写外网访问地址"}
+        )
+    if not url.startswith("https://"):
+        return ResponseEntity.ok(
+            {"success": False, "message": "Telegram 要求 webhook 必须是 HTTPS 地址"}
+        )
+
+    ok, message = TelegramNotifier().set_webhook(url)
+    if ok:
+        message = f"{message}：{url}"
+    return ResponseEntity.ok({"success": ok, "message": message, "url": url})
+
+
+@router.delete("/telegram/webhook")
+def delete_telegram_webhook(current_user: str = Depends(get_current_user)):
+    """删除 webhook。切回 polling 前用。"""
+    from app.modules.notify.telegram import TelegramNotifier
+
+    ok, message = TelegramNotifier().delete_webhook()
+    return ResponseEntity.ok({"success": ok, "message": message})
 
 
 def _import_client(module: str, cls: str):

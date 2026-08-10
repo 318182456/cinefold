@@ -298,6 +298,93 @@ class TestMessageCommands:
         assert "ABP-985" in reply and "SSIS-002" in reply
 
 
+class TestWebhookUrl:
+    """外网地址补全成完整回调地址。"""
+
+    def test_bare_domain_gets_https_and_path(self):
+        from app.api.endpoints.config import _webhook_url
+        assert _webhook_url("example.com") == "https://example.com/api/v1/message"
+
+    def test_trailing_slash_is_trimmed(self):
+        from app.api.endpoints.config import _webhook_url
+        assert _webhook_url("https://a.com/") == "https://a.com/api/v1/message"
+
+    def test_full_path_is_kept_as_is(self):
+        from app.api.endpoints.config import _webhook_url
+        url = "https://a.com/api/v1/message"
+        assert _webhook_url(url) == url
+
+    def test_empty_returns_empty(self):
+        from app.api.endpoints.config import _webhook_url
+        assert _webhook_url("") == ""
+
+
+class TestTelegramUpdateHandling:
+    """webhook 与 polling 共用的消息入口。"""
+
+    def test_whitelist_blocks_stranger(self, monkeypatch):
+        from app.api.endpoints import message
+
+        settings = message.get_settings()
+        monkeypatch.setattr(settings, "telegram_whitelist", "111", raising=False)
+        replied = []
+        monkeypatch.setattr(
+            "app.services.reply_text_msg",
+            lambda *args: replied.append(args) or True,
+        )
+
+        message.handle_telegram_update({
+            "message": {"text": "ssis-002", "chat": {"id": 999}, "message_id": 1},
+        })
+        assert replied == []
+
+    def test_whitelisted_user_gets_reply(self, monkeypatch):
+        from app.api.endpoints import message
+
+        settings = message.get_settings()
+        monkeypatch.setattr(settings, "telegram_whitelist", "111", raising=False)
+        monkeypatch.setattr("app.services.subscribe_code", lambda code: True)
+        replied = []
+        monkeypatch.setattr(
+            "app.services.reply_text_msg",
+            lambda *args: replied.append(args) or True,
+        )
+
+        message.handle_telegram_update({
+            "message": {"text": "ssis-002", "chat": {"id": 111}, "message_id": 7},
+        })
+        assert len(replied) == 1
+        assert "SSIS-002" in replied[0][0]
+
+    def test_edited_message_is_handled(self, monkeypatch):
+        from app.api.endpoints import message
+
+        settings = message.get_settings()
+        monkeypatch.setattr(settings, "telegram_whitelist", "", raising=False)
+        monkeypatch.setattr("app.services.subscribe_code", lambda code: True)
+        replied = []
+        monkeypatch.setattr(
+            "app.services.reply_text_msg",
+            lambda *args: replied.append(args) or True,
+        )
+
+        message.handle_telegram_update({
+            "edited_message": {"text": "abp-985", "chat": {"id": 1}, "message_id": 2},
+        })
+        assert len(replied) == 1
+
+    def test_empty_text_is_ignored(self, monkeypatch):
+        from app.api.endpoints import message
+
+        replied = []
+        monkeypatch.setattr(
+            "app.services.reply_text_msg",
+            lambda *args: replied.append(args) or True,
+        )
+        message.handle_telegram_update({"message": {"chat": {"id": 1}}})
+        assert replied == []
+
+
 class TestMessageAutoDownload:
     """订阅后是否立即检索，以及入库番号的跳过。"""
 

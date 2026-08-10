@@ -44,6 +44,9 @@ DEFAULT_FILTER = {
     "only_uhd": False,
     "only_free": False,
     "exclude_uhd": True,
+    "only_vr": False,
+    # VR 体积普遍很大且需专用播放器，默认排除
+    "exclude_vr": True,
     "include_keywords": "",
     "exclude_keywords": "",
     "min_size": "",
@@ -147,6 +150,8 @@ class Settings:
     telegram_chat_id: str = ""
     telegram_spoiler: bool = False
     telegram_whitelist: str = ""
+    # 上行消息的接收方式：webhook 需要公网 HTTPS，polling 靠长轮询主动取
+    telegram_receive_mode: str = "webhook"
 
     # --- 上行消息的番号订阅过滤 ---
     # 前缀名单，逗号分隔（如 NHDTB,SSIS）。白名单非空时只订阅名单内的前缀
@@ -168,6 +173,8 @@ class Settings:
     # --- 过滤排序 ---
     default_filter: dict = field(default_factory=lambda: dict(DEFAULT_FILTER))
     default_sort: str = DEFAULT_SORT
+    # 主站优先，逗号分隔可给多个。排序规则含 site 时生效，未列出的站排在后面
+    primary_site: str = ""
     max_actor: int = 3
 
     # --- 定时任务 ---
@@ -321,6 +328,7 @@ def load_settings() -> Settings:
         telegram_chat_id=_env("TELEGRAM_CHAT_ID"),
         telegram_spoiler=_env_bool("TELEGRAM_SPOILER"),
         telegram_whitelist=_env("TELEGRAM_WHITELIST"),
+        telegram_receive_mode=_env("TELEGRAM_RECEIVE_MODE", "webhook").lower(),
 
         msg_allow_prefixes=_env("MSG_ALLOW_PREFIXES"),
         msg_block_prefixes=_env("MSG_BLOCK_PREFIXES"),
@@ -334,6 +342,7 @@ def load_settings() -> Settings:
 
         default_filter=_env_json("DEFAULT_FILTER", dict(DEFAULT_FILTER)),
         default_sort=_env("DEFAULT_SORT", DEFAULT_SORT).strip("'\""),
+        primary_site=_env("PRIMARY_SITE"),
         max_actor=_env_int("MAX_ACTOR", 3),
 
         sync_hot_time=_env("SYNC_HOT_TIME", "0 */2 * * *").strip("'\""),

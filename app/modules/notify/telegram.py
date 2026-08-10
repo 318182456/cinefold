@@ -1,6 +1,7 @@
-"""Telegram 消息推送。
+"""Telegram 消息推送与上行消息接收。
 
-直接调 Bot API，不引入 telebot 依赖——只需要发消息，没必要跑 polling。
+直接调 Bot API，不引入 telebot 依赖。上行消息支持两种方式：
+webhook 由 Telegram 回调本机（需公网 HTTPS），polling 靠 getUpdates 主动取。
 """
 from __future__ import annotations
 
@@ -126,3 +127,74 @@ class TelegramNotifier:
                 return True, f"连接成功，Bot @{name}"
         except Exception as exc:
             return False, str(exc)
+
+    # ------------------------------------------------------------------
+    # 上行消息接收
+    # ------------------------------------------------------------------
+    def get_webhook_info(self) -> dict:
+        """当前 webhook 状态。失败时返回空字典。"""
+        if not self.token:
+            return {}
+        try:
+            with self._client() as client:
+                response = client.get(self._api("getWebhookInfo"))
+                response.raise_for_status()
+                return response.json().get("result") or {}
+        except Exception as exc:
+            logger.warning(f"获取 webhook 信息失败: {exc}")
+            return {}
+
+    def set_webhook(self, url: str) -> tuple[bool, str]:
+        """把 webhook 指向 url。"""
+        if not self.token:
+            return False, "未配置 Telegram Bot Token"
+        if not url:
+            return False, "外网地址为空"
+        try:
+            with self._client() as client:
+                response = client.post(
+                    self._api("setWebhook"),
+                    # 只关心消息，其余更新类型不必推过来
+                    json={"url": url, "allowed_updates": ["message", "edited_message"]},
+                )
+                payload = response.json()
+            if not payload.get("ok"):
+                return False, payload.get("description", "设置失败")
+            return True, "webhook 设置成功"
+        except Exception as exc:
+            return False, str(exc)
+
+    def delete_webhook(self, drop_pending: bool = False) -> tuple[bool, str]:
+        """删除 webhook。切到 polling 前必须先删，两者互斥。"""
+        if not self.token:
+            return False, "未配置 Telegram Bot Token"
+        try:
+            with self._client() as client:
+                response = client.post(
+                    self._api("deleteWebhook"),
+                    json={"drop_pending_updates": drop_pending},
+                )
+                payload = response.json()
+            if not payload.get("ok"):
+                return False, payload.get("description", "删除失败")
+            return True, "webhook 已删除"
+        except Exception as exc:
+            return False, str(exc)
+
+    def get_updates(self, offset: int = 0, timeout: int = 30) -> list[dict]:
+        """长轮询拉取更新。
+
+        读超时要比 timeout 更长，否则长连接会被客户端提前掐断。
+        """
+        if not self.token:
+            return []
+        params = {
+            "timeout": timeout,
+            "allowed_updates": ["message", "edited_message"],
+        }
+        if offset:
+            params["offset"] = offset
+        with httpx.Client(timeout=timeout + 15, proxy=self.proxy) as client:
+            response = client.post(self._api("getUpdates"), json=params)
+            response.raise_for_status()
+            return response.json().get("result") or []
