@@ -515,3 +515,193 @@ class TestDownloadCodesAsync:
             lambda func, *a, **kw: (_ for _ in ()).throw(AssertionError("不该起线程")),
         )
         services.download_codes_async([])
+
+
+class TestDownloadedStatusFix:
+    """有下载记录却卡在 SUBSCRIBED 的番号要被补正，否则每轮都重搜。"""
+
+    def _prepare(self, code, status):
+        from app.database.base import DBBase
+        from app.database.models import Code, CodeStatus, History
+        from app.database.session import engine, session_scope
+
+        DBBase.metadata.create_all(engine)
+        with session_scope() as session:
+            session.merge(Code(code=code, status=status))
+            session.merge(History(hash=f"hash-{code}", code=code))
+        return CodeStatus
+
+    def test_status_is_corrected_to_downloading(self):
+        from app import services
+        from app.database.models import Code, CodeStatus
+        from app.database.session import session_scope
+
+        code = "FIXME-001"
+        self._prepare(code, CodeStatus.SUBSCRIBED)
+
+        assert services.download_torrent(code) is False
+        with session_scope() as session:
+            assert session.get(Code, code).status == CodeStatus.DOWNLOADING
+
+    def test_other_status_is_left_alone(self):
+        """已完成的不该被拉回下载中。"""
+        from app import services
+        from app.database.models import Code, CodeStatus
+        from app.database.session import session_scope
+
+        code = "FIXME-002"
+        self._prepare(code, CodeStatus.DOWNLOADED)
+
+        assert services.download_torrent(code) is False
+        with session_scope() as session:
+            assert session.get(Code, code).status == CodeStatus.DOWNLOADED
+
+
+class TestLocalCodeSearch:
+    """本地库命中，避免每次都去远程抓情报。"""
+
+    def _seed(self, code, title="标题"):
+        from app.database.base import DBBase
+        from app.database.models import Code
+        from app.database.session import engine, session_scope
+
+        DBBase.metadata.create_all(engine)
+        with session_scope() as session:
+            session.merge(Code(code=code, title=title))
+
+    def test_input_without_hyphen_hits_local(self):
+        """用户输入 jul915，库里存的是 JUL-915。"""
+        from app import services
+
+        self._seed("JUL-915")
+        found = services.search_code("jul915")
+        assert [i["code"] for i in found] == ["JUL-915"]
+
+    def test_exact_code_still_works(self):
+        from app import services
+
+        self._seed("ABP-777")
+        assert [i["code"] for i in services.search_code("ABP-777")] == ["ABP-777"]
+
+    def test_title_search_still_works(self):
+        from app import services
+
+        self._seed("SSIS-888", title="独特的标题关键词")
+        found = services.search_code("独特的标题")
+        assert [i["code"] for i in found] == ["SSIS-888"]
+
+    def test_blank_keyword_returns_empty(self):
+        from app import services
+
+        assert services.search_code("   ") == []
+
+
+class TestCacheRemoteCodes:
+    """远程抓回的情报要落库，且不能动已有状态。"""
+
+    def test_new_code_is_saved(self):
+        from app import services
+        from app.database.base import DBBase
+        from app.database.models import Code
+        from app.database.session import engine, session_scope
+
+        DBBase.metadata.create_all(engine)
+        services.cache_remote_codes([{"code": "NEW-001", "title": "新标题"}])
+
+        with session_scope() as session:
+            row = session.get(Code, "NEW-001")
+            assert row is not None and row.title == "新标题"
+
+    def test_existing_status_is_preserved(self):
+        """已订阅的番号不能被远程数据重置状态。"""
+        from app import services
+        from app.database.base import DBBase
+        from app.database.models import Code, CodeStatus
+        from app.database.session import engine, session_scope
+
+        DBBase.metadata.create_all(engine)
+        with session_scope() as session:
+            session.merge(Code(code="KEEP-001", status=CodeStatus.SUBSCRIBED))
+
+        services.cache_remote_codes([
+            {"code": "KEEP-001", "title": "补上标题", "status": CodeStatus.NONE},
+        ])
+
+        with session_scope() as session:
+            row = session.get(Code, "KEEP-001")
+            assert row.status == CodeStatus.SUBSCRIBED
+            assert row.title == "补上标题"
+
+    def test_existing_value_is_not_overwritten(self):
+        from app import services
+        from app.database.base import DBBase
+        from app.database.models import Code
+        from app.database.session import engine, session_scope
+
+        DBBase.metadata.create_all(engine)
+        with session_scope() as session:
+            session.merge(Code(code="KEEP-002", title="原标题"))
+
+        services.cache_remote_codes([{"code": "KEEP-002", "title": "远程标题"}])
+
+        with session_scope() as session:
+            assert session.get(Code, "KEEP-002").title == "原标题"
+
+    def test_empty_input_is_noop(self):
+        from app import services
+        assert services.cache_remote_codes([]) == 0
+
+
+class TestRousiTokenCache:
+    """token 缓存在类上，避免每次搜索都重新登录。"""
+
+    def test_login_once_across_instances(self, monkeypatch):
+        from app.modules.ptsite.rousi import Rousi
+
+        Rousi.reset_token_cache()
+        logins = []
+
+        def _login(self):
+            logins.append(1)
+            # 不带 exp 的 token，_is_expiring 解不出时视为有效
+            return "fake.token.value"
+
+        monkeypatch.setattr(Rousi, "_login", _login)
+        monkeypatch.setattr(
+            Rousi, "__init__",
+            lambda self, **kw: self.__dict__.update(
+                host="h", passkey="", username="u", password="p",
+                proxy=None, _token="",
+            ),
+        )
+
+        assert Rousi().token == "fake.token.value"
+        assert Rousi().token == "fake.token.value"
+        assert Rousi().token == "fake.token.value"
+        assert len(logins) == 1
+
+        Rousi.reset_token_cache()
+
+    def test_reset_forces_relogin(self, monkeypatch):
+        from app.modules.ptsite.rousi import Rousi
+
+        Rousi.reset_token_cache()
+        logins = []
+        monkeypatch.setattr(
+            Rousi, "_login",
+            lambda self: logins.append(1) or "fake.token.value",
+        )
+        monkeypatch.setattr(
+            Rousi, "__init__",
+            lambda self, **kw: self.__dict__.update(
+                host="h", passkey="", username="u", password="p",
+                proxy=None, _token="",
+            ),
+        )
+
+        Rousi().token
+        Rousi.reset_token_cache()
+        Rousi().token
+        assert len(logins) == 2
+
+        Rousi.reset_token_cache()

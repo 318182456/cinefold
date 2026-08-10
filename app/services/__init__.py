@@ -8,7 +8,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from loguru import logger
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 
 from app.core.config import get_settings
 from app.database.models import Actor, Code, CodeStatus, History
@@ -22,10 +22,21 @@ from app.utils.filters import filter_torrents, sort_torrents
 # ======================================================================
 # 搜索
 # ======================================================================
-def search_torrents(code: str, use_filter: bool = True) -> list[Torrent]:
-    """搜索番号对应的种子，按配置过滤排序后返回。"""
+# 全站检索一个番号要十几秒，短时间内重复搜同一个番号的场景很常见
+# （消息重投、手动重试、订阅任务与消息订阅撞车）。缓存原始结果，
+# 过滤排序仍每次现算，改了过滤条件不必等缓存过期。
+TORRENT_CACHE_TTL = 1800
+
+
+def search_torrents(
+    code: str, use_filter: bool = True, refresh: bool = False
+) -> list[Torrent]:
+    """搜索番号对应的种子，按配置过滤排序后返回。
+
+    refresh=True 时跳过缓存强制重搜。
+    """
     settings = get_settings()
-    torrents = ptsite.search_pt(code)
+    torrents = _search_pt_cached(code, refresh=refresh)
     if not torrents:
         return []
 
@@ -36,6 +47,31 @@ def search_torrents(code: str, use_filter: bool = True) -> list[Torrent]:
         torrents = filter_torrents(torrents, settings.default_filter)
 
     return sort_torrents(torrents, settings.default_sort, build_site_priority())
+
+
+def _search_pt_cached(code: str, refresh: bool = False) -> list[Torrent]:
+    """带缓存的全站检索。缓存的是各站返回的原始种子列表。"""
+    import json
+
+    key = code.upper()
+    if not refresh:
+        cached = get_rank_cache("torrent", key, ttl=TORRENT_CACHE_TTL)
+        if cached:
+            try:
+                items = json.loads(cached)
+                logger.info(f"[{code}] 命中检索缓存，{len(items)} 个种子")
+                return [Torrent.from_dict(item) for item in items]
+            except (ValueError, TypeError):
+                logger.debug(f"[{code}] 检索缓存解析失败，重新搜索")
+
+    torrents = ptsite.search_pt(code)
+    # 空结果也缓存：搜不到的番号往往一段时间内都搜不到，
+    # 否则每次重投消息都要再跑一轮全站检索
+    set_rank_cache(
+        "torrent", key,
+        json.dumps([t.to_dict() for t in torrents], ensure_ascii=False),
+    )
+    return torrents
 
 
 def build_site_priority() -> list[str]:
@@ -67,16 +103,70 @@ def find_torrent(code: str) -> Torrent | None:
 
 
 def search_code(keyword: str, limit: int = 50) -> list[dict]:
-    """在本地库中按番号或标题搜索。"""
+    """在本地库中按番号或标题搜索。
+
+    用户常输入不带横杠的写法（jul915），库里存的是标准形式（JUL-915），
+    直接 LIKE 匹配不上会白跑一趟远程抓取，所以先按番号规则归一化再查。
+    """
+    from app.utils import get_true_code
+
+    keyword = (keyword or "").strip()
+    if not keyword:
+        return []
+
+    conditions = []
+    pattern = f"%{keyword}%"
+    conditions.append(Code.code.like(pattern))
+    conditions.append(Code.title.like(pattern))
+    conditions.append(Code.cn_title.like(pattern))
+
+    normalized = get_true_code(keyword)
+    if normalized and normalized.upper() != keyword.upper():
+        conditions.append(Code.code.like(f"%{normalized}%"))
+
     with session_scope() as session:
-        pattern = f"%{keyword}%"
         rows = session.scalars(
             select(Code)
-            .where(Code.code.like(pattern) | Code.title.like(pattern) | Code.cn_title.like(pattern))
+            .where(or_(*conditions))
             .order_by(Code.release_date.desc())
             .limit(limit)
         ).all()
         return [row.to_dict() for row in rows]
+
+
+def cache_remote_codes(items: list[dict]) -> int:
+    """把远程搜到的番号情报落库，下次搜同一个番号直接走本地。
+
+    只补空字段，不覆盖已有值，更不动 status——库里可能已经订阅或下载过了。
+    """
+    if not items:
+        return 0
+
+    # 番号之外的字段才值得写库，status 之类的状态字段绝不能被远程数据带跑
+    skip = {"code", "status", "create_time", "update_time"}
+    saved = 0
+
+    with session_scope() as session:
+        for item in items:
+            code = (item.get("code") or "").strip().upper()
+            if not code:
+                continue
+
+            row = session.get(Code, code)
+            if row is None:
+                row = Code(code=code)
+                session.add(row)
+
+            for key, value in item.items():
+                if key in skip or not value:
+                    continue
+                if hasattr(row, key) and not getattr(row, key):
+                    setattr(row, key, value)
+            saved += 1
+
+    if saved:
+        logger.info(f"已缓存 {saved} 个番号情报")
+    return saved
 
 
 def search_actor(keyword: str, limit: int = 50) -> list[dict]:
@@ -111,13 +201,17 @@ def download_torrent(code: str, torrent: Torrent | None = None) -> bool:
         _update_code_status(code, CodeStatus.COMPLETED)
         return False
 
+    # 查历史比搜种便宜得多，放在搜索前面短路，省掉一轮全站检索
+    if _is_downloaded(code):
+        # 已推过下载器却仍是待下载，说明状态没跟上，补正一次；
+        # 否则每轮订阅任务都会重新搜一遍，番号永远留在订阅列表里
+        logger.info(f"[{code}] 已下载过，跳过")
+        _sync_status_from_history(code)
+        return False
+
     torrent = torrent or find_torrent(code)
     if torrent is None:
         logger.info(f"[{code}] 未搜到符合条件的种子")
-        return False
-
-    if _is_downloaded(code):
-        logger.info(f"[{code}] 已下载过，跳过")
         return False
 
     client = downloadclient.get_download_client()
@@ -161,6 +255,20 @@ def _is_downloaded(code: str) -> bool:
         return session.scalar(
             select(func.count()).select_from(History).where(History.code == code)
         ) > 0
+
+
+def _sync_status_from_history(code: str) -> None:
+    """有下载记录却仍标记为待下载时，把状态补正为已推送。
+
+    sync_download_status 只扫 DOWNLOADING 的番号，卡在 SUBSCRIBED 的
+    永远等不到它接手，只能每轮重新搜索。这里补上这一跳。
+    """
+    with session_scope() as session:
+        row = session.get(Code, code)
+        if row is not None and row.status == CodeStatus.SUBSCRIBED:
+            row.status = CodeStatus.DOWNLOADING
+            row.update_time = datetime.now()
+            logger.info(f"[{code}] 有下载记录，状态补正为下载中")
 
 
 def _record_history(code: str, torrent_hash: str, save_path: str = "") -> None:

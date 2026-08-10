@@ -43,6 +43,16 @@ SEARCH_PAYLOAD = {
 }
 
 
+@pytest.fixture(autouse=True)
+def clear_token_cache():
+    """token 缓存在类上，不清掉会跨用例串味。"""
+    from app.modules.ptsite.rousi import Rousi
+
+    Rousi.reset_token_cache()
+    yield
+    Rousi.reset_token_cache()
+
+
 @pytest.fixture
 def site():
     from app.modules.ptsite.rousi import Rousi

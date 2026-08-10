@@ -32,6 +32,11 @@ TOKEN_REFRESH_MARGIN = 300
 class Rousi:
     name = "Rousi"
 
+    # 登录换来的 token 存在类上：get_sites() 每次搜索都会新建实例，
+    # 存在实例里等于每搜一个番号就重新登录一次
+    _shared_token: str = ""
+    _lock = threading.Lock()
+
     def __init__(
         self,
         token: str = "",
@@ -48,30 +53,39 @@ class Rousi:
         self.proxy = settings.proxy or None
 
         self._token = token or settings.rousi_token
-        self._lock = threading.Lock()
+
+    @classmethod
+    def reset_token_cache(cls) -> None:
+        """配置变更后调用，避免继续用旧账号换来的 token。"""
+        with Rousi._lock:
+            Rousi._shared_token = ""
 
     @property
     def enabled(self) -> bool:
-        return bool(self._token or (self.username and self.password))
+        return bool(self._token or self._shared_token
+                    or (self.username and self.password))
 
     # ------------------------------------------------------------------
     @property
     def token(self) -> str:
         """返回可用的 token，必要时自动登录换取。"""
-        if self._token and not self._is_expiring(self._token):
-            return self._token
+        # 手动配的优先，其次是上次登录缓存下来的
+        for candidate in (self._token, Rousi._shared_token):
+            if candidate and not self._is_expiring(candidate):
+                return candidate
 
         if not (self.username and self.password):
             # 只配了 token，过期也只能原样返回，由调用方看到 401
             return self._token
 
-        with self._lock:
+        with Rousi._lock:
             # 可能已被其他线程刷新
-            if self._token and not self._is_expiring(self._token):
-                return self._token
+            if Rousi._shared_token and not self._is_expiring(Rousi._shared_token):
+                return Rousi._shared_token
             fresh = self._login()
             if fresh:
-                self._token = fresh
+                Rousi._shared_token = fresh
+                return fresh
         return self._token
 
     @staticmethod

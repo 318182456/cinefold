@@ -78,6 +78,8 @@ def search_codes(keyword: str, current_user: str = Depends(get_current_user)):
     try:
         from app.modules import ladysite
         remote = ladysite.search_code(code or keyword)
+        # 抓回来的情报存进库，下次同一个番号直接走本地
+        services.cache_remote_codes(remote)
         return ResponseEntity.ok({"items": remote, "source": "remote"})
     except (ImportError, AttributeError):
         return ResponseEntity.ok({"items": [], "source": "local"})
