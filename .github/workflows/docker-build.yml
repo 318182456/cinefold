@@ -29,10 +29,29 @@ jobs:
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
+        with:
+          # 需要父提交才能比对 VERSION 是否变更
+          fetch-depth: 2
 
       - name: 读取版本号
         id: version
-        run: echo "value=$(cat VERSION | tr -d '[:space:]')" >> "$GITHUB_OUTPUT"
+        run: |
+          VALUE=$(cat VERSION | tr -d '[:space:]')
+          echo "value=$VALUE" >> "$GITHUB_OUTPUT"
+
+          # 只有发版（VERSION 变更）才更新 latest，
+          # 日常提交推送的镜像不覆盖它。打 tag 发版时也算。
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            echo "released=true" >> "$GITHUB_OUTPUT"
+            echo "打 tag 发版，将更新 latest"
+          elif git rev-parse HEAD~1 >/dev/null 2>&1 \
+            && [ "$(git show HEAD~1:VERSION 2>/dev/null | tr -d '[:space:]')" != "$VALUE" ]; then
+            echo "released=true" >> "$GITHUB_OUTPUT"
+            echo "VERSION 已变更为 $VALUE，将更新 latest"
+          else
+            echo "released=false" >> "$GITHUB_OUTPUT"
+            echo "VERSION 未变更（$VALUE），跳过 latest"
+          fi
 
       - name: 安装 Node
         uses: actions/setup-node@v4
@@ -91,7 +110,7 @@ jobs:
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
             name=docker.io/${{ secrets.DOCKERHUB_USERNAME }}/${{ env.DOCKERHUB_IMAGE }},enable=${{ steps.dockerhub.outputs.enabled == 'true' }}
           tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=latest,enable=${{ steps.version.outputs.released == 'true' }}
             type=raw,value=${{ steps.version.outputs.value }},enable={{is_default_branch}}
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
@@ -114,6 +133,11 @@ jobs:
           echo '```' >> "$GITHUB_STEP_SUMMARY"
           echo "${{ steps.meta.outputs.tags }}" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
+          if [ "${{ steps.version.outputs.released }}" = "true" ]; then
+            echo "> VERSION 为 ${{ steps.version.outputs.value }}，已更新 latest。" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "> VERSION 未变更，latest 仍指向上一个发布版本。" >> "$GITHUB_STEP_SUMMARY"
+          fi
           if [ "${{ steps.dockerhub.outputs.enabled }}" != "true" ]; then
             echo "> 未配置 DOCKERHUB_USERNAME / DOCKERHUB_TOKEN，本次只推送到 GHCR。" >> "$GITHUB_STEP_SUMMARY"
           fi
