@@ -17,7 +17,8 @@ class Library:
     name = "javlibrary"
 
     def __init__(self, host: str = ""):
-        self.client = SiteClient(host or HOST, interval=2.0)
+        # JavLibrary 直连稳定 403，配了 bypass 就直接走
+        self.client = SiteClient(host or HOST, interval=2.0, bypass_first=True)
 
     def crawling_top20(self, page: int = 1) -> list[str]:
         """最想看排行。"""

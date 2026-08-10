@@ -127,6 +127,8 @@ const GROUPS = [
     title: '其他',
     fields: [
       { k: 'proxy', label: 'HTTP/SOCKS 代理', ph: 'socks5://127.0.0.1:7890' },
+      { k: 'bypass_url', label: '反爬绕过服务', ph: 'http://127.0.0.1:8191/v1', hint: 'FlareSolverr 等，直连被拦时改走它' },
+      { k: 'image_proxy_hosts', label: '图片代理域名', hint: '逗号分隔，追加到内置白名单' },
       { k: 'javdb_host', label: 'JavDB 地址' },
       { k: 'external_domain', label: '外网访问地址' },
       { k: 'openai_url', label: 'AI 翻译接口' },

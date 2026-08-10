@@ -152,6 +152,8 @@ class Settings:
     external_domain: str = ""
     # 自建的反爬绕过服务地址（FlareSolverr 等），直连被拒时改走它
     bypass_url: str = ""
+    # 图片代理的额外允许域名，逗号分隔；与内置白名单合并而非替换
+    image_proxy_hosts: str = ""
 
     # --- 过滤排序 ---
     default_filter: dict = field(default_factory=lambda: dict(DEFAULT_FILTER))
@@ -311,6 +313,7 @@ def load_settings() -> Settings:
         proxy=_env("PROXY"),
         external_domain=_env("EXTERNAL_DOMAIN"),
         bypass_url=_env("BYPASS_URL") or _env("FLARE_SOLVERR_URL"),
+        image_proxy_hosts=_env("IMAGE_PROXY_HOSTS"),
 
         default_filter=_env_json("DEFAULT_FILTER", dict(DEFAULT_FILTER)),
         default_sort=_env("DEFAULT_SORT", DEFAULT_SORT).strip("'\""),

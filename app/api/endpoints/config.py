@@ -102,7 +102,16 @@ def test_connection(target: str, current_user: str = Depends(get_current_user)):
         return ResponseEntity.fail(f"不支持的测试目标 {target}", code=400)
 
     try:
-        ok, message = factory().test_connection()
+        instance = factory()
+        # 下载器/媒体服务器/通知用 test_connection，PT 站点用 check_status
+        tester = getattr(instance, "test_connection", None) or getattr(
+            instance, "check_status", None
+        )
+        if tester is None:
+            return ResponseEntity.ok(
+                {"success": False, "message": f"{target} 不支持连接测试"}
+            )
+        ok, message = tester()
         return ResponseEntity.ok({"success": ok, "message": message})
     except Exception as exc:
         return ResponseEntity.ok({"success": False, "message": str(exc)})

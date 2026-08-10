@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import random
+import ssl
 import threading
 import time
 from dataclasses import dataclass, field
@@ -20,6 +21,9 @@ _BYPASS_KIND: dict[str, bool] = {}
 
 # 解 Cloudflare 挑战要跑一个真实浏览器，给足时间（毫秒）
 BYPASS_SOLVE_TIMEOUT_MS = 90000
+
+# 连接类异常（SSL EOF、连接重置）的额外重试次数
+CONNECT_RETRIES = 1
 
 # FlareSolverr 每个会话独占一个浏览器实例，并发请求会互相拖慢甚至超时，
 # 因此同一时刻只允许一个请求进入。
@@ -89,10 +93,18 @@ class SiteClient:
     每个站点实例维护自己的节流锁，避免请求过密被封。
     """
 
-    def __init__(self, host: str, cookie: str = "", interval: float = MIN_INTERVAL_SECONDS):
+    def __init__(
+        self,
+        host: str,
+        cookie: str = "",
+        interval: float = MIN_INTERVAL_SECONDS,
+        bypass_first: bool = False,
+    ):
         self.host = host.rstrip("/")
         self.cookie = cookie
         self.interval = interval
+        # 已知常年过盾的站点置 True，省掉一次必然 403 的直连
+        self.bypass_first = bypass_first
         self._last_request = 0.0
         self._lock = threading.Lock()
 
@@ -121,34 +133,52 @@ class SiteClient:
         """GET 请求，返回文本。失败返回空串。
 
         默认超时偏短：抓取由定时任务驱动，单站不通时应尽快让位给下一个站点。
-        配置了 BYPASS_URL 时，直连遇到 403/503 会自动改走该服务重试一次。
+        配置了 BYPASS_URL 时，直连遇到 403/503 会自动改走该服务重试一次；
+        站点声明了 bypass_first 则跳过直连，直接走该服务。
         """
         settings = get_settings()
         url = path if path.startswith("http") else f"{self.host}{path}"
-        self._throttle()
 
-        try:
-            with httpx.Client(
-                timeout=timeout,
-                follow_redirects=True,
-                proxy=settings.proxy or None,
-                verify=False,
-                # 只认配置里的 PROXY，避免被宿主机环境变量里的代理劫持
-                trust_env=False,
-            ) as client:
-                response = client.get(
-                    url, headers=self.headers(kwargs.pop("headers", None)), params=params
-                )
-                response.raise_for_status()
-                return response.text
-        except httpx.HTTPStatusError as exc:
-            status = exc.response.status_code
-            if status in (403, 503):
-                logger.info(f"{url} 返回 {status}，尝试通过 bypass 服务获取")
-                return fetch_via_bypass(url, params, timeout)
-            logger.warning(f"请求 {url} 失败: {status}")
-        except Exception as exc:
-            logger.warning(f"请求 {url} 异常: {exc}")
+        # 直连必被拦的站点，配了 bypass 就不必先撞一次 403
+        if self.bypass_first and settings.bypass_url:
+            return fetch_via_bypass(url, params, timeout)
+
+        headers = self.headers(kwargs.pop("headers", None))
+
+        for attempt in range(CONNECT_RETRIES + 1):
+            self._throttle()
+            try:
+                with httpx.Client(
+                    timeout=timeout,
+                    follow_redirects=True,
+                    proxy=settings.proxy or None,
+                    verify=False,
+                    # 只认配置里的 PROXY，避免被宿主机环境变量里的代理劫持
+                    trust_env=False,
+                ) as client:
+                    response = client.get(url, headers=headers, params=params)
+                    response.raise_for_status()
+                    return response.text
+            except httpx.HTTPStatusError as exc:
+                status = exc.response.status_code
+                if status in (403, 503):
+                    logger.info(f"{url} 返回 {status}，尝试通过 bypass 服务获取")
+                    return fetch_via_bypass(url, params, timeout)
+                logger.warning(f"请求 {url} 失败: {status}")
+                return ""
+            except httpx.TimeoutException as exc:
+                # 超时不重试：站点本来就慢，再等一轮只会拖住后面的站点
+                logger.warning(f"请求 {url} 超时: {exc}")
+                return ""
+            except (httpx.TransportError, ssl.SSLError) as exc:
+                # SSL EOF、连接重置这类抖动重试一次多半就好，节流已保证不会打太密
+                if attempt < CONNECT_RETRIES:
+                    logger.debug(f"请求 {url} 连接异常，重试: {exc}")
+                    continue
+                logger.warning(f"请求 {url} 异常: {exc}")
+            except Exception as exc:
+                logger.warning(f"请求 {url} 异常: {exc}")
+                return ""
         return ""
 
 
