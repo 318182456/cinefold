@@ -35,6 +35,8 @@ def init_byte_muse() -> None:
 async def lifespan(app: FastAPI):
     init_byte_muse()
     yield
+    from app.api.endpoints.picproxy import close_client
+    await close_client()
     from app.scheduler import stop_scheduler
     stop_scheduler()
     logger.info("byte-muse 已停止")
@@ -57,9 +59,11 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
-    from app.api.endpoints import actors, admin, config, message, picproxy, subscribe
+    from app.api.endpoints import (
+        actors, admin, config, message, migrate, picproxy, subscribe,
+    )
 
-    for module in (admin, config, subscribe, actors, picproxy, message):
+    for module in (admin, config, subscribe, actors, picproxy, message, migrate):
         app.include_router(module.router, prefix=API_PREFIX)
 
     @app.exception_handler(Exception)

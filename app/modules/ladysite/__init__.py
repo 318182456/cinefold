@@ -91,9 +91,8 @@ def get_rank_codes(rank_type: str = "", pages: int = 1) -> list[str]:
 
 
 def get_rank(rank_type: str = "") -> list[dict]:
-    """排行榜，带详情。供 API 直接返回。"""
-    codes = get_rank_codes(rank_type, 1)
-    return [{"code": code} for code in codes]
+    """排行榜番号列表。只含番号，详情由服务层补。"""
+    return [{"code": code} for code in get_rank_codes(rank_type, 1)]
 
 
 def get_actor_rank() -> list[dict]:

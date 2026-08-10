@@ -25,6 +25,19 @@ BRANDS: dict[str, str] = {
     "dasdas": "https://dasdas.jp",
 }
 
+# 官网上的品牌名，用于前端展示
+BRAND_LABELS: dict[str, str] = {
+    "s1": "S1 NO.1 STYLE",
+    "moodyz": "MOODYZ",
+    "ideapocket": "IDEA POCKET",
+    "madonna": "Madonna",
+    "wanz": "WANZ FACTORY",
+    "attackers": "ATTACKERS",
+    "premium": "PREMIUM",
+    "honnaka": "本中",
+    "dasdas": "DAS!",
+}
+
 
 class Brands:
     name = "brands"
@@ -97,10 +110,31 @@ class Brands:
 
 
 def crawl_recent(brand: str, days: int = 3) -> list[str]:
-    """抓取最近几天的新片。"""
+    """抓取最近几天的新片，只返回番号。"""
+    return [item["code"] for item in crawl_range(brand, past_days=days, future_days=0)]
+
+
+def crawl_range(brand: str, past_days: int = 3, future_days: int = 0) -> list[dict]:
+    """按日期区间抓番号，返回 [{code, date}]。
+
+    厂牌官网的 /works/date 页对未来日期同样有数据，用它就能看到预定发布的作品。
+    """
     site = Brands(brand)
-    codes: list[str] = []
-    for offset in range(days):
-        day = (date.today() - timedelta(days=offset)).strftime("%Y-%m-%d")
-        codes.extend(site.get_date_rank(day))
-    return list(dict.fromkeys(codes))
+    out: list[dict] = []
+    seen: set[str] = set()
+
+    # 从最远的未来排到最早的过去，让即将发布的排在前面
+    offsets = list(range(future_days, 0, -1)) + [0] + [-d for d in range(1, past_days)]
+    for offset in offsets:
+        day = (date.today() + timedelta(days=offset)).strftime("%Y-%m-%d")
+        try:
+            codes = site.get_date_rank(day)
+        except Exception as exc:
+            logger.debug(f"[{brand}] 抓取 {day} 失败: {exc}")
+            continue
+        for code in codes:
+            if code in seen:
+                continue
+            seen.add(code)
+            out.append({"code": code, "release_date": day, "brand": brand})
+    return out

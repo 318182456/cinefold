@@ -1,6 +1,6 @@
 <script setup>
 import { computed, ref } from 'vue'
-import { proxyImage, subscribeCode, cancelCode, downloadCode } from '@/api'
+import { codeCover, subscribeCode, cancelCode, downloadCode } from '@/api'
 import { useToast } from '@/composables/useToast'
 import { useConfigStore } from '@/stores/config'
 
@@ -26,7 +26,7 @@ const STATUS = {
 const status = computed(() => STATUS[props.item.status] ?? STATUS[0])
 const subscribed = computed(() => props.item.status >= 1)
 const title = computed(() => props.item.cn_title || props.item.title || '')
-const cover = computed(() => proxyImage(props.item.banner || props.item.poster))
+const cover = computed(() => codeCover(props.item))
 
 // 图片模式跟随后端配置
 const imageClass = computed(() => {

@@ -419,6 +419,141 @@ def fill_lack_actors_by_list(names: list[str]) -> int:
 
 
 # ======================================================================
+# 榜单与厂牌
+# ======================================================================
+# 榜单页每次现抓要等十几秒，缓存一段时间；日榜一天只变一次，半小时足够新鲜
+RANK_CACHE_TTL = 1800
+BRAND_CACHE_TTL = 3600
+
+# 单次请求最多现抓多少条详情。剩下的留给「补全缺图」定时任务慢慢补，
+# 否则打开榜单页要等几十次串行抓取。
+DETAIL_FETCH_LIMIT = 8
+
+
+def _rows_by_code(codes: list[str]) -> dict[str, dict]:
+    """批量取库里已有的番号详情。"""
+    if not codes:
+        return {}
+    with session_scope() as session:
+        rows = session.scalars(select(Code).where(Code.code.in_(codes))).all()
+        return {row.code: row.to_dict() for row in rows}
+
+
+def _has_detail(item: dict) -> bool:
+    return bool(item.get("title")) and bool(item.get("banner") or item.get("poster"))
+
+
+def enrich_codes(codes: list[str], fetch_limit: int | None = None) -> list[dict]:
+    """把番号列表补成带标题封面的完整条目。
+
+    先查本地库，缺的现抓一小批并入库，其余留空由定时任务补。
+    榜单接口只拿到番号，不补的话前端只能显示一排光秃秃的番号。
+
+    fetch_limit 传 None 时读模块级默认值，这样运行时调整能立即生效。
+    """
+    if not codes:
+        return []
+
+    limit = DETAIL_FETCH_LIMIT if fetch_limit is None else fetch_limit
+
+    known = _rows_by_code(codes)
+    missing = [c for c in codes if not _has_detail(known.get(c, {}))]
+
+    if missing:
+        # 先确保这些番号在库里，后续补全和订阅都依赖行存在
+        _ensure_codes(missing)
+
+        fetched = 0
+        for code in missing:
+            if fetched >= limit:
+                break
+            if fill_lack_codes_by_list([code]):
+                fetched += 1
+        if fetched:
+            known = _rows_by_code(codes)
+
+    out = []
+    for code in codes:
+        out.append(known.get(code) or {"code": code, "status": CodeStatus.NONE})
+    return out
+
+
+def _ensure_codes(codes: list[str]) -> None:
+    """番号占位入库，已存在则跳过。"""
+    from app.database.session import batch_insert_ignore_duplicate
+
+    with session_scope() as session:
+        batch_insert_ignore_duplicate(
+            session, Code, [{"code": c} for c in codes]
+        )
+
+
+def get_rank_items(rank_type: str = "") -> list[dict]:
+    """榜单，带详情与缓存。"""
+    import json
+
+    key = (rank_type or "daily").strip().lower()
+    cached = get_rank_cache("rank", key, ttl=RANK_CACHE_TTL)
+    if cached:
+        try:
+            return json.loads(cached)
+        except ValueError:
+            logger.debug("榜单缓存解析失败，重新抓取")
+
+    try:
+        from app.modules import ladysite
+        codes = [item["code"] for item in ladysite.get_rank(rank_type) if item.get("code")]
+    except (ImportError, AttributeError):
+        return []
+
+    items = enrich_codes(codes)
+    if items:
+        set_rank_cache("rank", key, json.dumps(items, ensure_ascii=False, default=str))
+    return items
+
+
+def get_brand_items(brand: str, past_days: int = 7, future_days: int = 14) -> list[dict]:
+    """某个厂牌的新片与预定发布，带详情与缓存。
+
+    future_days 覆盖官网已挂出的预定发布日期，这是旧版「未来预定发布」的来源。
+    """
+    import json
+
+    key = f"{brand}:{past_days}:{future_days}"
+    cached = get_rank_cache("brand", key, ttl=BRAND_CACHE_TTL)
+    if cached:
+        try:
+            return json.loads(cached)
+        except ValueError:
+            logger.debug("厂牌缓存解析失败，重新抓取")
+
+    try:
+        from app.modules.ladysite.brands import crawl_range
+        found = crawl_range(brand, past_days=past_days, future_days=future_days)
+    except Exception as exc:
+        logger.warning(f"厂牌 {brand} 抓取失败: {exc}")
+        return []
+
+    codes = [item["code"] for item in found]
+    items = enrich_codes(codes)
+
+    # 官网日期页给的发行日比详情页可靠，且预定发布的作品详情页可能还没上线
+    dates = {item["code"]: item["release_date"] for item in found}
+    today = datetime.now().strftime("%Y-%m-%d")
+    for item in items:
+        day = dates.get(item.get("code"), "")
+        if day:
+            item["release_date"] = day
+            item["upcoming"] = day > today
+
+    items.sort(key=lambda i: i.get("release_date") or "", reverse=True)
+
+    if items:
+        set_rank_cache("brand", key, json.dumps(items, ensure_ascii=False, default=str))
+    return items
+
+
+# ======================================================================
 # 通知
 # ======================================================================
 def _code_display(code: str) -> tuple[str, str]:
@@ -507,7 +642,12 @@ def _cache_key(namespace: str, key: str) -> str:
     return f"byte-muse:{namespace}:{key}"
 
 
-def get_rank_cache(namespace: str, key: str) -> str | None:
+def get_rank_cache(namespace: str, key: str, ttl: int = 0) -> str | None:
+    """读缓存。ttl > 0 时，落库的快照超过该秒数即视为失效。
+
+    Redis 自己会过期，数据库缓存没有这个机制，得靠 create_time 判断，
+    否则榜单会一直返回第一次抓到的那份快照。
+    """
     from app.core import redis as redis_cache
 
     cached = redis_cache.get(_cache_key(namespace, key))
@@ -519,7 +659,13 @@ def get_rank_cache(namespace: str, key: str) -> str | None:
         row = session.scalar(
             select(Cache).where(Cache.namespace == namespace, Cache.key == key)
         )
-        return row.content if row else None
+        if row is None:
+            return None
+        if ttl > 0 and row.create_time:
+            age = (datetime.now() - row.create_time).total_seconds()
+            if age > ttl:
+                return None
+        return row.content
 
 
 def set_rank_cache(namespace: str, key: str, content: str) -> None:

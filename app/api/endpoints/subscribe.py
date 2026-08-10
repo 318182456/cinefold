@@ -162,14 +162,12 @@ def recommend(limit: int = 20, current_user: str = Depends(get_current_user)):
 
 @router.get("/rank")
 def rank(rank_type: str = "", current_user: str = Depends(get_current_user)):
-    """榜单。资源站未接入时返回本地高分番号。"""
-    try:
-        from app.modules import ladysite
-        items = ladysite.get_rank(rank_type)
-        if items:
-            return ResponseEntity.ok({"items": items})
-    except (ImportError, AttributeError):
-        pass
+    """榜单，带标题封面。抓不到时返回本地高分番号。"""
+    from app import services
+
+    items = services.get_rank_items(rank_type)
+    if items:
+        return ResponseEntity.ok({"items": items})
 
     return recommend(limit=30, current_user=current_user)
 
@@ -189,15 +187,48 @@ def hot(current_user: str = Depends(get_current_user)):
 
 @router.get("/brands")
 def brands(current_user: str = Depends(get_current_user)):
-    """厂牌列表。"""
+    """可抓取的厂牌列表，附带库中已出现过的发行商。"""
+    from app.modules.ladysite.brands import BRAND_LABELS, BRANDS
+
     with session_scope() as session:
         rows = session.execute(
-            select(Code.publisher, )
+            select(Code.publisher)
             .where(Code.publisher.isnot(None), Code.publisher != "")
             .distinct()
             .limit(100)
         ).all()
-        return ResponseEntity.ok({"items": [row[0] for row in rows]})
+
+    return ResponseEntity.ok({
+        # 支持按日期抓新片/预定发布的厂牌
+        "brands": [
+            {"key": key, "label": BRAND_LABELS.get(key, key)} for key in BRANDS
+        ],
+        # 库里已有的发行商，仅用于展示
+        "publishers": [row[0] for row in rows],
+    })
+
+
+@router.get("/brands/codes")
+def brand_codes(
+    brand: str,
+    past_days: int = 7,
+    future_days: int = 14,
+    current_user: str = Depends(get_current_user),
+):
+    """某厂牌的最新发布与预定发布作品。"""
+    from app import services
+    from app.modules.ladysite.brands import BRANDS
+
+    key = (brand or "").strip().lower()
+    if key not in BRANDS:
+        return ResponseEntity.fail(f"未知厂牌 {brand}", code=400)
+
+    items = services.get_brand_items(
+        key,
+        past_days=max(0, min(past_days, 60)),
+        future_days=max(0, min(future_days, 90)),
+    )
+    return ResponseEntity.ok({"items": items})
 
 
 @router.post("/codes/translate")

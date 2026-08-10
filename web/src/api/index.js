@@ -67,6 +67,11 @@ export const getRank = (rankType = '') => http.get('/rank', { params: { rank_typ
 export const subscribeRank = () => http.post('/rank/subscribe')
 export const getHot = () => http.get('/hot')
 export const getBrands = () => http.get('/brands')
+// 某厂牌的最新发布与预定发布
+export const getBrandCodes = (brand, pastDays = 7, futureDays = 14) =>
+  http.get('/brands/codes', {
+    params: { brand, past_days: pastDays, future_days: futureDays },
+  })
 
 // ---------------------------------------------------------------- 演员
 export const listActors = (params) => http.get('/actors', { params })
@@ -85,6 +90,29 @@ export const listCron = () => http.get('/cron')
 export const runTask = (jobId) => http.post('/task', null, { params: { job_id: jobId } })
 export const testConnection = (target) => http.get('/test', { params: { target } })
 
-// 图片走后端代理，绕过防盗链
-export const proxyImage = (url) =>
-  url ? `/api/v1/image-proxy?url=${encodeURIComponent(url)}` : ''
+// 图片走后端代理，绕过防盗链。
+// 带上番号后，后端按 pics/<番号>/banner.jpg 命中本地缓存，不必回源。
+export const proxyImage = (url, code = '', kind = 'banner') => {
+  if (!url) return ''
+  const params = new URLSearchParams({ url })
+  if (code) {
+    params.set('code', code)
+    params.set('kind', kind)
+  }
+  return `/api/v1/image-proxy?${params}`
+}
+
+// 番号封面。库里存了 local_banner 时优先用它，后端直接读盘不出网。
+export const codeCover = (item) => {
+  if (!item) return ''
+  const local = (item.local_banner || '').split(',')[0]
+  if (local) return `/api/v1/image-local?path=${encodeURIComponent(local)}`
+  return proxyImage(item.banner || item.poster, item.code)
+}
+
+// ---------------------------------------------------------------- 数据迁移
+export const listMigrateDatabases = () => http.get('/migrate/databases')
+export const getMigrateProgress = () => http.get('/migrate/progress')
+export const testMigrateTarget = (payload) => http.post('/migrate/test', payload)
+export const startMigrate = (payload) => http.post('/migrate/start', payload)
+export const getImageCacheStats = () => http.get('/image-cache/stats')
