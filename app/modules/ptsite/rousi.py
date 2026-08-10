@@ -9,5 +9,5 @@ class Rousi(NexusSite):
     name = "Rousi"
     host = "https://rousi.zip"
 
-    def __init__(self, cookie: str = ""):
-        super().__init__(cookie or get_settings().rousi_cookie)
+    def __init__(self, cookie: str = "", host: str = ""):
+        super().__init__(cookie or get_settings().rousi_cookie, host)

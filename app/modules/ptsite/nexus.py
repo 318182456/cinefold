@@ -5,6 +5,7 @@ rousi / ptt / nicept 都是 NexusPHP 架构，搜索页结构基本一致，
 """
 from __future__ import annotations
 
+import os
 import re
 from urllib.parse import urljoin
 
@@ -27,10 +28,14 @@ class NexusSite:
     host = ""
     search_path = "/torrents.php"
 
-    def __init__(self, cookie: str = ""):
+    def __init__(self, cookie: str = "", host: str = ""):
         settings = get_settings()
         self.cookie = cookie
         self.proxy = settings.proxy or None
+        # PT 站换域名较频繁，允许用 <NAME>_HOST 环境变量覆盖
+        override = host or os.getenv(f"{self.name.upper()}_HOST", "")
+        if override:
+            self.host = override.rstrip("/")
 
     @property
     def enabled(self) -> bool:
@@ -74,6 +79,14 @@ class NexusSite:
         # Cookie 失效时会被重定向到登录页
         if "takelogin.php" in html or "登录" in html[:500]:
             logger.warning(f"[{self.name}] Cookie 可能已失效")
+            return []
+
+        # 站点换域名后原地址只剩 JS 跳转页，页面很小且无种子表
+        if len(html) < 8000 and "torrents" not in html and "details.php" not in html:
+            logger.warning(
+                f"[{self.name}] {self.host} 返回的不是种子列表页，"
+                f"站点可能已更换域名，请更新配置"
+            )
             return []
 
         return self._parse(html, keyword)

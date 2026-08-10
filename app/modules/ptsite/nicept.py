@@ -9,5 +9,5 @@ class NicePT(NexusSite):
     name = "NicePT"
     host = "https://www.nicept.net"
 
-    def __init__(self, cookie: str = ""):
-        super().__init__(cookie or get_settings().nicept_cookie)
+    def __init__(self, cookie: str = "", host: str = ""):
+        super().__init__(cookie or get_settings().nicept_cookie, host)

@@ -142,6 +142,25 @@ class TestFactories:
         monkeypatch.setattr(settings, "wechat_corp_id", "")
         assert get_notifiers() == []
 
+    def test_nexus_host_override(self, monkeypatch):
+        """站点换域名时应能用环境变量覆盖，不必改代码。"""
+        from app.modules.ptsite.rousi import Rousi
+
+        assert Rousi(cookie="x").host == "https://rousi.zip"
+        assert Rousi(cookie="x", host="https://new.example.com/").host == "https://new.example.com"
+
+        monkeypatch.setenv("ROUSI_HOST", "https://env.example.com")
+        assert Rousi(cookie="x").host == "https://env.example.com"
+
+    def test_redirect_page_detected(self):
+        """换域名后的 JS 跳转页不应被当成空搜索结果静默吞掉。"""
+        from app.modules.ptsite.nexus import NexusSite
+
+        site = NexusSite(cookie="x")
+        site.host = "https://example.com"
+        # 小体积、无种子表的页面
+        assert site._parse("<html><body>Redirecting...</body></html>", "X") == []
+
     def test_disabled_sites_return_empty_search(self):
         """未配置凭证的站点搜索应安全返回空列表。"""
         from app.modules.ptsite.mteam import MTeam
