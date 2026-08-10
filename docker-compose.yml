@@ -1,5 +1,7 @@
 services:
   byte-muse:
+    # 用 GitHub Actions 构建好的镜像时，注释掉 build 换成下面的 image
+    # image: ghcr.io/318182456/byte-muse:latest
     build: .
     image: byte-muse:local
     container_name: byte-muse

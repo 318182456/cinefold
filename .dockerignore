@@ -8,6 +8,7 @@ data/
 *.db
 *.log
 .git/
+.github/
 .gitignore
 app.env
 .env

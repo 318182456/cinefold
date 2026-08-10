@@ -24,6 +24,7 @@ RUN pip install --no-cache-dir -r /app/requirements.txt
 
 COPY app /app/app
 COPY main.py /app/main.py
+COPY VERSION /app/VERSION
 
 # 前端构建产物；目录不存在时由 .dockerignore 之外的占位保证构建不失败
 COPY web/dist /usr/share/nginx/html

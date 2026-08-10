@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse
 from loguru import logger
 
 from app.core.config import get_settings
+from app.core.version import APP_VERSION
 from app.utils.log import setup_loguru_logger
 
 API_PREFIX = "/api/v1"
@@ -42,7 +43,7 @@ async def lifespan(app: FastAPI):
 def create_app() -> FastAPI:
     app = FastAPI(
         title="byte-muse",
-        version="2.0.0",
+        version=APP_VERSION,
         lifespan=lifespan,
         docs_url="/api/docs",
         openapi_url="/api/openapi.json",

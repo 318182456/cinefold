@@ -8,12 +8,13 @@ from pydantic import BaseModel
 
 from app.api.endpoints import get_current_user
 from app.core.config import SENSITIVE_KEYS, Settings, get_settings, save_settings
+from app.core.version import APP_VERSION
 from app.schemas.reponse import ResponseEntity
 from app.utils.log import read_logs
 
 router = APIRouter(tags=["config"])
 
-VERSION = "2.0.0"
+VERSION = APP_VERSION
 
 
 class ConfigRequest(BaseModel):
