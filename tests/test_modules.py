@@ -144,13 +144,13 @@ class TestFactories:
 
     def test_nexus_host_override(self, monkeypatch):
         """站点换域名时应能用环境变量覆盖，不必改代码。"""
-        from app.modules.ptsite.rousi import Rousi
+        from app.modules.ptsite.ptt import PTT
 
-        assert Rousi(cookie="x").host == "https://rousi.zip"
-        assert Rousi(cookie="x", host="https://new.example.com/").host == "https://new.example.com"
+        assert PTT(cookie="x").host == "https://www.pttime.org"
+        assert PTT(cookie="x", host="https://new.example.com/").host == "https://new.example.com"
 
-        monkeypatch.setenv("ROUSI_HOST", "https://env.example.com")
-        assert Rousi(cookie="x").host == "https://env.example.com"
+        monkeypatch.setenv("PTT_HOST", "https://env.example.com")
+        assert PTT(cookie="x").host == "https://env.example.com"
 
     def test_redirect_page_detected(self):
         """换域名后的 JS 跳转页不应被当成空搜索结果静默吞掉。"""
@@ -164,10 +164,12 @@ class TestFactories:
     def test_disabled_sites_return_empty_search(self):
         """未配置凭证的站点搜索应安全返回空列表。"""
         from app.modules.ptsite.mteam import MTeam
+        from app.modules.ptsite.ptt import PTT
         from app.modules.ptsite.rousi import Rousi
 
         assert MTeam(api_key="").search("ABP-984") == []
-        assert Rousi(cookie="").search("ABP-984") == []
+        assert PTT(cookie="").search("ABP-984") == []
+        assert Rousi(token="").search("ABP-984") == []
 
 
 class TestConfig:

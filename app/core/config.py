@@ -27,7 +27,8 @@ FALLBACK_ENV_FILES = (PROJECT_ROOT / "app.env", PROJECT_ROOT / ".env")
 SENSITIVE_KEYS = {
     "emby_api_key", "plex_token", "jellyfin_api_key",
     "qbittorrent_password", "transmission_password", "thunder_authorization",
-    "rousi_cookie", "ptt_cookie", "nicept_cookie",
+    "rousi_password", "rousi_token", "rousi_passkey",
+    "ptt_cookie", "nicept_cookie",
     "mteam_api_key", "wechat_corp_secret", "wechat_token",
     "wechat_encoding_aes_key", "telegram_bot_token", "secret_key",
     "cloudnas_password", "baidu_api_key", "google_api_key", "openai_api_key",
@@ -117,7 +118,12 @@ class Settings:
     thunder_authorization: str = ""
 
     # --- PT 站点 ---
-    rousi_cookie: str = ""
+    # Rousi 新站是前后端分离架构，用 Bearer token 而非 Cookie。
+    # 填了用户名密码就会自动登录续期，token 可留空。
+    rousi_username: str = ""
+    rousi_password: str = ""
+    rousi_token: str = ""
+    rousi_passkey: str = ""
     ptt_cookie: str = ""
     nicept_cookie: str = ""
     mteam_api_key: str = ""
@@ -263,7 +269,10 @@ def load_settings() -> Settings:
         thunder_file_id=_env("THUNDER_FILE_ID"),
         thunder_authorization=_env("THUNDER_AUTHORIZATION"),
 
-        rousi_cookie=_env("ROUSI_COOKIE"),
+        rousi_username=_env("ROUSI_USERNAME"),
+        rousi_password=_env("ROUSI_PASSWORD"),
+        rousi_token=_env("ROUSI_TOKEN"),
+        rousi_passkey=_env("ROUSI_PASSKEY"),
         ptt_cookie=_env("PTT_COOKIE"),
         nicept_cookie=_env("NICEPT_COOKIE"),
         mteam_api_key=_env("MTEAM_API_KEY"),

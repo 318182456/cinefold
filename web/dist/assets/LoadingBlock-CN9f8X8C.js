@@ -1,1 +1,0 @@
-import{o as e,c as s,F as a,h as o}from"./index-DVOTKVHH.js";const n={class:"space-y-3"},u={__name:"LoadingBlock",props:{rows:{type:Number,default:3}},setup(r){return(c,l)=>(e(),s("div",n,[(e(!0),s(a,null,o(r.rows,t=>(e(),s("div",{key:t,class:"animate-pulse rounded-lg bg-gray-800/60",style:{height:"72px"}}))),128))]))}};export{u as _};
