@@ -32,6 +32,7 @@ SENSITIVE_KEYS = {
     "mteam_api_key", "wechat_corp_secret", "wechat_token",
     "wechat_encoding_aes_key", "telegram_bot_token", "secret_key",
     "cloudnas_password", "baidu_api_key", "google_api_key", "openai_api_key",
+    "github_token",
     # 连接串里通常内嵌账号密码
     "database_url", "redis_url",
 }
@@ -227,6 +228,8 @@ class Settings:
     # --- 其他 ---
     javdb_host: str = "https://javdb.com"
     secret_key: str = ""
+    # 检测新版本用。公开镜像可留空；私有镜像需要带 read:packages 权限的 token
+    github_token: str = ""
 
     def to_safe_dict(self) -> dict:
         """返回给前端的配置，敏感字段打码。"""
@@ -379,6 +382,7 @@ def load_settings() -> Settings:
 
         javdb_host=_env("JAVDB_HOST", "https://javdb.com"),
         secret_key=_env("SECRET_KEY"),
+        github_token=_env("GITHUB_TOKEN"),
     )
 
     # SECRET_KEY 为空时生成并回写，保证重启后 JWT 仍然有效

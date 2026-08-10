@@ -133,6 +133,105 @@ class TestCodeFilter:
         assert extract_subscribable_codes("你好") == ([], [])
 
 
+class TestUpdateCheck:
+    """版本比对。查不到最新版时必须静默，不能误报红点。"""
+
+    def test_parse_version(self):
+        from app.utils.updatecheck import parse_version
+        assert parse_version("2.0.4") == (2, 0, 4)
+        assert parse_version("v2.0.4") == (2, 0, 4)
+        assert parse_version("latest") is None
+        assert parse_version("sha-abc123") is None
+        assert parse_version("2.0") is None
+        assert parse_version("") is None
+
+    def test_picks_highest_semver_tag(self, monkeypatch):
+        from app.utils import updatecheck
+
+        # 数字序比字符串序：2.0.10 应该大于 2.0.9
+        tags = ["latest", "sha-deadbee", "2.0.9", "2.0.10", "1.9.9"]
+        monkeypatch.setattr(
+            updatecheck, "_fetch_token", lambda client: "tok"
+        )
+
+        class _Response:
+            status_code = 200
+
+            @staticmethod
+            def json():
+                return {"tags": tags}
+
+        class _Client:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def get(self, *args, **kwargs):
+                return _Response()
+
+        monkeypatch.setattr(updatecheck, "_client", lambda: _Client())
+        assert updatecheck.fetch_latest_version() == "2.0.10"
+
+    def test_has_update_true(self, monkeypatch):
+        from app.utils import updatecheck
+
+        monkeypatch.setattr(updatecheck, "APP_VERSION", "2.0.3")
+        monkeypatch.setattr(updatecheck, "fetch_latest_version", lambda: "2.0.4")
+        result = updatecheck.check_update(use_cache=False)
+        assert result["has_update"] is True
+        assert result["checked"] is True
+
+    def test_no_update_when_same(self, monkeypatch):
+        from app.utils import updatecheck
+
+        monkeypatch.setattr(updatecheck, "APP_VERSION", "2.0.4")
+        monkeypatch.setattr(updatecheck, "fetch_latest_version", lambda: "2.0.4")
+        assert updatecheck.check_update(use_cache=False)["has_update"] is False
+
+    def test_local_newer_is_not_an_update(self, monkeypatch):
+        """本地构建版本领先于镜像时不该提示。"""
+        from app.utils import updatecheck
+
+        monkeypatch.setattr(updatecheck, "APP_VERSION", "2.1.0")
+        monkeypatch.setattr(updatecheck, "fetch_latest_version", lambda: "2.0.4")
+        assert updatecheck.check_update(use_cache=False)["has_update"] is False
+
+    def test_unreachable_registry_stays_silent(self, monkeypatch):
+        """查不到时 checked=False，前端据此不显示红点。"""
+        from app.utils import updatecheck
+
+        monkeypatch.setattr(updatecheck, "fetch_latest_version", lambda: "")
+        result = updatecheck.check_update(use_cache=False)
+        assert result["checked"] is False
+        assert result["has_update"] is False
+
+    def test_unknown_local_version_stays_silent(self, monkeypatch):
+        """读不到 VERSION 文件时不该把 0.0.0 当成"有新版"。"""
+        from app.utils import updatecheck
+
+        monkeypatch.setattr(updatecheck, "APP_VERSION", "UNKNOWN")
+        monkeypatch.setattr(updatecheck, "fetch_latest_version", lambda: "2.0.4")
+        assert updatecheck.check_update(use_cache=False)["has_update"] is False
+
+    def test_missing_token_returns_empty(self, monkeypatch):
+        """私有镜像未配 token 时静默返回空串，而不是抛异常。"""
+        from app.utils import updatecheck
+
+        monkeypatch.setattr(updatecheck, "_fetch_token", lambda client: "")
+
+        class _Client:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        monkeypatch.setattr(updatecheck, "_client", lambda: _Client())
+        assert updatecheck.fetch_latest_version() == ""
+
+
 class TestTitleAttributes:
     def test_has_chinese(self):
         assert has_chinese("SSIS-001 中文字幕")
