@@ -147,6 +147,15 @@ class Settings:
     telegram_spoiler: bool = False
     telegram_whitelist: str = ""
 
+    # --- 上行消息的番号订阅过滤 ---
+    # 前缀名单，逗号分隔（如 NHDTB,SSIS）。白名单非空时只订阅名单内的前缀
+    msg_allow_prefixes: str = ""
+    msg_block_prefixes: str = ""
+    # 单条消息最多订阅几个番号，0 表示不限
+    msg_max_codes: int = 50
+    # 订阅后立刻在后台检索 PT 并推送下载器，而不是等定时任务
+    msg_auto_download: bool = False
+
     # --- 网络 ---
     proxy: str = ""
     external_domain: str = ""
@@ -309,6 +318,11 @@ def load_settings() -> Settings:
         telegram_chat_id=_env("TELEGRAM_CHAT_ID"),
         telegram_spoiler=_env_bool("TELEGRAM_SPOILER"),
         telegram_whitelist=_env("TELEGRAM_WHITELIST"),
+
+        msg_allow_prefixes=_env("MSG_ALLOW_PREFIXES"),
+        msg_block_prefixes=_env("MSG_BLOCK_PREFIXES"),
+        msg_max_codes=_env_int("MSG_MAX_CODES", 50),
+        msg_auto_download=_env_bool("MSG_AUTO_DOWNLOAD", False),
 
         proxy=_env("PROXY"),
         external_domain=_env("EXTERNAL_DOMAIN"),

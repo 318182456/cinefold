@@ -4,6 +4,7 @@ import { getConfig, saveConfig, testConnection } from '@/api'
 import { useToast } from '@/composables/useToast'
 import { useConfigStore } from '@/stores/config'
 import LoadingBlock from '@/components/LoadingBlock.vue'
+import TagInput from '@/components/TagInput.vue'
 
 const toast = useToast()
 const configStore = useConfigStore()
@@ -15,7 +16,7 @@ const activeGroup = ref('downloader')
 const testing = ref('')
 const testResults = reactive({})
 
-// t: text(默认) / password / bool / select / textarea
+// t: text(默认) / password / bool / select / textarea / tags
 const GROUPS = [
   {
     key: 'downloader',
@@ -86,6 +87,18 @@ const GROUPS = [
       { k: 'telegram_chat_id', label: 'Telegram Chat ID' },
       { k: 'telegram_spoiler', label: '图片防剧透', t: 'bool' },
       { k: 'telegram_whitelist', label: '白名单', hint: '多个用 | 分隔' },
+      { k: 'msg_allow_prefixes', label: '番号前缀白名单', t: 'tags', upper: true,
+        ph: '留空则不限制',
+        hint: '消息订阅只接受这些前缀；留空表示全部接受',
+        suggestions: ['SSIS', 'NHDTB', 'JUL', 'ABP', 'IPX', 'MIDE', 'FC2'] },
+      { k: 'msg_block_prefixes', label: '番号前缀黑名单', t: 'tags', upper: true,
+        ph: '留空则不屏蔽',
+        hint: '优先于白名单，命中即不订阅',
+        suggestions: ['NHDTA', 'NHDTB', 'FC2'] },
+      { k: 'msg_max_codes', label: '单条消息番号上限',
+        hint: '超出部分不订阅并在回复中列出，0 表示不限' },
+      { k: 'msg_auto_download', label: '订阅后立即检索', t: 'bool',
+        hint: '开启后消息订阅会在后台搜种并推给下载器；关闭则等每日订阅下载任务' },
       { k: 'wechat_corp_id', label: '企业微信 CorpID' },
       { k: 'wechat_corp_secret', label: '企业微信 Secret', t: 'password' },
       { k: 'wechat_agent_id', label: '企业微信 AgentID' },
@@ -233,6 +246,14 @@ onMounted(load)
               v-model="form[field.k]"
               class="input font-mono text-xs"
               rows="3"
+            />
+
+            <TagInput
+              v-else-if="field.t === 'tags'"
+              v-model="form[field.k]"
+              :placeholder="field.ph || '输入后回车添加'"
+              :suggestions="field.suggestions || []"
+              :uppercase="!!field.upper"
             />
 
             <input
