@@ -16,6 +16,8 @@ on:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
+  # Docker Hub 镜像名，未配置 DOCKERHUB_USERNAME 时自动跳过推送
+  DOCKERHUB_IMAGE: ${{ vars.DOCKERHUB_IMAGE || 'byte-muse' }}
 
 jobs:
   build:
@@ -59,11 +61,35 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # secrets 不能直接用在 if 条件里，先转成 output
+      - name: 检查 Docker Hub 凭证
+        id: dockerhub
+        env:
+          USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          if [ -n "$USERNAME" ] && [ -n "$TOKEN" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+            echo "已配置 Docker Hub 凭证，将同时推送"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "未配置 DOCKERHUB_USERNAME / DOCKERHUB_TOKEN，跳过 Docker Hub"
+          fi
+
+      - name: 登录 Docker Hub
+        if: steps.dockerhub.outputs.enabled == 'true'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
       - name: 生成镜像标签
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          images: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+            name=docker.io/${{ secrets.DOCKERHUB_USERNAME }}/${{ env.DOCKERHUB_IMAGE }},enable=${{ steps.dockerhub.outputs.enabled == 'true' }}
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=raw,value=${{ steps.version.outputs.value }},enable={{is_default_branch}}
@@ -88,3 +114,6 @@ jobs:
           echo '```' >> "$GITHUB_STEP_SUMMARY"
           echo "${{ steps.meta.outputs.tags }}" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
+          if [ "${{ steps.dockerhub.outputs.enabled }}" != "true" ]; then
+            echo "> 未配置 DOCKERHUB_USERNAME / DOCKERHUB_TOKEN，本次只推送到 GHCR。" >> "$GITHUB_STEP_SUMMARY"
+          fi
