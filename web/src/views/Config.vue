@@ -376,6 +376,12 @@ async function save() {
   }
 }
 
+/** Telegram 给的是秒级时间戳 */
+function formatTime(seconds) {
+  if (!seconds) return '时间未知'
+  return new Date(seconds * 1000).toLocaleString()
+}
+
 async function loadPtSites() {
   try {
     const data = await listPtSites()
@@ -511,8 +517,12 @@ onMounted(async () => {
               <p v-if="tgReceive.pending_update_count" class="text-amber-400">
                 有 {{ tgReceive.pending_update_count }} 条消息堆积未处理
               </p>
-              <p v-if="tgReceive.last_error_message" class="text-red-400">
-                最近回调错误：{{ tgReceive.last_error_message }}
+              <p v-if="tgReceive.last_error_message" class="text-amber-400">
+                最近回调错误（{{ formatTime(tgReceive.last_error_date) }}）：
+                {{ tgReceive.last_error_message }}
+                <span class="text-gray-600">
+                  — Telegram 会保留到下次回调成功为止，修好后发条消息即可刷新
+                </span>
               </p>
             </div>
             <p v-else class="text-xs text-gray-600">填好 Bot Token 并保存后可查看状态</p>

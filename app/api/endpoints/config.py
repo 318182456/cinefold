@@ -55,6 +55,10 @@ def save_config(body: ConfigRequest, current_user: str = Depends(get_current_use
     from app.modules.notify.tgpolling import restart_polling
     restart_polling()
 
+    # 账号密码可能换了，丢掉旧账号换来的 token
+    from app.modules.ptsite.rousi import Rousi
+    Rousi.reset_token_cache()
+
     return ResponseEntity.ok(message=f"已更新 {len(updates)} 项配置")
 
 
@@ -169,6 +173,9 @@ def telegram_receive_status(current_user: str = Depends(get_current_user)):
         "webhook_url": info.get("url", ""),
         "pending_update_count": info.get("pending_update_count", 0),
         "last_error_message": info.get("last_error_message", ""),
+        # Telegram 会一直保留最后一次错误，直到下次回调成功才清掉。
+        # 带上时间戳，前端才能说明这是历史错误而非当前故障
+        "last_error_date": info.get("last_error_date", 0),
         "suggest_url": _webhook_url(settings.external_domain),
     })
 

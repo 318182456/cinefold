@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Request, Response
 from loguru import logger
+from starlette.concurrency import run_in_threadpool
 
 from app.core.config import get_settings
 from app.schemas.reponse import ResponseEntity
@@ -156,7 +157,9 @@ async def _handle_telegram(request: Request):
     except Exception:
         return ResponseEntity.ok()
 
-    handle_telegram_update(payload)
+    # 处理链路全是同步 IO（查媒体库、搜种、推送通知），在事件循环里直接跑
+    # 会把整个服务卡住——一条 50 番号的消息足以让前端所有请求排队几分钟
+    await run_in_threadpool(handle_telegram_update, payload)
     return ResponseEntity.ok()
 
 
@@ -191,11 +194,16 @@ async def _handle_wechat(request: Request):
         logger.error(f"解析企业微信消息失败: {exc}")
         return Response(content="")
 
+    # 同 Telegram，指令处理是同步 IO，不能占着事件循环
+    await run_in_threadpool(_handle_wechat_command, text)
+    return Response(content="")
+
+
+def _handle_wechat_command(text: str) -> None:
     reply = _dispatch_command(text)
     if reply:
         from app.modules.notify.wechat import WeChatNotifier
         WeChatNotifier().send_text_message(reply)
-    return Response(content="")
 
 
 # ----------------------------------------------------------------------

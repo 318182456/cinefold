@@ -8,7 +8,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from loguru import logger
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 
 from app.core.config import get_settings
 from app.database.models import Actor, Code, CodeStatus, History
@@ -22,10 +22,21 @@ from app.utils.filters import filter_torrents, sort_torrents
 # ======================================================================
 # 搜索
 # ======================================================================
-def search_torrents(code: str, use_filter: bool = True) -> list[Torrent]:
-    """搜索番号对应的种子，按配置过滤排序后返回。"""
+# 全站检索一个番号要十几秒，短时间内重复搜同一个番号的场景很常见
+# （消息重投、手动重试、订阅任务与消息订阅撞车）。缓存原始结果，
+# 过滤排序仍每次现算，改了过滤条件不必等缓存过期。
+TORRENT_CACHE_TTL = 1800
+
+
+def search_torrents(
+    code: str, use_filter: bool = True, refresh: bool = False
+) -> list[Torrent]:
+    """搜索番号对应的种子，按配置过滤排序后返回。
+
+    refresh=True 时跳过缓存强制重搜。
+    """
     settings = get_settings()
-    torrents = ptsite.search_pt(code)
+    torrents = _search_pt_cached(code, refresh=refresh)
     if not torrents:
         return []
 
@@ -36,6 +47,31 @@ def search_torrents(code: str, use_filter: bool = True) -> list[Torrent]:
         torrents = filter_torrents(torrents, settings.default_filter)
 
     return sort_torrents(torrents, settings.default_sort, build_site_priority())
+
+
+def _search_pt_cached(code: str, refresh: bool = False) -> list[Torrent]:
+    """带缓存的全站检索。缓存的是各站返回的原始种子列表。"""
+    import json
+
+    key = code.upper()
+    if not refresh:
+        cached = get_rank_cache("torrent", key, ttl=TORRENT_CACHE_TTL)
+        if cached:
+            try:
+                items = json.loads(cached)
+                logger.info(f"[{code}] 命中检索缓存，{len(items)} 个种子")
+                return [Torrent.from_dict(item) for item in items]
+            except (ValueError, TypeError):
+                logger.debug(f"[{code}] 检索缓存解析失败，重新搜索")
+
+    torrents = ptsite.search_pt(code)
+    # 空结果也缓存：搜不到的番号往往一段时间内都搜不到，
+    # 否则每次重投消息都要再跑一轮全站检索
+    set_rank_cache(
+        "torrent", key,
+        json.dumps([t.to_dict() for t in torrents], ensure_ascii=False),
+    )
+    return torrents
 
 
 def build_site_priority() -> list[str]:
@@ -67,16 +103,70 @@ def find_torrent(code: str) -> Torrent | None:
 
 
 def search_code(keyword: str, limit: int = 50) -> list[dict]:
-    """在本地库中按番号或标题搜索。"""
+    """在本地库中按番号或标题搜索。
+
+    用户常输入不带横杠的写法（jul915），库里存的是标准形式（JUL-915），
+    直接 LIKE 匹配不上会白跑一趟远程抓取，所以先按番号规则归一化再查。
+    """
+    from app.utils import get_true_code
+
+    keyword = (keyword or "").strip()
+    if not keyword:
+        return []
+
+    conditions = []
+    pattern = f"%{keyword}%"
+    conditions.append(Code.code.like(pattern))
+    conditions.append(Code.title.like(pattern))
+    conditions.append(Code.cn_title.like(pattern))
+
+    normalized = get_true_code(keyword)
+    if normalized and normalized.upper() != keyword.upper():
+        conditions.append(Code.code.like(f"%{normalized}%"))
+
     with session_scope() as session:
-        pattern = f"%{keyword}%"
         rows = session.scalars(
             select(Code)
-            .where(Code.code.like(pattern) | Code.title.like(pattern) | Code.cn_title.like(pattern))
+            .where(or_(*conditions))
             .order_by(Code.release_date.desc())
             .limit(limit)
         ).all()
         return [row.to_dict() for row in rows]
+
+
+def cache_remote_codes(items: list[dict]) -> int:
+    """把远程搜到的番号情报落库，下次搜同一个番号直接走本地。
+
+    只补空字段，不覆盖已有值，更不动 status——库里可能已经订阅或下载过了。
+    """
+    if not items:
+        return 0
+
+    # 番号之外的字段才值得写库，status 之类的状态字段绝不能被远程数据带跑
+    skip = {"code", "status", "create_time", "update_time"}
+    saved = 0
+
+    with session_scope() as session:
+        for item in items:
+            code = (item.get("code") or "").strip().upper()
+            if not code:
+                continue
+
+            row = session.get(Code, code)
+            if row is None:
+                row = Code(code=code)
+                session.add(row)
+
+            for key, value in item.items():
+                if key in skip or not value:
+                    continue
+                if hasattr(row, key) and not getattr(row, key):
+                    setattr(row, key, value)
+            saved += 1
+
+    if saved:
+        logger.info(f"已缓存 {saved} 个番号情报")
+    return saved
 
 
 def search_actor(keyword: str, limit: int = 50) -> list[dict]:
@@ -93,9 +183,24 @@ def search_actor(keyword: str, limit: int = 50) -> list[dict]:
 # ======================================================================
 # 媒体库
 # ======================================================================
+# 媒体库内容分钟级不变，同一个番号在一轮消息处理里会被查两次
+# （先 _split_existing 筛一遍，download_torrent 里再查一次）
+MEDIA_EXISTS_CACHE_TTL = 600
+
+
 def is_exist_server(code: str) -> bool:
-    """番号是否已在任一媒体库中。"""
-    return mediaserver.exists_in_any(code)
+    """番号是否已在任一媒体库中。带短时缓存，避免同一轮内重复查询。"""
+    if not code:
+        return False
+
+    key = code.upper()
+    cached = get_rank_cache("media", key, ttl=MEDIA_EXISTS_CACHE_TTL)
+    if cached is not None:
+        return cached == "1"
+
+    exists = mediaserver.exists_in_any(code)
+    set_rank_cache("media", key, "1" if exists else "0")
+    return exists
 
 
 # ======================================================================
@@ -111,13 +216,17 @@ def download_torrent(code: str, torrent: Torrent | None = None) -> bool:
         _update_code_status(code, CodeStatus.COMPLETED)
         return False
 
+    # 查历史比搜种便宜得多，放在搜索前面短路，省掉一轮全站检索
+    if _is_downloaded(code):
+        # 已推过下载器却仍是待下载，说明状态没跟上，补正一次；
+        # 否则每轮订阅任务都会重新搜一遍，番号永远留在订阅列表里
+        logger.info(f"[{code}] 已下载过，跳过")
+        _sync_status_from_history(code)
+        return False
+
     torrent = torrent or find_torrent(code)
     if torrent is None:
         logger.info(f"[{code}] 未搜到符合条件的种子")
-        return False
-
-    if _is_downloaded(code):
-        logger.info(f"[{code}] 已下载过，跳过")
         return False
 
     client = downloadclient.get_download_client()
@@ -161,6 +270,20 @@ def _is_downloaded(code: str) -> bool:
         return session.scalar(
             select(func.count()).select_from(History).where(History.code == code)
         ) > 0
+
+
+def _sync_status_from_history(code: str) -> None:
+    """有下载记录却仍标记为待下载时，把状态补正为已推送。
+
+    sync_download_status 只扫 DOWNLOADING 的番号，卡在 SUBSCRIBED 的
+    永远等不到它接手，只能每轮重新搜索。这里补上这一跳。
+    """
+    with session_scope() as session:
+        row = session.get(Code, code)
+        if row is not None and row.status == CodeStatus.SUBSCRIBED:
+            row.status = CodeStatus.DOWNLOADING
+            row.update_time = datetime.now()
+            logger.info(f"[{code}] 有下载记录，状态补正为下载中")
 
 
 def _record_history(code: str, torrent_hash: str, save_path: str = "") -> None:
@@ -355,6 +478,10 @@ def _update_save_path(torrent_hash: str, save_path: str) -> None:
 # ======================================================================
 # 翻译
 # ======================================================================
+# 并发翻译的线程数。翻译接口按请求计费/限流，不宜开太大
+TRANSLATE_WORKERS = 4
+
+
 def translate_title(title: str) -> str:
     return translate.translate(title)
 
@@ -373,12 +500,30 @@ def translate_codes(limit: int = 50) -> int:
         ).all()
         pending = [(row.code, row.title) for row in rows]
 
+    if not pending:
+        return 0
+
+    from concurrent.futures import ThreadPoolExecutor
+
+    def run(item: tuple[str, str]) -> tuple[str, str]:
+        code, title = item
+        try:
+            return code, translate_title(title)
+        except Exception as exc:
+            logger.debug(f"[{code}] 翻译失败: {exc}")
+            return code, ""
+
+    # 翻译接口单次 1~5 秒，串行 50 条要好几分钟
+    workers = min(TRANSLATE_WORKERS, len(pending))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        results = [(c, t) for c, t in pool.map(run, pending) if t]
+
+    if not results:
+        return 0
+
     count = 0
-    for code, title in pending:
-        translated = translate_title(title)
-        if not translated:
-            continue
-        with session_scope() as session:
+    with session_scope() as session:
+        for code, translated in results:
             row = session.get(Code, code)
             if row is not None:
                 row.cn_title = translated
@@ -410,6 +555,11 @@ def fill_lack_codes(limit: int = 50) -> int:
 
 
 def fill_lack_codes_by_list(codes: list[str]) -> int:
+    """并发抓取番号详情并批量入库。
+
+    每个番号要跨境抓 1~4 次（多站 fallback），串行 50 个能跑好几分钟。
+    抓取放线程池，写库合并成一个事务。
+    """
     if not codes:
         return 0
     try:
@@ -418,12 +568,25 @@ def fill_lack_codes_by_list(codes: list[str]) -> int:
         logger.debug("资源站模块未接入，跳过补全")
         return 0
 
+    from concurrent.futures import ThreadPoolExecutor
+
+    def fetch(code: str) -> tuple[str, dict]:
+        try:
+            return code, ladysite.get_code_detail(code)
+        except Exception as exc:
+            logger.debug(f"[{code}] 抓取详情失败: {exc}")
+            return code, {}
+
+    workers = min(DETAIL_FETCH_WORKERS, len(codes))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        results = [(c, d) for c, d in pool.map(fetch, codes) if d]
+
+    if not results:
+        return 0
+
     count = 0
-    for code in codes:
-        detail = ladysite.get_code_detail(code)
-        if not detail:
-            continue
-        with session_scope() as session:
+    with session_scope() as session:
+        for code, detail in results:
             row = session.get(Code, code)
             if row is None:
                 continue
@@ -437,6 +600,86 @@ def fill_lack_codes_by_list(codes: list[str]) -> int:
     return count
 
 
+# 一轮最多拉多少张封面。图源在墙外，量太大会让任务跑很久
+PHOTO_CACHE_LIMIT = 100
+# 并发数。图源对单 IP 的连接数敏感，开太大反而容易被限速
+PHOTO_CACHE_WORKERS = 5
+
+
+def cache_lack_photos(limit: int = PHOTO_CACHE_LIMIT) -> int:
+    """把还没落盘的封面批量拉到本地。
+
+    列表页每张卡都要一张封面，没缓存过的要现场回源，翻一页就得等一批。
+    提前拉下来后 image-local 直接读盘，页面立刻出图。
+    """
+    import httpx
+    from concurrent.futures import ThreadPoolExecutor
+
+    from app.utils import imagecache
+
+    settings = get_settings()
+
+    with session_scope() as session:
+        rows = session.execute(
+            select(Code.code, Code.banner, Code.poster)
+            .where((Code.local_banner.is_(None)) | (Code.local_banner == ""))
+            .where((Code.banner.isnot(None)) & (Code.banner != ""))
+            .limit(limit)
+        ).all()
+
+    pending = [(code, banner or poster) for code, banner, poster in rows]
+    pending = [(code, url) for code, url in pending if url]
+    if not pending:
+        return 0
+
+    def fetch(item: tuple[str, str]) -> tuple[str, str] | None:
+        code, url = item
+        # 已经在盘上但库里没记，直接回填省一次下载
+        hit = imagecache.find_cached(url, code, "banner")
+        if hit is not None:
+            return code, imagecache.relative_of(hit)
+
+        try:
+            with httpx.Client(
+                timeout=httpx.Timeout(20.0, connect=10.0),
+                follow_redirects=True,
+                proxy=settings.proxy or None,
+                headers={
+                    "Referer": "https://www.javbus.com/",
+                    "User-Agent": (
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                        "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+                    ),
+                },
+            ) as client:
+                response = client.get(url)
+                response.raise_for_status()
+                content = response.content
+        except Exception as exc:
+            logger.debug(f"[{code}] 封面下载失败: {exc}")
+            return None
+
+        stored = imagecache.store(content, url, code, "banner")
+        if stored is None:
+            return None
+        return code, imagecache.relative_of(stored)
+
+    with ThreadPoolExecutor(max_workers=PHOTO_CACHE_WORKERS) as pool:
+        results = [r for r in pool.map(fetch, pending) if r and r[1]]
+
+    if not results:
+        return 0
+
+    with session_scope() as session:
+        for code, relative in results:
+            row = session.get(Code, code)
+            if row is not None:
+                row.local_banner = relative
+
+    logger.info(f"已缓存 {len(results)} 张封面")
+    return len(results)
+
+
 def fill_lack_actors(limit: int = 50) -> int:
     with session_scope() as session:
         names = session.scalars(
@@ -448,6 +691,7 @@ def fill_lack_actors(limit: int = 50) -> int:
 
 
 def fill_lack_actors_by_list(names: list[str]) -> int:
+    """并发抓演员头像并批量入库。串行 50 个要跑一两分钟。"""
     if not names:
         return 0
     try:
@@ -455,12 +699,25 @@ def fill_lack_actors_by_list(names: list[str]) -> int:
     except ImportError:
         return 0
 
+    from concurrent.futures import ThreadPoolExecutor
+
+    def fetch(name: str) -> tuple[str, str]:
+        try:
+            return name, ladysite.get_actor_photo(name)
+        except Exception as exc:
+            logger.debug(f"[{name}] 抓取头像失败: {exc}")
+            return name, ""
+
+    workers = min(DETAIL_FETCH_WORKERS, len(names))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        results = [(n, p) for n, p in pool.map(fetch, names) if p]
+
+    if not results:
+        return 0
+
     count = 0
-    for name in names:
-        photo = ladysite.get_actor_photo(name)
-        if not photo:
-            continue
-        with session_scope() as session:
+    with session_scope() as session:
+        for name, photo in results:
             row = session.get(Actor, name)
             if row is not None:
                 row.photo = photo
@@ -478,6 +735,10 @@ BRAND_CACHE_TTL = 3600
 # 单次请求最多现抓多少条详情。剩下的留给「补全缺图」定时任务慢慢补，
 # 否则打开榜单页要等几十次串行抓取。
 DETAIL_FETCH_LIMIT = 8
+
+# 并发抓详情的线程数。同 host 仍受 SiteClient 节流排队，
+# 这里的收益主要来自多站 fallback 时不同域名可以并行
+DETAIL_FETCH_WORKERS = 4
 
 
 def _rows_by_code(codes: list[str]) -> dict[str, dict]:
@@ -513,13 +774,9 @@ def enrich_codes(codes: list[str], fetch_limit: int | None = None) -> list[dict]
         # 先确保这些番号在库里，后续补全和订阅都依赖行存在
         _ensure_codes(missing)
 
-        fetched = 0
-        for code in missing:
-            if fetched >= limit:
-                break
-            if fill_lack_codes_by_list([code]):
-                fetched += 1
-        if fetched:
+        # 每个番号要跨境抓 1~4 次，串行下来榜单页首次打开要等几十秒。
+        # 这是用户直接等待的路径，并发抓完再统一写库
+        if fill_lack_codes_by_list(missing[:limit]):
             known = _rows_by_code(codes)
 
     out = []
@@ -577,9 +834,13 @@ def get_brand_items(brand: str, past_days: int = 7, future_days: int = 14) -> li
         except ValueError:
             logger.debug("厂牌缓存解析失败，重新抓取")
 
+    from app.modules.ladysite.brands import BrandUnreachable, crawl_range
+
     try:
-        from app.modules.ladysite.brands import crawl_range
         found = crawl_range(brand, past_days=past_days, future_days=future_days)
+    except BrandUnreachable:
+        # 交给上层转成明确的错误提示，不能静默当成"没有作品"
+        raise
     except Exception as exc:
         logger.warning(f"厂牌 {brand} 抓取失败: {exc}")
         return []
@@ -670,19 +931,22 @@ def reply_text_msg(text: str, message_id: int = 0, chat_id: str = "") -> bool:
 # 统计
 # ======================================================================
 def dashboard_stats() -> dict:
-    """仪表盘数据。"""
+    """仪表盘数据。
+
+    各状态的计数用一次 GROUP BY 拿全，原先是每个状态各扫一遍 code 表。
+    """
     with session_scope() as session:
-        def count_where(*conditions):
-            return session.scalar(
-                select(func.count()).select_from(Code).where(*conditions)
-            ) or 0
+        rows = session.execute(
+            select(Code.status, func.count()).group_by(Code.status)
+        ).all()
+        by_status = {status: total for status, total in rows}
 
         return {
-            "total": session.scalar(select(func.count()).select_from(Code)) or 0,
-            "subscribed": count_where(Code.status == CodeStatus.SUBSCRIBED),
-            "downloading": count_where(Code.status == CodeStatus.DOWNLOADING),
-            "downloaded": count_where(Code.status == CodeStatus.DOWNLOADED),
-            "completed": count_where(Code.status == CodeStatus.COMPLETED),
+            "total": sum(by_status.values()),
+            "subscribed": by_status.get(CodeStatus.SUBSCRIBED, 0),
+            "downloading": by_status.get(CodeStatus.DOWNLOADING, 0),
+            "downloaded": by_status.get(CodeStatus.DOWNLOADED, 0),
+            "completed": by_status.get(CodeStatus.COMPLETED, 0),
             "actors": session.scalar(select(func.count()).select_from(Actor)) or 0,
             "history": session.scalar(select(func.count()).select_from(History)) or 0,
         }

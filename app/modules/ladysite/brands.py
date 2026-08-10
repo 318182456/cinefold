@@ -9,6 +9,10 @@ from datetime import date, timedelta
 from loguru import logger
 from pyquery import PyQuery
 
+# 连续这么多天请求失败且一条都没抓到，就认定站点不可达提前收工，
+# 不然 22 个日期页每个都要等满超时
+UNREACHABLE_THRESHOLD = 3
+
 from app.modules.ladysite.base import CodeInfo, SiteClient, join_list
 from app.utils import get_true_code
 
@@ -24,6 +28,10 @@ BRANDS: dict[str, str] = {
     "honnaka": "https://honnaka.jp",
     "dasdas": "https://dasdas.jp",
 }
+
+class BrandUnreachable(RuntimeError):
+    """厂牌官网整段区间都请求不通，与"这天没有新片"区分开。"""
+
 
 # 官网上的品牌名，用于前端展示
 BRAND_LABELS: dict[str, str] = {
@@ -47,11 +55,17 @@ class Brands:
         host = BRANDS.get(self.brand, BRANDS["s1"])
         self.client = SiteClient(host, interval=1.5)
 
-    def get_date_rank(self, target: str = "") -> list[str]:
-        """按发行日期取新片番号。target 为空时取今天。"""
+    def get_date_rank(self, target: str = "") -> list[str] | None:
+        """按发行日期取新片番号。target 为空时取今天。
+
+        返回 None 表示请求失败（超时、被拦），空列表表示这天确实没有新片。
+        调用方要能区分，否则站点不可达会被当成"没有作品"。
+        """
         day = target or date.today().strftime("%Y-%m-%d")
         html = self.client.get("/works/date", params={"date": day})
-        return self.crawling_date(html) if html else []
+        if not html:
+            return None
+        return self.crawling_date(html)
 
     def crawling_date(self, html: str) -> list[str]:
         try:
@@ -119,22 +133,49 @@ def crawl_range(brand: str, past_days: int = 3, future_days: int = 0) -> list[di
 
     厂牌官网的 /works/date 页对未来日期同样有数据，用它就能看到预定发布的作品。
     """
+    # 从最远的未来排到最早的过去，让即将发布的排在前面
+    offsets = list(range(future_days, 0, -1)) + [0] + [-d for d in range(1, past_days)]
+    days = [
+        (date.today() + timedelta(days=offset)).strftime("%Y-%m-%d")
+        for offset in offsets
+    ]
+
     site = Brands(brand)
     out: list[dict] = []
     seen: set[str] = set()
+    failed = 0
+    streak = 0
 
-    # 从最远的未来排到最早的过去，让即将发布的排在前面
-    offsets = list(range(future_days, 0, -1)) + [0] + [-d for d in range(1, past_days)]
-    for offset in offsets:
-        day = (date.today() + timedelta(days=offset)).strftime("%Y-%m-%d")
+    # 节流按 host 生效，并发只会在锁上排队，不会更快，
+    # 反而多占线程。真正的提速手段是别一次要那么多天
+    for day in days:
         try:
             codes = site.get_date_rank(day)
         except Exception as exc:
             logger.debug(f"[{brand}] 抓取 {day} 失败: {exc}")
+            codes = None
+
+        if codes is None:
+            failed += 1
+            streak += 1
+            # 开头连续失败多半是站点不可达，没必要把剩下的日期挨个撞满超时。
+            # 只在一条都没抓到时早停：中途的零星失败不能丢掉后面的数据
+            if streak >= UNREACHABLE_THRESHOLD and not out:
+                logger.warning(f"[{brand}] 连续 {streak} 天请求失败，放弃剩余日期")
+                break
             continue
+
+        streak = 0
         for code in codes:
             if code in seen:
                 continue
             seen.add(code)
             out.append({"code": code, "release_date": day, "brand": brand})
+
+    # 官网某天没有新片是常态，但一条都没抓到且有失败，多半是站点不可达。
+    # 静默返回空会让页面显示成"这个厂牌没有作品"，得区分开
+    if not out and failed:
+        raise BrandUnreachable(
+            f"{brand} 官网连续 {failed} 个日期页请求失败，可能需要配置代理"
+        )
     return out

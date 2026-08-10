@@ -142,6 +142,14 @@ def resolve_relative(relative: str) -> Path | None:
     return target
 
 
+def relative_of(path: Path) -> str:
+    """绝对缓存路径 → 库里存的相对路径（ABC-123/banner.jpg）。"""
+    try:
+        return path.resolve().relative_to(PIC_DIR.resolve()).as_posix()
+    except (ValueError, OSError):
+        return ""
+
+
 def content_type(path: Path) -> str:
     return CONTENT_TYPES.get(path.suffix.lower(), "image/jpeg")
 

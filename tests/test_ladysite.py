@@ -253,6 +253,116 @@ class TestBrandsParse:
 
         assert Brands("不存在的厂牌").client.host.startswith("https://")
 
+    def test_date_rank_returns_none_when_request_fails(self, monkeypatch):
+        """请求失败返回 None，与"这天没新片"的空列表区分开。"""
+        from app.modules.ladysite.brands import Brands
+
+        monkeypatch.setattr(
+            "app.modules.ladysite.base.SiteClient.get",
+            lambda self, *a, **kw: "",
+        )
+        assert Brands("s1").get_date_rank("2024-01-01") is None
+
+    def test_date_rank_returns_empty_list_when_no_works(self, monkeypatch):
+        from app.modules.ladysite.brands import Brands
+
+        monkeypatch.setattr(
+            "app.modules.ladysite.base.SiteClient.get",
+            lambda self, *a, **kw: "<html><body>没有新片</body></html>",
+        )
+        assert Brands("s1").get_date_rank("2024-01-01") == []
+
+
+class TestBrandCrawlRange:
+    def test_all_requests_failing_raises(self, monkeypatch):
+        """整段区间都抓不到时报错，不能静默当成"没有作品"。"""
+        from app.modules.ladysite.brands import BrandUnreachable, crawl_range
+
+        monkeypatch.setattr(
+            "app.modules.ladysite.brands.Brands.get_date_rank",
+            lambda self, day: None,
+        )
+        with pytest.raises(BrandUnreachable):
+            crawl_range("s1", past_days=2, future_days=1)
+
+    def test_empty_but_reachable_returns_empty(self, monkeypatch):
+        """站点通但确实没作品，返回空列表而非报错。"""
+        from app.modules.ladysite.brands import crawl_range
+
+        monkeypatch.setattr(
+            "app.modules.ladysite.brands.Brands.get_date_rank",
+            lambda self, day: [],
+        )
+        assert crawl_range("s1", past_days=2, future_days=1) == []
+
+    def test_partial_failure_keeps_results(self, monkeypatch):
+        """站点通但个别日期抓失败时，其余结果照常保留。"""
+        from app.modules.ladysite.brands import crawl_range
+
+        calls = []
+
+        def _rank(self, day):
+            calls.append(day)
+            # 第 2 天失败，其余正常返回（多数日期没有新片）
+            if len(calls) == 2:
+                return None
+            return ["SSIS-001"] if len(calls) == 3 else []
+
+        monkeypatch.setattr(
+            "app.modules.ladysite.brands.Brands.get_date_rank", _rank
+        )
+        found = crawl_range("s1", past_days=5, future_days=0)
+        assert [i["code"] for i in found] == ["SSIS-001"]
+
+    def test_early_stop_on_consecutive_failures(self, monkeypatch):
+        """开头连续失败就放弃，不把剩下的日期挨个撞满超时。"""
+        from app.modules.ladysite.brands import (
+            UNREACHABLE_THRESHOLD, BrandUnreachable, crawl_range,
+        )
+
+        calls = []
+
+        def _rank(self, day):
+            calls.append(day)
+            return None
+
+        monkeypatch.setattr(
+            "app.modules.ladysite.brands.Brands.get_date_rank", _rank
+        )
+        with pytest.raises(BrandUnreachable):
+            crawl_range("s1", past_days=30, future_days=0)
+        assert len(calls) == UNREACHABLE_THRESHOLD
+
+    def test_failure_after_results_does_not_stop(self, monkeypatch):
+        """已经抓到数据后再遇失败不早停，避免丢掉后面的日期。"""
+        from app.modules.ladysite.brands import crawl_range
+
+        calls = []
+
+        def _rank(self, day):
+            calls.append(day)
+            if len(calls) == 1:
+                return ["SSIS-001"]
+            return None
+
+        monkeypatch.setattr(
+            "app.modules.ladysite.brands.Brands.get_date_rank", _rank
+        )
+        found = crawl_range("s1", past_days=6, future_days=0)
+        assert [i["code"] for i in found] == ["SSIS-001"]
+        # 全部日期都走完，没有因连续失败提前退出
+        assert len(calls) == 6
+
+    def test_dedupes_across_days(self, monkeypatch):
+        from app.modules.ladysite.brands import crawl_range
+
+        monkeypatch.setattr(
+            "app.modules.ladysite.brands.Brands.get_date_rank",
+            lambda self, day: ["SSIS-001"],
+        )
+        found = crawl_range("s1", past_days=3, future_days=2)
+        assert [i["code"] for i in found] == ["SSIS-001"]
+
 
 class TestAggregator:
     def test_imports(self):

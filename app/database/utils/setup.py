@@ -8,7 +8,7 @@ from loguru import logger
 from app.database.base import DBBase
 from app.database.models import User
 from app.database.session import engine, session_scope
-from app.database.utils import check_and_create_column
+from app.database.utils import check_and_create_column, check_and_create_index
 
 DEFAULT_USERNAME = "admin"
 
@@ -53,6 +53,19 @@ def update_database() -> None:
     ]
     for table, column, column_type in migrations:
         check_and_create_column(engine, table, column, column_type)
+
+    # 高频查询列的索引。存量库的表已存在，create_all 不会补，得显式建
+    indexes = [
+        # 订阅任务、看板统计、列表页筛选都按状态查
+        ("code", "status"),
+        # 列表页默认排序
+        ("code", "update_time"),
+        # 今日发布与多处排序
+        ("code", "release_date"),
+        ("actor", "update_time"),
+    ]
+    for table, column in indexes:
+        check_and_create_index(engine, table, column)
 
 
 def insert_first_user() -> str:

@@ -20,6 +20,7 @@ class Actor(DBBase):
     limit_date: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
     create_time: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+    # 演员列表默认按它倒序
     update_time: Mapped[datetime] = mapped_column(
-        DateTime, default=datetime.now, onupdate=datetime.now
+        DateTime, default=datetime.now, onupdate=datetime.now, index=True
     )

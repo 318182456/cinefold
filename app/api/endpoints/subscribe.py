@@ -78,6 +78,8 @@ def search_codes(keyword: str, current_user: str = Depends(get_current_user)):
     try:
         from app.modules import ladysite
         remote = ladysite.search_code(code or keyword)
+        # 抓回来的情报存进库，下次同一个番号直接走本地
+        services.cache_remote_codes(remote)
         return ResponseEntity.ok({"items": remote, "source": "remote"})
     except (ImportError, AttributeError):
         return ResponseEntity.ok({"items": [], "source": "local"})
@@ -223,11 +225,17 @@ def brand_codes(
     if key not in BRANDS:
         return ResponseEntity.fail(f"未知厂牌 {brand}", code=400)
 
-    items = services.get_brand_items(
-        key,
-        past_days=max(0, min(past_days, 60)),
-        future_days=max(0, min(future_days, 90)),
-    )
+    from app.modules.ladysite.brands import BrandUnreachable
+
+    try:
+        items = services.get_brand_items(
+            key,
+            past_days=max(0, min(past_days, 60)),
+            future_days=max(0, min(future_days, 90)),
+        )
+    except BrandUnreachable as exc:
+        # 空列表会被前端显示成"没有作品"，站点不通得说清楚
+        return ResponseEntity.fail(str(exc), code=502)
     return ResponseEntity.ok({"items": items})
 
 
