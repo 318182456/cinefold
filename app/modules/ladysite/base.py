@@ -90,8 +90,13 @@ class ActorInfo:
 class SiteClient:
     """带限速的 HTTP 客户端。
 
-    每个站点实例维护自己的节流锁，避免请求过密被封。
+    节流状态按 host 共享：调用方普遍是 Avdb() / Bus() 这样用完即弃，
+    状态放在实例上等于每次请求都从零计时，限速根本不会生效。
     """
+
+    # host → (锁, 上次请求时间)。进程级共享，跨实例、跨线程都算同一份
+    _throttle_state: dict[str, list] = {}
+    _state_lock = threading.Lock()
 
     def __init__(
         self,
@@ -105,8 +110,15 @@ class SiteClient:
         self.interval = interval
         # 已知常年过盾的站点置 True，省掉一次必然 403 的直连
         self.bypass_first = bypass_first
-        self._last_request = 0.0
-        self._lock = threading.Lock()
+
+    def _state(self) -> list:
+        """取本 host 的节流状态 [lock, last_request]。"""
+        with SiteClient._state_lock:
+            state = SiteClient._throttle_state.get(self.host)
+            if state is None:
+                state = [threading.Lock(), 0.0]
+                SiteClient._throttle_state[self.host] = state
+            return state
 
     def headers(self, extra: dict | None = None) -> dict:
         base = {
@@ -121,13 +133,15 @@ class SiteClient:
         return base
 
     def _throttle(self) -> None:
-        with self._lock:
-            elapsed = time.time() - self._last_request
+        state = self._state()
+        lock, _ = state[0], state[1]
+        with lock:
+            elapsed = time.time() - state[1]
             wait = self.interval - elapsed
             if wait > 0:
                 # 加一点随机抖动，避免请求节奏过于规整
                 time.sleep(wait + random.uniform(0, 0.3))
-            self._last_request = time.time()
+            state[1] = time.time()
 
     def get(self, path: str, params: dict | None = None, timeout: float = 15.0, **kwargs) -> str:
         """GET 请求，返回文本。失败返回空串。

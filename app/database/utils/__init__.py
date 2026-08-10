@@ -44,6 +44,43 @@ def check_and_create_column(
         return False
 
 
+def check_and_create_index(
+    engine: Engine, table: str, column: str, name: str = ""
+) -> bool:
+    """索引不存在时创建。返回是否实际执行了变更。
+
+    create_all 只对新建的表生效，存量库的表已经存在，加在模型上的
+    index=True 不会自动补上，得在这里显式建。
+    """
+    if column not in _column_names(engine, table):
+        return False
+
+    index_name = name or f"ix_{table}_{column}"
+    try:
+        inspector = inspect(engine)
+        existing = {idx["name"] for idx in inspector.get_indexes(table)}
+        if index_name in existing:
+            return False
+    except Exception:
+        # 拿不到索引列表时交给 IF NOT EXISTS 兜底
+        pass
+
+    table_ref = _quote(engine, table)
+    column_ref = _quote(engine, column)
+    index_ref = _quote(engine, index_name)
+    try:
+        with engine.begin() as conn:
+            conn.execute(text(
+                f"CREATE INDEX IF NOT EXISTS {index_ref} "
+                f"ON {table_ref} ({column_ref})"
+            ))
+        logger.info(f"已为 {table}.{column} 建索引")
+        return True
+    except Exception as exc:
+        logger.warning(f"建索引 {index_name} 失败: {exc}")
+        return False
+
+
 def check_and_delete_column(engine: Engine, table: str, column: str) -> bool:
     """列存在时删除。SQLite 需 3.35+。"""
     if column not in _column_names(engine, table):

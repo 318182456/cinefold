@@ -25,9 +25,13 @@ class Code(DBBase):
     code: Mapped[str] = mapped_column(String(64), primary_key=True)
     title: Mapped[str | None] = mapped_column(Text, nullable=True)
     cn_title: Mapped[str | None] = mapped_column(Text, nullable=True)
-    status: Mapped[int] = mapped_column(Integer, default=CodeStatus.NONE, nullable=False)
+    # 订阅任务、看板统计、列表页筛选都按状态查，没索引就是整表扫
+    status: Mapped[int] = mapped_column(
+        Integer, default=CodeStatus.NONE, nullable=False, index=True
+    )
 
-    release_date: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # 今日发布查询与多处 ORDER BY 用它
+    release_date: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     duration: Mapped[str | None] = mapped_column(String(32), nullable=True)
     producer: Mapped[str | None] = mapped_column(String(128), nullable=True)
     publisher: Mapped[str | None] = mapped_column(String(128), nullable=True)
@@ -46,6 +50,7 @@ class Code(DBBase):
     mode: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
     create_time: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+    # 列表页默认按它倒序分页
     update_time: Mapped[datetime] = mapped_column(
-        DateTime, default=datetime.now, onupdate=datetime.now
+        DateTime, default=datetime.now, onupdate=datetime.now, index=True
     )

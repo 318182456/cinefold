@@ -183,9 +183,24 @@ def search_actor(keyword: str, limit: int = 50) -> list[dict]:
 # ======================================================================
 # 媒体库
 # ======================================================================
+# 媒体库内容分钟级不变，同一个番号在一轮消息处理里会被查两次
+# （先 _split_existing 筛一遍，download_torrent 里再查一次）
+MEDIA_EXISTS_CACHE_TTL = 600
+
+
 def is_exist_server(code: str) -> bool:
-    """番号是否已在任一媒体库中。"""
-    return mediaserver.exists_in_any(code)
+    """番号是否已在任一媒体库中。带短时缓存，避免同一轮内重复查询。"""
+    if not code:
+        return False
+
+    key = code.upper()
+    cached = get_rank_cache("media", key, ttl=MEDIA_EXISTS_CACHE_TTL)
+    if cached is not None:
+        return cached == "1"
+
+    exists = mediaserver.exists_in_any(code)
+    set_rank_cache("media", key, "1" if exists else "0")
+    return exists
 
 
 # ======================================================================
@@ -463,6 +478,10 @@ def _update_save_path(torrent_hash: str, save_path: str) -> None:
 # ======================================================================
 # 翻译
 # ======================================================================
+# 并发翻译的线程数。翻译接口按请求计费/限流，不宜开太大
+TRANSLATE_WORKERS = 4
+
+
 def translate_title(title: str) -> str:
     return translate.translate(title)
 
@@ -481,12 +500,30 @@ def translate_codes(limit: int = 50) -> int:
         ).all()
         pending = [(row.code, row.title) for row in rows]
 
+    if not pending:
+        return 0
+
+    from concurrent.futures import ThreadPoolExecutor
+
+    def run(item: tuple[str, str]) -> tuple[str, str]:
+        code, title = item
+        try:
+            return code, translate_title(title)
+        except Exception as exc:
+            logger.debug(f"[{code}] 翻译失败: {exc}")
+            return code, ""
+
+    # 翻译接口单次 1~5 秒，串行 50 条要好几分钟
+    workers = min(TRANSLATE_WORKERS, len(pending))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        results = [(c, t) for c, t in pool.map(run, pending) if t]
+
+    if not results:
+        return 0
+
     count = 0
-    for code, title in pending:
-        translated = translate_title(title)
-        if not translated:
-            continue
-        with session_scope() as session:
+    with session_scope() as session:
+        for code, translated in results:
             row = session.get(Code, code)
             if row is not None:
                 row.cn_title = translated
@@ -518,6 +555,11 @@ def fill_lack_codes(limit: int = 50) -> int:
 
 
 def fill_lack_codes_by_list(codes: list[str]) -> int:
+    """并发抓取番号详情并批量入库。
+
+    每个番号要跨境抓 1~4 次（多站 fallback），串行 50 个能跑好几分钟。
+    抓取放线程池，写库合并成一个事务。
+    """
     if not codes:
         return 0
     try:
@@ -526,12 +568,25 @@ def fill_lack_codes_by_list(codes: list[str]) -> int:
         logger.debug("资源站模块未接入，跳过补全")
         return 0
 
+    from concurrent.futures import ThreadPoolExecutor
+
+    def fetch(code: str) -> tuple[str, dict]:
+        try:
+            return code, ladysite.get_code_detail(code)
+        except Exception as exc:
+            logger.debug(f"[{code}] 抓取详情失败: {exc}")
+            return code, {}
+
+    workers = min(DETAIL_FETCH_WORKERS, len(codes))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        results = [(c, d) for c, d in pool.map(fetch, codes) if d]
+
+    if not results:
+        return 0
+
     count = 0
-    for code in codes:
-        detail = ladysite.get_code_detail(code)
-        if not detail:
-            continue
-        with session_scope() as session:
+    with session_scope() as session:
+        for code, detail in results:
             row = session.get(Code, code)
             if row is None:
                 continue
@@ -636,6 +691,7 @@ def fill_lack_actors(limit: int = 50) -> int:
 
 
 def fill_lack_actors_by_list(names: list[str]) -> int:
+    """并发抓演员头像并批量入库。串行 50 个要跑一两分钟。"""
     if not names:
         return 0
     try:
@@ -643,12 +699,25 @@ def fill_lack_actors_by_list(names: list[str]) -> int:
     except ImportError:
         return 0
 
+    from concurrent.futures import ThreadPoolExecutor
+
+    def fetch(name: str) -> tuple[str, str]:
+        try:
+            return name, ladysite.get_actor_photo(name)
+        except Exception as exc:
+            logger.debug(f"[{name}] 抓取头像失败: {exc}")
+            return name, ""
+
+    workers = min(DETAIL_FETCH_WORKERS, len(names))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        results = [(n, p) for n, p in pool.map(fetch, names) if p]
+
+    if not results:
+        return 0
+
     count = 0
-    for name in names:
-        photo = ladysite.get_actor_photo(name)
-        if not photo:
-            continue
-        with session_scope() as session:
+    with session_scope() as session:
+        for name, photo in results:
             row = session.get(Actor, name)
             if row is not None:
                 row.photo = photo
@@ -666,6 +735,10 @@ BRAND_CACHE_TTL = 3600
 # 单次请求最多现抓多少条详情。剩下的留给「补全缺图」定时任务慢慢补，
 # 否则打开榜单页要等几十次串行抓取。
 DETAIL_FETCH_LIMIT = 8
+
+# 并发抓详情的线程数。同 host 仍受 SiteClient 节流排队，
+# 这里的收益主要来自多站 fallback 时不同域名可以并行
+DETAIL_FETCH_WORKERS = 4
 
 
 def _rows_by_code(codes: list[str]) -> dict[str, dict]:
@@ -701,13 +774,9 @@ def enrich_codes(codes: list[str], fetch_limit: int | None = None) -> list[dict]
         # 先确保这些番号在库里，后续补全和订阅都依赖行存在
         _ensure_codes(missing)
 
-        fetched = 0
-        for code in missing:
-            if fetched >= limit:
-                break
-            if fill_lack_codes_by_list([code]):
-                fetched += 1
-        if fetched:
+        # 每个番号要跨境抓 1~4 次，串行下来榜单页首次打开要等几十秒。
+        # 这是用户直接等待的路径，并发抓完再统一写库
+        if fill_lack_codes_by_list(missing[:limit]):
             known = _rows_by_code(codes)
 
     out = []
@@ -862,19 +931,22 @@ def reply_text_msg(text: str, message_id: int = 0, chat_id: str = "") -> bool:
 # 统计
 # ======================================================================
 def dashboard_stats() -> dict:
-    """仪表盘数据。"""
+    """仪表盘数据。
+
+    各状态的计数用一次 GROUP BY 拿全，原先是每个状态各扫一遍 code 表。
+    """
     with session_scope() as session:
-        def count_where(*conditions):
-            return session.scalar(
-                select(func.count()).select_from(Code).where(*conditions)
-            ) or 0
+        rows = session.execute(
+            select(Code.status, func.count()).group_by(Code.status)
+        ).all()
+        by_status = {status: total for status, total in rows}
 
         return {
-            "total": session.scalar(select(func.count()).select_from(Code)) or 0,
-            "subscribed": count_where(Code.status == CodeStatus.SUBSCRIBED),
-            "downloading": count_where(Code.status == CodeStatus.DOWNLOADING),
-            "downloaded": count_where(Code.status == CodeStatus.DOWNLOADED),
-            "completed": count_where(Code.status == CodeStatus.COMPLETED),
+            "total": sum(by_status.values()),
+            "subscribed": by_status.get(CodeStatus.SUBSCRIBED, 0),
+            "downloading": by_status.get(CodeStatus.DOWNLOADING, 0),
+            "downloaded": by_status.get(CodeStatus.DOWNLOADED, 0),
+            "completed": by_status.get(CodeStatus.COMPLETED, 0),
             "actors": session.scalar(select(func.count()).select_from(Actor)) or 0,
             "history": session.scalar(select(func.count()).select_from(History)) or 0,
         }

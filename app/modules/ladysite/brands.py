@@ -4,14 +4,14 @@
 """
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
 from datetime import date, timedelta
 
 from loguru import logger
 from pyquery import PyQuery
 
-# 同时抓几个日期页。官网对单 IP 有限流，这个值别往上调
-BRAND_FETCH_WORKERS = 4
+# 连续这么多天请求失败且一条都没抓到，就认定站点不可达提前收工，
+# 不然 22 个日期页每个都要等满超时
+UNREACHABLE_THRESHOLD = 3
 
 from app.modules.ladysite.base import CodeInfo, SiteClient, join_list
 from app.utils import get_true_code
@@ -140,37 +140,42 @@ def crawl_range(brand: str, past_days: int = 3, future_days: int = 0) -> list[di
         for offset in offsets
     ]
 
-    def fetch(day: str) -> tuple[str, list[str] | None]:
-        # 每个线程一个客户端，SiteClient 的节流是实例级的
-        try:
-            return day, Brands(brand).get_date_rank(day)
-        except Exception as exc:
-            logger.debug(f"[{brand}] 抓取 {day} 失败: {exc}")
-            return day, None
-
-    # 串行要 22 天 × 节流间隔，几十秒起步。并发度压在低位，
-    # 既比串行快一个数量级，也不至于把官网打出限流
-    with ThreadPoolExecutor(max_workers=BRAND_FETCH_WORKERS) as pool:
-        results = list(pool.map(fetch, days))
-
+    site = Brands(brand)
     out: list[dict] = []
     seen: set[str] = set()
     failed = 0
-    # 按 days 的顺序汇总，并发不打乱"未来在前"的排列
-    for day, codes in results:
+    streak = 0
+
+    # 节流按 host 生效，并发只会在锁上排队，不会更快，
+    # 反而多占线程。真正的提速手段是别一次要那么多天
+    for day in days:
+        try:
+            codes = site.get_date_rank(day)
+        except Exception as exc:
+            logger.debug(f"[{brand}] 抓取 {day} 失败: {exc}")
+            codes = None
+
         if codes is None:
             failed += 1
+            streak += 1
+            # 开头连续失败多半是站点不可达，没必要把剩下的日期挨个撞满超时。
+            # 只在一条都没抓到时早停：中途的零星失败不能丢掉后面的数据
+            if streak >= UNREACHABLE_THRESHOLD and not out:
+                logger.warning(f"[{brand}] 连续 {streak} 天请求失败，放弃剩余日期")
+                break
             continue
+
+        streak = 0
         for code in codes:
             if code in seen:
                 continue
             seen.add(code)
             out.append({"code": code, "release_date": day, "brand": brand})
 
-    # 官网某天没有新片是常态，但整段区间一条都没抓到多半是站点不可达。
+    # 官网某天没有新片是常态，但一条都没抓到且有失败，多半是站点不可达。
     # 静默返回空会让页面显示成"这个厂牌没有作品"，得区分开
     if not out and failed:
         raise BrandUnreachable(
-            f"{brand} 官网 {len(days)} 个日期页全部请求失败，可能需要配置代理"
+            f"{brand} 官网连续 {failed} 个日期页请求失败，可能需要配置代理"
         )
     return out

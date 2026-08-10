@@ -296,17 +296,62 @@ class TestBrandCrawlRange:
         assert crawl_range("s1", past_days=2, future_days=1) == []
 
     def test_partial_failure_keeps_results(self, monkeypatch):
-        """部分日期抓失败不影响其余结果。"""
+        """站点通但个别日期抓失败时，其余结果照常保留。"""
         from app.modules.ladysite.brands import crawl_range
 
+        calls = []
+
         def _rank(self, day):
-            return ["SSIS-001"] if day.endswith("01") else None
+            calls.append(day)
+            # 第 2 天失败，其余正常返回（多数日期没有新片）
+            if len(calls) == 2:
+                return None
+            return ["SSIS-001"] if len(calls) == 3 else []
 
         monkeypatch.setattr(
             "app.modules.ladysite.brands.Brands.get_date_rank", _rank
         )
-        found = crawl_range("s1", past_days=40, future_days=0)
+        found = crawl_range("s1", past_days=5, future_days=0)
         assert [i["code"] for i in found] == ["SSIS-001"]
+
+    def test_early_stop_on_consecutive_failures(self, monkeypatch):
+        """开头连续失败就放弃，不把剩下的日期挨个撞满超时。"""
+        from app.modules.ladysite.brands import (
+            UNREACHABLE_THRESHOLD, BrandUnreachable, crawl_range,
+        )
+
+        calls = []
+
+        def _rank(self, day):
+            calls.append(day)
+            return None
+
+        monkeypatch.setattr(
+            "app.modules.ladysite.brands.Brands.get_date_rank", _rank
+        )
+        with pytest.raises(BrandUnreachable):
+            crawl_range("s1", past_days=30, future_days=0)
+        assert len(calls) == UNREACHABLE_THRESHOLD
+
+    def test_failure_after_results_does_not_stop(self, monkeypatch):
+        """已经抓到数据后再遇失败不早停，避免丢掉后面的日期。"""
+        from app.modules.ladysite.brands import crawl_range
+
+        calls = []
+
+        def _rank(self, day):
+            calls.append(day)
+            if len(calls) == 1:
+                return ["SSIS-001"]
+            return None
+
+        monkeypatch.setattr(
+            "app.modules.ladysite.brands.Brands.get_date_rank", _rank
+        )
+        found = crawl_range("s1", past_days=6, future_days=0)
+        assert [i["code"] for i in found] == ["SSIS-001"]
+        # 全部日期都走完，没有因连续失败提前退出
+        assert len(calls) == 6
 
     def test_dedupes_across_days(self, monkeypatch):
         from app.modules.ladysite.brands import crawl_range
