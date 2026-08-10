@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+data/
+*.db
+*.log
+
+# 含真实凭证，不要提交
+app.env
+.env
+
+web/node_modules/
+# web/dist 需要提交：Dockerfile 直接复制它，不在镜像内构建前端

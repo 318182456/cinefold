@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+tests/
+data/
+*.db
+*.log
+.git/
+.gitignore
+app.env
+.env
+SPEC.md
+web/node_modules/
+web/src/

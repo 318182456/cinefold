@@ -1,0 +1,19 @@
+services:
+  byte-muse:
+    build: .
+    image: byte-muse:local
+    container_name: byte-muse
+    restart: unless-stopped
+    ports:
+      - "3750:3750"
+    volumes:
+      - ./data:/data
+      # 下载路径需与 qBittorrent 中的路径保持一致，便于入库校验
+      # - /volume3/h_video/Download:/downloads
+    environment:
+      TZ: Asia/Shanghai
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:3750/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3

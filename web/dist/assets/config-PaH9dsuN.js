@@ -1,0 +1,1 @@
+import{H as u,r as t}from"./index-DVOTKVHH.js";import{y as f}from"./index-YFyVbhgo.js";const l=u("config",()=>{const e=t({}),a=t(!1),r=t("BLUR");async function n(s=!1){if(a.value&&!s)return e.value;try{const o=await f();e.value=o||{},r.value=(o==null?void 0:o.image_mode)||"BLUR",a.value=!0}catch{}return e.value}return{config:e,loaded:a,imageMode:r,load:n}});export{l as u};

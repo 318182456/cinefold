@@ -1,0 +1,143 @@
+"""Transmission 下载客户端。
+
+接口与 QBitTorrentClient 保持一致，便于上层按配置切换。
+"""
+from __future__ import annotations
+
+import base64
+from typing import Sequence
+from urllib.parse import urlparse
+
+from loguru import logger
+
+from app.core.config import get_settings
+from app.utils import get_magnet_hash, get_torrent_hash
+
+
+class TransmissionClient:
+    def __init__(
+        self,
+        url: str = "",
+        username: str = "",
+        password: str = "",
+        download_path: str = "",
+        label: str = "",
+        verify_cert: bool | None = None,
+    ):
+        settings = get_settings()
+        self.url = url or settings.transmission_url
+        self.username = username or settings.transmission_username
+        self.password = password or settings.transmission_password
+        self.download_path = download_path or settings.transmission_download_path
+        self.label = label or settings.transmission_label
+        self.verify_cert = (
+            settings.transmission_verify_cert if verify_cert is None else verify_cert
+        )
+        self.client = None
+
+    # ------------------------------------------------------------------
+    def login_transmission(self) -> bool:
+        if not self.url:
+            logger.warning("未配置 Transmission 地址")
+            return False
+
+        try:
+            import urllib3
+            from transmission_rpc import Client
+
+            parsed = urlparse(self.url)
+            is_https = parsed.scheme == "https"
+
+            if is_https and not self.verify_cert:
+                # 反代常用自签证书，关闭校验并抑制随之而来的告警
+                urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+            self.client = Client(
+                protocol="https" if is_https else "http",
+                host=parsed.hostname or "localhost",
+                port=parsed.port or (443 if is_https else 9091),
+                # Transmission 的 RPC 路径默认是 /transmission/rpc
+                path=parsed.path if parsed.path not in ("", "/") else "/transmission/rpc",
+                username=self.username or None,
+                password=self.password or None,
+                timeout=30,
+            )
+            # transmission_rpc 不暴露 verify 参数，需直接改底层 session
+            if is_https and not self.verify_cert:
+                session = getattr(self.client, "_http_session", None)
+                if session is not None:
+                    session.verify = False
+            version = self.client.get_session().version
+            logger.info(f"Transmission 登录成功，版本 {version}")
+            return True
+        except Exception as exc:
+            logger.error(f"Transmission 登录失败: {exc}")
+            self.client = None
+            return False
+
+    def _ensure_client(self) -> bool:
+        return True if self.client is not None else self.login_transmission()
+
+    # ------------------------------------------------------------------
+    def add_torrent(self, content: bytes, code: str = "", save_path: str = "") -> str | None:
+        if not self._ensure_client():
+            return None
+
+        torrent_hash = get_torrent_hash(content)
+        try:
+            added = self.client.add_torrent(
+                base64.b64encode(content).decode(),
+                download_dir=save_path or self.download_path or None,
+                labels=[self.label] if self.label else None,
+            )
+            logger.info(f"[{code}] 已推送种子到 Transmission，hash={added.hashString}")
+            return added.hashString or torrent_hash
+        except Exception as exc:
+            logger.error(f"[{code}] 推送种子失败: {exc}")
+            return None
+
+    def add_torrent_by_magnet(self, magnet: str, code: str = "", save_path: str = "") -> str | None:
+        if not self._ensure_client():
+            return None
+
+        try:
+            added = self.client.add_torrent(
+                magnet,
+                download_dir=save_path or self.download_path or None,
+                labels=[self.label] if self.label else None,
+            )
+            logger.info(f"[{code}] 已推送磁链到 Transmission，hash={added.hashString}")
+            return added.hashString or get_magnet_hash(magnet)
+        except Exception as exc:
+            logger.error(f"[{code}] 推送磁链失败: {exc}")
+            return None
+
+    # ------------------------------------------------------------------
+    def monitor_torrent(self, hashes: Sequence[str] | None = None) -> list[dict]:
+        if not self._ensure_client():
+            return []
+
+        try:
+            torrents = self.client.get_torrents(ids=list(hashes) if hashes else None)
+            return [
+                {
+                    "hash": t.hashString,
+                    "name": t.name,
+                    "progress": round((t.percent_done or 0), 4),
+                    "state": str(t.status),
+                    "save_path": t.download_dir,
+                    "completed": (t.percent_done or 0) >= 1.0,
+                }
+                for t in torrents
+            ]
+        except Exception as exc:
+            logger.error(f"查询 Transmission 任务状态失败: {exc}")
+            return []
+
+    def test_connection(self) -> tuple[bool, str]:
+        if not self.login_transmission():
+            return False, "连接失败，请检查地址与账号密码"
+        try:
+            return True, f"连接成功，Transmission {self.client.get_session().version}"
+        except Exception as exc:
+            return False, str(exc)
