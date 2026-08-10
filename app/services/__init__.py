@@ -503,7 +503,17 @@ def dashboard_stats() -> dict:
         }
 
 
+def _cache_key(namespace: str, key: str) -> str:
+    return f"byte-muse:{namespace}:{key}"
+
+
 def get_rank_cache(namespace: str, key: str) -> str | None:
+    from app.core import redis as redis_cache
+
+    cached = redis_cache.get(_cache_key(namespace, key))
+    if cached is not None:
+        return cached
+
     from app.database.models import Cache
     with session_scope() as session:
         row = session.scalar(
@@ -513,6 +523,12 @@ def get_rank_cache(namespace: str, key: str) -> str | None:
 
 
 def set_rank_cache(namespace: str, key: str, content: str) -> None:
+    from app.core import redis as redis_cache
+
+    # Redis 写入成功就不再落库，榜单快照本身是可重建的
+    if redis_cache.set(_cache_key(namespace, key), content):
+        return
+
     from app.database.models import Cache
     with session_scope() as session:
         row = session.scalar(

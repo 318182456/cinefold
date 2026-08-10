@@ -32,6 +32,8 @@ SENSITIVE_KEYS = {
     "mteam_api_key", "wechat_corp_secret", "wechat_token",
     "wechat_encoding_aes_key", "telegram_bot_token", "secret_key",
     "cloudnas_password", "baidu_api_key", "google_api_key", "openai_api_key",
+    # 连接串里通常内嵌账号密码
+    "database_url", "redis_url",
 }
 
 DEFAULT_FILTER = {
@@ -197,6 +199,20 @@ class Settings:
     bt_header: str = ""
     bt_method: str = "get"
 
+    # --- 数据库 ---
+    # 留空则使用 DATA_DIR 下的 SQLite 文件；填了就连 PostgreSQL 等外部库
+    database_url: str = ""
+    db_pool_size: int = 5
+    db_max_overflow: int = 10
+    db_echo: bool = False
+
+    # --- Redis ---
+    # 留空则缓存回落到 cache 表，调度任务只存内存
+    redis_url: str = ""
+    redis_cache_ttl: int = 86400
+    # 开启后 APScheduler 的任务状态持久化到 Redis，重启不丢
+    redis_job_store: bool = False
+
     # --- 其他 ---
     javdb_host: str = "https://javdb.com"
     secret_key: str = ""
@@ -334,6 +350,15 @@ def load_settings() -> Settings:
         bt_json_data=_env("BT_JSON_DATA"),
         bt_header=_env("BT_HEADER"),
         bt_method=_env("BT_METHOD", "get").strip("'\""),
+
+        database_url=_env("DATABASE_URL"),
+        db_pool_size=_env_int("DB_POOL_SIZE", 5),
+        db_max_overflow=_env_int("DB_MAX_OVERFLOW", 10),
+        db_echo=_env_bool("DB_ECHO", False),
+
+        redis_url=_env("REDIS_URL"),
+        redis_cache_ttl=_env_int("REDIS_CACHE_TTL", 86400),
+        redis_job_store=_env_bool("REDIS_JOB_STORE", False),
 
         javdb_host=_env("JAVDB_HOST", "https://javdb.com"),
         secret_key=_env("SECRET_KEY"),

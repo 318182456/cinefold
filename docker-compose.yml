@@ -14,8 +14,49 @@ services:
       # - /volume3/h_video/Download:/downloads
     environment:
       TZ: Asia/Shanghai
+      # 默认用 /data 下的 SQLite，无需下面两个服务。
+      # 启用 postgres / redis 时取消对应注释，并加上 --profile：
+      #   docker compose --profile postgres --profile redis up -d
+      # DATABASE_URL: postgresql://byte_muse:byte_muse@postgres:5432/byte_muse
+      # REDIS_URL: redis://redis:6379/0
+      # REDIS_JOB_STORE: "True"
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:3750/api/health"]
       interval: 30s
       timeout: 5s
       retries: 3
+
+  postgres:
+    profiles: ["postgres"]
+    image: postgres:17-alpine
+    container_name: byte-muse-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: byte_muse
+      POSTGRES_PASSWORD: byte_muse
+      POSTGRES_DB: byte_muse
+      TZ: Asia/Shanghai
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U byte_muse -d byte_muse"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    profiles: ["redis"]
+    image: redis:7-alpine
+    container_name: byte-muse-redis
+    restart: unless-stopped
+    # 缓存与任务状态都可重建，用 AOF 保证重启后不丢即可
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - ./data/redis:/data
+    environment:
+      TZ: Asia/Shanghai
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5

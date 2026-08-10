@@ -174,6 +174,43 @@ INTERVAL_JOBS: dict[str, dict] = {
 # ======================================================================
 # 调度器管理
 # ======================================================================
+def _build_jobstores() -> dict:
+    """开启 REDIS_JOB_STORE 且 Redis 可用时，任务状态持久化到 Redis。
+
+    否则返回空配置，APScheduler 用默认的内存 jobstore。
+    """
+    settings = get_settings()
+    if not settings.redis_job_store:
+        return {}
+
+    from app.core import redis as redis_cache
+    client = redis_cache.get_client()
+    if client is None:
+        logger.warning("已开启 REDIS_JOB_STORE 但 Redis 不可用，任务状态仅存内存")
+        return {}
+
+    try:
+        from apscheduler.jobstores.redis import RedisJobStore
+    except ImportError:
+        logger.warning("未安装 redis 包，APScheduler 任务状态仅存内存")
+        return {}
+
+    try:
+        # jobstore 存的是 pickle 二进制，必须关掉 decode_responses
+        kwargs = dict(client.connection_pool.connection_kwargs)
+        kwargs.pop("decode_responses", None)
+        store = RedisJobStore(
+            jobs_key="byte-muse:jobs",
+            run_times_key="byte-muse:job_run_times",
+            **kwargs,
+        )
+        logger.info("APScheduler 任务状态持久化到 Redis")
+        return {"default": store}
+    except Exception as exc:
+        logger.warning(f"Redis jobstore 初始化失败，任务状态仅存内存: {exc}")
+        return {}
+
+
 def start_scheduler() -> BackgroundScheduler:
     global _scheduler
 
@@ -181,7 +218,10 @@ def start_scheduler() -> BackgroundScheduler:
         return _scheduler
 
     settings = get_settings()
-    _scheduler = BackgroundScheduler(timezone="Asia/Shanghai")
+    _scheduler = BackgroundScheduler(
+        timezone="Asia/Shanghai",
+        jobstores=_build_jobstores(),
+    )
 
     for job_id, meta in JOBS.items():
         cron = getattr(settings, meta["cron_key"], "")
@@ -220,9 +260,18 @@ def restart_scheduler() -> BackgroundScheduler:
     """配置变更后重建调度器。"""
     global _scheduler
     if _scheduler is not None and _scheduler.running:
+        # 持久化的 jobstore 会留下上一轮的任务，先清干净再重建
+        try:
+            _scheduler.remove_all_jobs()
+        except Exception as exc:
+            logger.warning(f"清理旧任务失败: {exc}")
         _scheduler.shutdown(wait=False)
     _scheduler = None
     get_settings(reload=True)
+
+    # 配置可能改了 REDIS_URL，重新探测连接
+    from app.core import redis as redis_cache
+    redis_cache.reset()
     return start_scheduler()
 
 

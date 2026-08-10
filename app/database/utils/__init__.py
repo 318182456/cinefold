@@ -1,6 +1,6 @@
-"""SQLite 轻量迁移工具。
+"""轻量迁移工具。
 
-SQLite 的 ALTER TABLE 能力有限，这里只覆盖新增/删除列这类常见变更。
+只覆盖新增/删除列这类常见变更，SQLite 与 PostgreSQL 通用。
 """
 from __future__ import annotations
 
@@ -15,6 +15,14 @@ def _column_names(engine: Engine, table: str) -> set[str]:
     return {col["name"] for col in inspector.get_columns(table)}
 
 
+def _quote(engine: Engine, identifier: str) -> str:
+    """按方言引用标识符。
+
+    user 是 PostgreSQL 的保留字，裸写会直接语法报错。
+    """
+    return engine.dialect.identifier_preparer.quote(identifier)
+
+
 def check_and_create_column(
     engine: Engine, table: str, column: str, column_type: str = "TEXT"
 ) -> bool:
@@ -22,9 +30,13 @@ def check_and_create_column(
     if column in _column_names(engine, table):
         return False
 
+    table_ref = _quote(engine, table)
+    column_ref = _quote(engine, column)
     try:
         with engine.begin() as conn:
-            conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {column_type}"))
+            conn.execute(text(
+                f"ALTER TABLE {table_ref} ADD COLUMN {column_ref} {column_type}"
+            ))
         logger.info(f"已为 {table} 新增列 {column}")
         return True
     except Exception as exc:
@@ -33,13 +45,15 @@ def check_and_create_column(
 
 
 def check_and_delete_column(engine: Engine, table: str, column: str) -> bool:
-    """列存在时删除。需要 SQLite 3.35+。"""
+    """列存在时删除。SQLite 需 3.35+。"""
     if column not in _column_names(engine, table):
         return False
 
+    table_ref = _quote(engine, table)
+    column_ref = _quote(engine, column)
     try:
         with engine.begin() as conn:
-            conn.execute(text(f"ALTER TABLE {table} DROP COLUMN {column}"))
+            conn.execute(text(f"ALTER TABLE {table_ref} DROP COLUMN {column_ref}"))
         logger.info(f"已从 {table} 删除列 {column}")
         return True
     except Exception as exc:
