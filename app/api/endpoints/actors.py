@@ -22,7 +22,7 @@ class ActorRequest(BaseModel):
 def list_actors(
     keyword: str = "",
     page: int = 1,
-    size: int = 30,
+    size: int = 15,
     current_user: str = Depends(get_current_user),
 ):
     with session_scope() as session:

@@ -61,7 +61,7 @@ export const cancelCode = (code) => http.post('/codes/cancel', { code })
 export const downloadCode = (payload) => http.post('/codes/download', payload)
 export const downloadAll = () => http.post('/codes/download/all')
 export const getReleaseToday = () => http.get('/codes/release_today')
-export const getRecommend = (limit = 20) => http.get('/codes/recommend', { params: { limit } })
+export const getRecommend = (limit = 15) => http.get('/codes/recommend', { params: { limit } })
 export const translateTitles = () => http.post('/codes/translate')
 
 // ---------------------------------------------------------------- 榜单

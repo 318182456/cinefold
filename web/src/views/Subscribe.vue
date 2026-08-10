@@ -10,7 +10,7 @@ const toast = useToast()
 const items = ref([])
 const total = ref(0)
 const page = ref(1)
-const size = 30
+const size = 15
 const status = ref(1)
 const loading = ref(false)
 

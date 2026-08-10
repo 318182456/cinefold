@@ -16,6 +16,9 @@ from app.utils import get_true_code
 
 router = APIRouter(tags=["subscribe"])
 
+# 列表页与榜单每页返回多少条。每条都带封面，太多会拖慢首屏
+PAGE_SIZE = 15
+
 
 class SubscribeRequest(BaseModel):
     code: str
@@ -37,7 +40,7 @@ def dashboard(current_user: str = Depends(get_current_user)):
 def list_code(
     status: int | None = None,
     page: int = 1,
-    size: int = 30,
+    size: int = PAGE_SIZE,
     current_user: str = Depends(get_current_user),
 ):
     """番号列表，可按状态筛选。"""
@@ -150,7 +153,7 @@ def release_today(current_user: str = Depends(get_current_user)):
 
 
 @router.get("/codes/recommend")
-def recommend(limit: int = 20, current_user: str = Depends(get_current_user)):
+def recommend(limit: int = PAGE_SIZE, current_user: str = Depends(get_current_user)):
     """推荐：评分高且未订阅的番号。"""
     with session_scope() as session:
         rows = session.scalars(
@@ -163,15 +166,19 @@ def recommend(limit: int = 20, current_user: str = Depends(get_current_user)):
 
 
 @router.get("/rank")
-def rank(rank_type: str = "", current_user: str = Depends(get_current_user)):
+def rank(
+    rank_type: str = "",
+    limit: int = PAGE_SIZE,
+    current_user: str = Depends(get_current_user),
+):
     """榜单，带标题封面。抓不到时返回本地高分番号。"""
     from app import services
 
     items = services.get_rank_items(rank_type)
     if items:
-        return ResponseEntity.ok({"items": items})
+        return ResponseEntity.ok({"items": items[:max(limit, 1)]})
 
-    return recommend(limit=30, current_user=current_user)
+    return recommend(limit=limit, current_user=current_user)
 
 
 @router.post("/rank/subscribe")
@@ -182,9 +189,9 @@ def rank_subscribe(current_user: str = Depends(get_current_user)):
 
 
 @router.get("/hot")
-def hot(current_user: str = Depends(get_current_user)):
+def hot(limit: int = PAGE_SIZE, current_user: str = Depends(get_current_user)):
     """热门。"""
-    return recommend(limit=30, current_user=current_user)
+    return recommend(limit=limit, current_user=current_user)
 
 
 @router.get("/brands")
