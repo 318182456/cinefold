@@ -267,6 +267,20 @@ class TestFilter:
         result = filter_torrents(items, {"exclude_uhd": True})
         assert [t.id for t in result] == [2]
 
+    def test_exclude_vr(self):
+        items = [_t(id=1, title="DSVR-1234 VR"), _t(id=2, title="SSIS-001 1080p")]
+        result = filter_torrents(items, {"exclude_vr": True})
+        assert [t.id for t in result] == [2]
+
+    def test_only_vr(self):
+        items = [_t(id=1, title="VRKM-500"), _t(id=2, title="SSIS-001")]
+        assert [t.id for t in filter_torrents(items, {"only_vr": True})] == [1]
+
+    def test_vr_not_matched_inside_words(self):
+        """避免 'vr' 出现在普通单词里被误判。"""
+        items = [_t(id=1, title="SSIS-001 Louvre Special")]
+        assert [t.id for t in filter_torrents(items, {"exclude_vr": True})] == [1]
+
     def test_size_range_defaults_to_mb(self):
         """无单位按 MB 解析，与配置语义一致。"""
         items = [_t(id=1, size_mb=500), _t(id=2, size_mb=5000), _t(id=3, size_mb=15000)]
@@ -336,6 +350,55 @@ class TestSort:
     def test_empty_rule_keeps_order(self):
         items = [_t(id=1), _t(id=2)]
         assert [t.id for t in sort_torrents(items, "")] == [1, 2]
+
+
+class TestPrimarySite:
+    """PRIMARY_SITE 决定站点优先级顺序。"""
+
+    class _FakeSite:
+        def __init__(self, name):
+            self.name = name
+
+    def _patch_sites(self, monkeypatch, names):
+        sites = [self._FakeSite(n) for n in names]
+        monkeypatch.setattr("app.modules.ptsite.get_sites", lambda: sites)
+
+    def test_primary_goes_first(self, monkeypatch):
+        from app import services
+
+        self._patch_sites(monkeypatch, ["MTeam", "Rousi", "PTT"])
+        monkeypatch.setattr(
+            services.get_settings(), "primary_site", "PTT", raising=False
+        )
+        assert services.build_site_priority() == ["PTT", "MTeam", "Rousi"]
+
+    def test_case_insensitive_match(self, monkeypatch):
+        from app import services
+
+        self._patch_sites(monkeypatch, ["MTeam", "Rousi"])
+        monkeypatch.setattr(
+            services.get_settings(), "primary_site", "rousi", raising=False
+        )
+        # 用站点自身的大小写，与 Torrent.site 对得上
+        assert services.build_site_priority() == ["Rousi", "MTeam"]
+
+    def test_multiple_primaries_keep_order(self, monkeypatch):
+        from app import services
+
+        self._patch_sites(monkeypatch, ["MTeam", "Rousi", "PTT"])
+        monkeypatch.setattr(
+            services.get_settings(), "primary_site", "PTT,Rousi", raising=False
+        )
+        assert services.build_site_priority() == ["PTT", "Rousi", "MTeam"]
+
+    def test_empty_falls_back_to_registration_order(self, monkeypatch):
+        from app import services
+
+        self._patch_sites(monkeypatch, ["MTeam", "Rousi"])
+        monkeypatch.setattr(
+            services.get_settings(), "primary_site", "", raising=False
+        )
+        assert services.build_site_priority() == ["MTeam", "Rousi"]
 
 
 class TestMisc:

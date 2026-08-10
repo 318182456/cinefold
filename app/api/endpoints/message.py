@@ -123,12 +123,9 @@ async def post_message(request: Request):
 
 
 # ----------------------------------------------------------------------
-async def _handle_telegram(request: Request):
+def handle_telegram_update(payload: dict) -> None:
+    """处理一条 Telegram 更新。webhook 与 polling 共用。"""
     settings = get_settings()
-    try:
-        payload = await request.json()
-    except Exception:
-        return ResponseEntity.ok()
 
     message = payload.get("message") or payload.get("edited_message") or {}
     text = (message.get("text") or "").strip()
@@ -136,18 +133,30 @@ async def _handle_telegram(request: Request):
     message_id = message.get("message_id", 0)
 
     if not text:
-        return ResponseEntity.ok()
+        return
 
     # 白名单校验，避免陌生人操作
     whitelist = [x.strip() for x in (settings.telegram_whitelist or "").split("|") if x.strip()]
     if whitelist and chat_id not in whitelist:
         logger.warning(f"拒绝非白名单用户 {chat_id}")
-        return ResponseEntity.ok()
+        return
 
+    logger.info(f"[TG] 收到 {chat_id} 的消息: {text[:80]}")
     reply = _dispatch_command(text)
     if reply:
         from app import services
         services.reply_text_msg(reply, message_id, chat_id)
+    else:
+        logger.info(f"[TG] 消息中未识别到番号，不回复: {text[:80]}")
+
+
+async def _handle_telegram(request: Request):
+    try:
+        payload = await request.json()
+    except Exception:
+        return ResponseEntity.ok()
+
+    handle_telegram_update(payload)
     return ResponseEntity.ok()
 
 

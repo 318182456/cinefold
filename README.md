@@ -79,12 +79,22 @@ MTEAM_API_KEY=xxx
 ### 过滤与排序
 
 ```bash
-DEFAULT_FILTER='{"only_chinese": false, "exclude_uhd": true, "min_size": "2048", "max_size": "10240"}'
+DEFAULT_FILTER='{"only_chinese": false, "exclude_uhd": true, "exclude_vr": true, "min_size": "5GB", "max_size": "10GB"}'
 DEFAULT_SORT='free,chinese,uc,!uc,site,seeders,!uhd,uhd'
+PRIMARY_SITE=MTeam
 ```
 
-- **过滤**：`only_*` 只要、`exclude_*` 排除、`min_size`/`max_size` 单位 MB
-- **排序**：逗号分隔，越靠前优先级越高，`!` 前缀表示降权（`!uhd` = 优先非 4K）
+- **过滤**：不满足的种子直接排除
+  - `only_*` 只要、`exclude_*` 排除，可选属性 `chinese` `uc` `uhd` `vr` `free`
+  - `min_size` / `max_size` 支持 `5GB` 写法，无单位时按 MB
+  - `include_keywords` / `exclude_keywords` 逗号分隔，匹配标题
+- **排序**：多个种子都满足时选哪个。逗号分隔，越靠前优先级越高，
+  `!` 前缀表示降权（`!uhd` = 优先非 4K）。可用键：
+  `free` `chinese` `uc` `uhd` `vr` `seeders` `size` `site`
+- **主站**：`PRIMARY_SITE` 指定优先选哪个 PT 站，逗号分隔可给多个。
+  仅在 `DEFAULT_SORT` 含 `site` 时生效，且排在它前面的键优先级更高
+
+设置页「过滤与排序」可视化配置这些项，无需手写 JSON。
 
 ### 网络
 
@@ -156,7 +166,7 @@ BYPASS_URL=http://host:8191/v1
 
 ## 消息指令
 
-配置 Telegram Bot 后，把 webhook 指向 `https://<外网地址>/api/v1/message`：
+配置 Telegram Bot 后可用以下指令：
 
 ```
 /sub 番号      订阅
@@ -166,7 +176,23 @@ BYPASS_URL=http://host:8191/v1
 /help          帮助
 ```
 
-直接发送番号等同于 `/sub`。建议配置 `TELEGRAM_WHITELIST` 限制可用用户。
+直接发送番号等同于 `/sub`，一条消息里写多个也能识别。建议配置
+`TELEGRAM_WHITELIST` 限制可用用户。
+
+### 接收上行消息
+
+要让 bot 收到消息，需二选一（`TELEGRAM_RECEIVE_MODE`）：
+
+| 方式 | 适用场景 | 配置 |
+| --- | --- | --- |
+| `webhook` | 有公网 HTTPS 地址 | 填 `EXTERNAL_DOMAIN`，在设置页点「设置 Webhook」 |
+| `polling` | 家宽 / NAS，无公网地址 | 选 polling 保存即可，后台自动长轮询 |
+
+Webhook 要求 HTTPS，端口限 443/80/88/8443。两种方式互斥，切到 polling
+会自动删除已有 webhook。
+
+设置页「通知」分组可查看当前状态：webhook 地址、堆积消息数、最近回调错误。
+Bot 能推送但收不到消息时，先看这里。
 
 ---
 

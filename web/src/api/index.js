@@ -91,6 +91,10 @@ export const getLogs = (lines = 300, keyword = '') =>
 export const listCron = () => http.get('/cron')
 export const runTask = (jobId) => http.post('/task', null, { params: { job_id: jobId } })
 export const testConnection = (target) => http.get('/test', { params: { target } })
+export const listPtSites = () => http.get('/ptsites')
+export const getTelegramReceive = () => http.get('/telegram/receive')
+export const setTelegramWebhook = (url = '') => http.post('/telegram/webhook', { url })
+export const deleteTelegramWebhook = () => http.delete('/telegram/webhook')
 
 // 图片走后端代理，绕过防盗链。
 // 带上番号后，后端按 pics/<番号>/banner.jpg 命中本地缓存，不必回源。

@@ -1,10 +1,13 @@
 <script setup>
 import { onMounted, reactive, ref } from 'vue'
-import { getConfig, saveConfig, testConnection } from '@/api'
+import {
+  deleteTelegramWebhook, getConfig, getTelegramReceive, listPtSites,
+  saveConfig, setTelegramWebhook, testConnection,
+} from '@/api'
 import { useToast } from '@/composables/useToast'
 import { useConfigStore } from '@/stores/config'
+import ConfigField from '@/components/ConfigField.vue'
 import LoadingBlock from '@/components/LoadingBlock.vue'
-import TagInput from '@/components/TagInput.vue'
 
 const toast = useToast()
 const configStore = useConfigStore()
@@ -16,149 +19,325 @@ const activeGroup = ref('downloader')
 const testing = ref('')
 const testResults = reactive({})
 
-// t: text(默认) / password / bool / select / textarea / tags
+// Telegram 上行消息接收状态
+const tgReceive = ref(null)
+const tgBusy = ref('')
+
+// PT 主站下拉。取实际配好的站点，空串表示不指定
+const ptSiteOptions = ref([''])
+
+// 字段类型 t: text(默认) / password / bool / select / textarea / tags / size
+// 每个分组按用途拆成若干 section，每个 section 一张卡片
 const GROUPS = [
   {
     key: 'downloader',
     title: '下载器',
-    fields: [
-      { k: 'qbittorrent_url', label: 'qBittorrent 地址', ph: 'http://192.168.1.10:8080' },
-      { k: 'qbittorrent_username', label: '用户名' },
-      { k: 'qbittorrent_password', label: '密码', t: 'password' },
-      { k: 'qbittorrent_download_path', label: '下载路径' },
-      { k: 'qbittorrent_category', label: '分类' },
-      { k: 'qbittorrent_verify_cert', label: '校验 HTTPS 证书', t: 'bool',
-        hint: '使用自签证书或反代时保持关闭' },
-      { k: 'transmission_url', label: 'Transmission 地址' },
-      { k: 'transmission_username', label: '用户名' },
-      { k: 'transmission_password', label: '密码', t: 'password' },
-      { k: 'transmission_download_path', label: '下载路径' },
-      { k: 'transmission_label', label: '标签' },
+    sections: [
+      {
+        title: 'qBittorrent',
+        fields: [
+          { k: 'qbittorrent_url', label: '地址', ph: 'http://192.168.1.10:8080' },
+          { k: 'qbittorrent_username', label: '用户名' },
+          { k: 'qbittorrent_password', label: '密码', t: 'password' },
+          { k: 'qbittorrent_download_path', label: '下载路径' },
+          { k: 'qbittorrent_category', label: '分类' },
+          { k: 'qbittorrent_verify_cert', label: '校验 HTTPS 证书', t: 'bool',
+            hint: '使用自签证书或反代时保持关闭' },
+        ],
+      },
+      {
+        title: 'Transmission',
+        fields: [
+          { k: 'transmission_url', label: '地址' },
+          { k: 'transmission_username', label: '用户名' },
+          { k: 'transmission_password', label: '密码', t: 'password' },
+          { k: 'transmission_download_path', label: '下载路径' },
+          { k: 'transmission_label', label: '标签' },
+        ],
+      },
     ],
     tests: ['qbittorrent', 'transmission'],
   },
   {
     key: 'media',
     title: '媒体库',
-    fields: [
-      { k: 'emby_url', label: 'Emby 地址' },
-      { k: 'emby_api_key', label: 'Emby API Key', t: 'password' },
-      { k: 'jellyfin_url', label: 'Jellyfin 地址' },
-      { k: 'jellyfin_api_key', label: 'Jellyfin API Key', t: 'password' },
-      { k: 'jellyfin_user', label: 'Jellyfin 用户名' },
-      { k: 'plex_url', label: 'Plex 地址' },
-      { k: 'plex_token', label: 'Plex Token', t: 'password' },
-      { k: 'enable_auto_complete', label: '跳过已入库资源', t: 'bool' },
+    sections: [
+      {
+        title: 'Emby',
+        fields: [
+          { k: 'emby_url', label: '地址' },
+          { k: 'emby_api_key', label: 'API Key', t: 'password' },
+        ],
+      },
+      {
+        title: 'Jellyfin',
+        fields: [
+          { k: 'jellyfin_url', label: '地址' },
+          { k: 'jellyfin_api_key', label: 'API Key', t: 'password' },
+          { k: 'jellyfin_user', label: '用户名' },
+        ],
+      },
+      {
+        title: 'Plex',
+        fields: [
+          { k: 'plex_url', label: '地址' },
+          { k: 'plex_token', label: 'Token', t: 'password' },
+        ],
+      },
+      {
+        title: '通用',
+        fields: [
+          { k: 'enable_auto_complete', label: '跳过已入库资源', t: 'bool',
+            hint: '订阅前先查媒体库，已有的不再下载' },
+        ],
+      },
     ],
     tests: ['emby', 'jellyfin', 'plex'],
   },
   {
     key: 'pt',
     title: 'PT 站点',
-    fields: [
-      { k: 'mteam_api_key', label: 'M-Team API Key', t: 'password' },
-      { k: 'rousi_username', label: 'Rousi 用户名',
-        hint: '填了账号密码会自动登录续期' },
-      { k: 'rousi_password', label: 'Rousi 密码', t: 'password' },
-      { k: 'rousi_token', label: 'Rousi Token', t: 'password',
-        hint: '填了账号密码可留空；手动填时到期需自行更新' },
-      { k: 'rousi_passkey', label: 'Rousi Passkey', t: 'password',
-        hint: '取自 announce 地址中间那段' },
-      { k: 'ptt_cookie', label: 'PTT Cookie', t: 'password' },
-      { k: 'nicept_cookie', label: 'NicePT Cookie', t: 'password' },
+    sections: [
+      {
+        title: 'M-Team',
+        fields: [
+          { k: 'mteam_api_key', label: 'API Key', t: 'password' },
+        ],
+      },
+      {
+        title: 'Rousi',
+        hint: '填了账号密码会自动登录续期，Token 可留空',
+        fields: [
+          { k: 'rousi_username', label: '用户名' },
+          { k: 'rousi_password', label: '密码', t: 'password' },
+          { k: 'rousi_token', label: 'Token', t: 'password',
+            hint: '手动填时到期需自行更新' },
+          { k: 'rousi_passkey', label: 'Passkey', t: 'password',
+            hint: '取自 announce 地址中间那段' },
+        ],
+      },
+      {
+        title: 'PTTime',
+        fields: [
+          { k: 'ptt_cookie', label: 'Cookie', t: 'password' },
+        ],
+      },
+      {
+        title: 'NicePT',
+        fields: [
+          { k: 'nicept_cookie', label: 'Cookie', t: 'password' },
+        ],
+      },
     ],
-    tests: ['mteam'],
+    tests: ['mteam', 'rousi', 'ptt', 'nicept'],
   },
   {
     key: 'bt',
     title: '自定义 BT 源',
-    fields: [
-      { k: 'bt_url', label: '请求地址', hint: '支持 ${keyword} 占位符' },
-      { k: 'bt_method', label: '请求方法', t: 'select', options: ['get', 'post'] },
-      { k: 'bt_header', label: '请求头 JSON', t: 'textarea' },
-      { k: 'bt_json_data', label: '请求体 JSON', t: 'textarea' },
+    sections: [
+      {
+        title: '请求配置',
+        hint: '接入自建或第三方搜索接口',
+        fields: [
+          { k: 'bt_url', label: '请求地址', hint: '支持 ${keyword} 占位符' },
+          { k: 'bt_method', label: '请求方法', t: 'select', options: ['get', 'post'] },
+          { k: 'bt_header', label: '请求头 JSON', t: 'textarea' },
+          { k: 'bt_json_data', label: '请求体 JSON', t: 'textarea' },
+        ],
+      },
     ],
   },
   {
     key: 'notify',
     title: '通知',
-    fields: [
-      { k: 'telegram_bot_token', label: 'Telegram Bot Token', t: 'password' },
-      { k: 'telegram_chat_id', label: 'Telegram Chat ID' },
-      { k: 'telegram_spoiler', label: '图片防剧透', t: 'bool' },
-      { k: 'telegram_whitelist', label: '白名单', hint: '多个用 | 分隔' },
-      { k: 'msg_allow_prefixes', label: '番号前缀白名单', t: 'tags', upper: true,
-        ph: '留空则不限制',
-        hint: '消息订阅只接受这些前缀；留空表示全部接受',
-        suggestions: ['SSIS', 'NHDTB', 'JUL', 'ABP', 'IPX', 'MIDE', 'FC2'] },
-      { k: 'msg_block_prefixes', label: '番号前缀黑名单', t: 'tags', upper: true,
-        ph: '留空则不屏蔽',
-        hint: '优先于白名单，命中即不订阅',
-        suggestions: ['NHDTA', 'NHDTB', 'FC2'] },
-      { k: 'msg_max_codes', label: '单条消息番号上限',
-        hint: '超出部分不订阅并在回复中列出，0 表示不限' },
-      { k: 'msg_auto_download', label: '订阅后立即检索', t: 'bool',
-        hint: '开启后消息订阅会在后台搜种并推给下载器；关闭则等每日订阅下载任务' },
-      { k: 'wechat_corp_id', label: '企业微信 CorpID' },
-      { k: 'wechat_corp_secret', label: '企业微信 Secret', t: 'password' },
-      { k: 'wechat_agent_id', label: '企业微信 AgentID' },
-      { k: 'wechat_to_user', label: '推送用户' },
-      { k: 'wechat_banner', label: '推送横幅图', t: 'bool' },
+    sections: [
+      {
+        title: 'Telegram',
+        fields: [
+          { k: 'telegram_bot_token', label: 'Bot Token', t: 'password' },
+          { k: 'telegram_chat_id', label: 'Chat ID' },
+          { k: 'telegram_whitelist', label: '白名单', hint: '多个用 | 分隔，留空则不限制' },
+          { k: 'telegram_spoiler', label: '图片防剧透', t: 'bool' },
+        ],
+      },
+      {
+        title: '上行消息接收',
+        hint: '要让 bot 收到消息，二选一',
+        fields: [
+          { k: 'telegram_receive_mode', label: '接收方式', t: 'select',
+            options: ['webhook', 'polling'],
+            hint: 'webhook 需公网 HTTPS；无公网地址选 polling' },
+          { k: 'external_domain', label: '外网访问地址', ph: 'https://example.com',
+            hint: '会自动补 /api/v1/message' },
+        ],
+        panel: 'telegram-receive',
+      },
+      {
+        title: '消息订阅规则',
+        hint: '收到消息后如何处理其中的番号',
+        fields: [
+          { k: 'msg_allow_prefixes', label: '番号前缀白名单', t: 'tags', upper: true,
+            ph: '留空则不限制',
+            hint: '只接受这些前缀；留空表示全部接受',
+            suggestions: ['SSIS', 'NHDTB', 'JUL', 'ABP', 'IPX', 'MIDE', 'FC2'] },
+          { k: 'msg_block_prefixes', label: '番号前缀黑名单', t: 'tags', upper: true,
+            ph: '留空则不屏蔽',
+            hint: '优先于白名单，命中即不订阅',
+            suggestions: ['NHDTA', 'NHDTB', 'FC2'] },
+          { k: 'msg_max_codes', label: '单条消息番号上限',
+            hint: '超出部分不订阅并在回复中列出，0 表示不限' },
+          { k: 'msg_auto_download', label: '订阅后立即检索', t: 'bool',
+            hint: '开启后在后台搜种并推给下载器；关闭则等每日订阅下载任务' },
+        ],
+      },
+      {
+        title: '企业微信',
+        fields: [
+          { k: 'wechat_corp_id', label: 'CorpID' },
+          { k: 'wechat_corp_secret', label: 'Secret', t: 'password' },
+          { k: 'wechat_agent_id', label: 'AgentID' },
+          { k: 'wechat_to_user', label: '推送用户' },
+          { k: 'wechat_banner', label: '推送横幅图', t: 'bool' },
+        ],
+      },
     ],
     tests: ['telegram', 'wechat'],
   },
   {
     key: 'filter',
     title: '过滤与排序',
-    fields: [
-      { k: 'default_sort', label: '排序规则', hint: '逗号分隔，! 前缀表示降权' },
-      { k: 'max_actor', label: '最大共演人数' },
-      { k: 'main_site', label: '主资源站', t: 'select', options: ['ALL', 'javdb', 'javbus'] },
-      { k: 'image_mode', label: '图片模式', t: 'select', options: ['BLUR', 'VISIBLE', 'INVISIBLE'] },
-      { k: 'enable_photo_cache', label: '图片持久化', t: 'bool' },
+    sections: [
+      {
+        title: '种子筛选',
+        hint: '不满足条件的种子直接排除，不会下载',
+        fields: [
+          { k: 'min_size', label: '最小体积', t: 'size', group: 'default_filter',
+            ph: '如 5GB', hint: '留空不限' },
+          { k: 'max_size', label: '最大体积', t: 'size', group: 'default_filter',
+            ph: '如 10GB', hint: '留空不限' },
+          { k: 'only_free', label: '只要免费种', t: 'bool', group: 'default_filter' },
+          { k: 'only_chinese', label: '只要中文字幕', t: 'bool', group: 'default_filter' },
+          { k: 'only_uc', label: '只要无码', t: 'bool', group: 'default_filter' },
+          { k: 'exclude_uc', label: '排除无码', t: 'bool', group: 'default_filter' },
+          { k: 'only_uhd', label: '只要 4K', t: 'bool', group: 'default_filter' },
+          { k: 'exclude_uhd', label: '排除 4K', t: 'bool', group: 'default_filter' },
+          { k: 'only_vr', label: '只要 VR', t: 'bool', group: 'default_filter' },
+          { k: 'exclude_vr', label: '排除 VR', t: 'bool', group: 'default_filter',
+            hint: 'VR 体积大且需专用播放器' },
+          { k: 'include_keywords', label: '标题必含关键词', group: 'default_filter',
+            hint: '逗号分隔，任一命中即通过' },
+          { k: 'exclude_keywords', label: '标题排除关键词', group: 'default_filter',
+            hint: '逗号分隔，任一命中即排除' },
+        ],
+      },
+      {
+        title: '优先级',
+        hint: '多个种子都满足条件时选哪个',
+        fields: [
+          { k: 'primary_site', label: 'PT 主站', t: 'select',
+            hint: '多站都有结果时优先选它，需排序规则里含 site' },
+          { k: 'default_sort', label: '排序规则',
+            hint: '逗号分隔，靠前的优先级高，! 前缀表示降权' },
+        ],
+      },
+      {
+        title: '展示',
+        fields: [
+          { k: 'main_site', label: '主资源站', t: 'select', options: ['ALL', 'javdb', 'javbus'],
+            hint: '番号信息与封面的来源' },
+          { k: 'max_actor', label: '最大共演人数' },
+          { k: 'image_mode', label: '图片模式', t: 'select',
+            options: ['BLUR', 'VISIBLE', 'INVISIBLE'] },
+          { k: 'enable_photo_cache', label: '图片持久化', t: 'bool' },
+        ],
+      },
     ],
   },
   {
     key: 'schedule',
     title: '定时任务',
-    fields: [
-      { k: 'download_schedule_time', label: '订阅下载', hint: 'crontab 格式' },
-      { k: 'actor_schedule_time', label: '演员订阅' },
-      { k: 'rank_schedule_time', label: '榜单订阅' },
-      { k: 'sync_hot_time', label: '同步热门' },
-      { k: 'sync_brands_time', label: '同步厂牌' },
-      { k: 'sync_actors_time', label: '同步演员' },
-      { k: 'sync_news', label: '同步新片' },
-      { k: 'fill_empty_image_time', label: '补全缺图' },
-      { k: 'rank_page', label: '榜单订阅页数', hint: '0 表示不自动订阅' },
-      { k: 'rank_type', label: '榜单类型', t: 'select', options: ['', 'daily', 'weekly', 'monthly'] },
-      { k: 'brand_type', label: '厂牌订阅', hint: 'all 或逗号分隔，如 s1,moodyz' },
+    sections: [
+      {
+        title: '订阅与下载',
+        hint: 'crontab 格式，留空则不执行',
+        fields: [
+          { k: 'download_schedule_time', label: '订阅下载' },
+          { k: 'actor_schedule_time', label: '演员订阅' },
+          { k: 'rank_schedule_time', label: '榜单订阅' },
+        ],
+      },
+      {
+        title: '数据同步',
+        fields: [
+          { k: 'sync_hot_time', label: '同步热门' },
+          { k: 'sync_brands_time', label: '同步厂牌' },
+          { k: 'sync_actors_time', label: '同步演员' },
+          { k: 'sync_news', label: '同步新片' },
+          { k: 'fill_empty_image_time', label: '补全缺图' },
+        ],
+      },
+      {
+        title: '订阅范围',
+        fields: [
+          { k: 'rank_page', label: '榜单订阅页数', hint: '0 表示不自动订阅' },
+          { k: 'rank_type', label: '榜单类型', t: 'select',
+            options: ['', 'daily', 'weekly', 'monthly'] },
+          { k: 'brand_type', label: '厂牌订阅', hint: 'all 或逗号分隔，如 s1,moodyz' },
+        ],
+      },
     ],
   },
   {
     key: 'other',
     title: '其他',
-    fields: [
-      { k: 'proxy', label: 'HTTP/SOCKS 代理', ph: 'socks5://127.0.0.1:7890' },
-      { k: 'bypass_url', label: '反爬绕过服务', ph: 'http://127.0.0.1:8191/v1', hint: 'FlareSolverr 等，直连被拦时改走它' },
-      { k: 'image_proxy_hosts', label: '图片代理域名', hint: '逗号分隔，追加到内置白名单' },
-      { k: 'github_token', label: 'GitHub Token', t: 'password',
-        hint: '检测新版本用。镜像公开时可留空；私有镜像需 read:packages 权限' },
-      { k: 'javdb_host', label: 'JavDB 地址' },
-      { k: 'external_domain', label: '外网访问地址' },
-      { k: 'openai_url', label: 'AI 翻译接口' },
-      { k: 'openai_model', label: 'AI 模型' },
-      { k: 'openai_api_key', label: 'AI API Key', t: 'password' },
-      { k: 'baidu_app_id', label: '百度翻译 AppID' },
-      { k: 'baidu_api_key', label: '百度翻译 Key', t: 'password' },
-      { k: 'google_api_key', label: 'Google 翻译 Key', t: 'password' },
-      { k: 'cloudnas_url', label: 'CloudDrive2 地址' },
-      { k: 'cloudnas_username', label: 'CD2 用户名' },
-      { k: 'cloudnas_password', label: 'CD2 密码', t: 'password' },
-      { k: 'cloudnas_savepath', label: 'CD2 保存路径' },
+    sections: [
+      {
+        title: '网络',
+        fields: [
+          { k: 'proxy', label: 'HTTP/SOCKS 代理', ph: 'socks5://127.0.0.1:7890' },
+          { k: 'bypass_url', label: '反爬绕过服务', ph: 'http://127.0.0.1:8191/v1',
+            hint: 'FlareSolverr 等，直连被拦时改走它' },
+          { k: 'image_proxy_hosts', label: '图片代理域名',
+            hint: '逗号分隔，追加到内置白名单' },
+          { k: 'javdb_host', label: 'JavDB 地址' },
+        ],
+      },
+      {
+        title: '翻译',
+        hint: '按 AI → 百度 → Google 的顺序取第一个配好的',
+        fields: [
+          { k: 'openai_url', label: 'AI 翻译接口' },
+          { k: 'openai_model', label: 'AI 模型' },
+          { k: 'openai_api_key', label: 'AI API Key', t: 'password' },
+          { k: 'baidu_app_id', label: '百度翻译 AppID' },
+          { k: 'baidu_api_key', label: '百度翻译 Key', t: 'password' },
+          { k: 'google_api_key', label: 'Google 翻译 Key', t: 'password' },
+        ],
+      },
+      {
+        title: 'CloudDrive2',
+        fields: [
+          { k: 'cloudnas_url', label: '地址' },
+          { k: 'cloudnas_username', label: '用户名' },
+          { k: 'cloudnas_password', label: '密码', t: 'password' },
+          { k: 'cloudnas_savepath', label: '保存路径' },
+        ],
+      },
+      {
+        title: '版本检测',
+        fields: [
+          { k: 'github_token', label: 'GitHub Token', t: 'password',
+            hint: '镜像公开时可留空；私有镜像需 read:packages 权限' },
+        ],
+      },
     ],
   },
 ]
+
+/** 分组内的全部字段，save 时按此收集 */
+function groupFields(group) {
+  return group.sections.flatMap((section) => section.fields)
+}
 
 async function load() {
   loading.value = true
@@ -178,16 +357,70 @@ async function save() {
     // 只提交当前分组，避免一次写入过多字段
     const group = GROUPS.find((item) => item.key === activeGroup.value)
     const payload = {}
-    group.fields.forEach((field) => {
-      payload[field.k] = form[field.k]
+    groupFields(group).forEach((field) => {
+      if (field.group) {
+        // 嵌套项整体提交，后端按 dict 覆盖
+        payload[field.group] = form[field.group]
+      } else {
+        payload[field.k] = form[field.k]
+      }
     })
     await saveConfig(payload)
     toast.success('配置已保存')
     await configStore.load(true)
+    if (activeGroup.value === 'notify') await loadTgReceive()
   } catch (err) {
     toast.error(err.message)
   } finally {
     saving.value = false
+  }
+}
+
+async function loadPtSites() {
+  try {
+    const data = await listPtSites()
+    // 空串排首位，表示不指定主站
+    ptSiteOptions.value = ['', ...(data?.sites || [])]
+  } catch {
+    ptSiteOptions.value = ['']
+  }
+}
+
+async function loadTgReceive() {
+  try {
+    tgReceive.value = await getTelegramReceive()
+  } catch {
+    // Token 没配或网络不通时不展示状态，不打扰用户
+    tgReceive.value = null
+  }
+}
+
+async function applyWebhook() {
+  tgBusy.value = 'set'
+  try {
+    // 用输入框里的当前值，省得先保存再设置
+    const data = await setTelegramWebhook(form.external_domain || '')
+    if (data.success) toast.success(data.message)
+    else toast.error(data.message)
+    await loadTgReceive()
+  } catch (err) {
+    toast.error(err.message)
+  } finally {
+    tgBusy.value = ''
+  }
+}
+
+async function removeWebhook() {
+  tgBusy.value = 'del'
+  try {
+    const data = await deleteTelegramWebhook()
+    if (data.success) toast.success(data.message)
+    else toast.error(data.message)
+    await loadTgReceive()
+  } catch (err) {
+    toast.error(err.message)
+  } finally {
+    tgBusy.value = ''
   }
 }
 
@@ -206,7 +439,11 @@ async function test(target) {
   }
 }
 
-onMounted(load)
+onMounted(async () => {
+  await load()
+  loadPtSites()
+  loadTgReceive()
+})
 </script>
 
 <template>
@@ -228,46 +465,79 @@ onMounted(load)
 
     <template v-else>
       <div v-for="group in GROUPS" v-show="activeGroup === group.key" :key="group.key" class="space-y-4">
-        <div class="card grid gap-4 sm:grid-cols-2">
-          <div v-for="field in group.fields" :key="field.k">
-            <label class="label">{{ field.label }}</label>
-
-            <label v-if="field.t === 'bool'" class="flex items-center gap-2">
-              <input v-model="form[field.k]" type="checkbox" class="h-4 w-4 accent-emerald-500" />
-              <span class="text-sm text-gray-400">启用</span>
-            </label>
-
-            <select v-else-if="field.t === 'select'" v-model="form[field.k]" class="input">
-              <option v-for="option in field.options" :key="option" :value="option">
-                {{ option || '（默认）' }}
-              </option>
-            </select>
-
-            <textarea
-              v-else-if="field.t === 'textarea'"
-              v-model="form[field.k]"
-              class="input font-mono text-xs"
-              rows="3"
-            />
-
-            <TagInput
-              v-else-if="field.t === 'tags'"
-              v-model="form[field.k]"
-              :placeholder="field.ph || '输入后回车添加'"
-              :suggestions="field.suggestions || []"
-              :uppercase="!!field.upper"
-            />
-
-            <input
-              v-else
-              v-model="form[field.k]"
-              :type="field.t === 'password' ? 'password' : 'text'"
-              class="input"
-              :placeholder="field.ph || ''"
-            />
-
-            <p v-if="field.hint" class="mt-1 text-[11px] text-gray-600">{{ field.hint }}</p>
+        <div v-for="section in group.sections" :key="section.title" class="card space-y-3">
+          <div>
+            <p class="text-sm font-medium text-gray-300">{{ section.title }}</p>
+            <p v-if="section.hint" class="mt-0.5 text-[11px] text-gray-600">
+              {{ section.hint }}
+            </p>
           </div>
+
+          <div class="grid gap-4 sm:grid-cols-2">
+            <ConfigField
+              v-for="field in section.fields"
+              :key="field.k"
+              :field="field"
+              :form="form"
+              :options="field.k === 'primary_site' ? ptSiteOptions : null"
+            />
+          </div>
+
+          <!-- Telegram 上行消息接收状态与操作 -->
+          <template v-if="section.panel === 'telegram-receive'">
+            <div class="flex items-center justify-between border-t border-gray-800 pt-3">
+              <p class="text-xs font-medium text-gray-400">当前状态</p>
+              <button class="btn-ghost px-2 py-1 text-[11px]" @click="loadTgReceive">
+                刷新状态
+              </button>
+            </div>
+
+            <div v-if="tgReceive" class="space-y-1 text-xs text-gray-400">
+              <p>
+                当前方式：<span class="text-gray-200">{{ tgReceive.mode }}</span>
+                <span
+                  v-if="tgReceive.mode === 'polling'"
+                  :class="tgReceive.polling_running ? 'text-emerald-400' : 'text-amber-400'"
+                >
+                  （{{ tgReceive.polling_running ? '轮询运行中' : '未运行，保存配置后生效' }}）
+                </span>
+              </p>
+              <p>
+                Webhook：
+                <span :class="tgReceive.webhook_url ? 'text-emerald-400' : 'text-gray-500'">
+                  {{ tgReceive.webhook_url || '未设置' }}
+                </span>
+              </p>
+              <p v-if="tgReceive.pending_update_count" class="text-amber-400">
+                有 {{ tgReceive.pending_update_count }} 条消息堆积未处理
+              </p>
+              <p v-if="tgReceive.last_error_message" class="text-red-400">
+                最近回调错误：{{ tgReceive.last_error_message }}
+              </p>
+            </div>
+            <p v-else class="text-xs text-gray-600">填好 Bot Token 并保存后可查看状态</p>
+
+            <div class="flex flex-wrap gap-2">
+              <button
+                class="btn-ghost px-3 py-1.5 text-xs"
+                :disabled="tgBusy === 'set'"
+                @click="applyWebhook"
+              >
+                {{ tgBusy === 'set' ? '设置中…' : '设置 Webhook' }}
+              </button>
+              <button
+                class="btn-ghost px-3 py-1.5 text-xs"
+                :disabled="tgBusy === 'del'"
+                @click="removeWebhook"
+              >
+                {{ tgBusy === 'del' ? '删除中…' : '删除 Webhook' }}
+              </button>
+            </div>
+            <p class="text-[11px] text-gray-600">
+              Webhook 需公网 HTTPS，端口限 443/80/88/8443；两种方式互斥，
+              切到 polling 会自动删除 webhook
+            </p>
+          </template>
         </div>
 
         <!-- 连接测试 -->

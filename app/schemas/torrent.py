@@ -18,6 +18,7 @@ class Torrent:
     chinese: bool = False
     uc: bool = False
     uhd: bool = False
+    vr: bool = False
     free: bool = False
     download_url: str = ""
     # 站内详情页，仅用于展示
@@ -35,6 +36,7 @@ class Torrent:
             "chinese": self.chinese,
             "uc": self.uc,
             "uhd": self.uhd,
+            "vr": self.vr,
             "free": self.free,
             "download_url": self.download_url,
             "detail_url": self.detail_url,
@@ -52,6 +54,7 @@ class Torrent:
             chinese=bool(data.get("chinese")),
             uc=bool(data.get("uc")),
             uhd=bool(data.get("uhd")),
+            vr=bool(data.get("vr")),
             free=bool(data.get("free")),
             download_url=str(data.get("download_url") or ""),
             detail_url=str(data.get("detail_url") or ""),

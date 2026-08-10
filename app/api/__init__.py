@@ -28,6 +28,9 @@ def init_byte_muse() -> None:
     from app.scheduler import start_scheduler
     start_scheduler()
 
+    from app.modules.notify.tgpolling import start_polling
+    start_polling()
+
     logger.info("byte-muse 启动完成")
 
 
@@ -37,6 +40,8 @@ async def lifespan(app: FastAPI):
     yield
     from app.api.endpoints.picproxy import close_client
     await close_client()
+    from app.modules.notify.tgpolling import stop_polling
+    stop_polling()
     from app.scheduler import stop_scheduler
     stop_scheduler()
     logger.info("byte-muse 已停止")

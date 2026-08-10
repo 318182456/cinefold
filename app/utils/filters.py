@@ -24,6 +24,13 @@ UC_RE = re.compile(r"(无码|無碼|uncensored|破解|流出|leak)", re.IGNORECA
 # 高清
 UHD_RE = re.compile(r"(4k|8k|2160p|uhd|2160)", re.IGNORECASE)
 
+# VR。番号前缀（DSVR/VRKM 等）与标题标记都算，体积普遍很大且普通播放器看不了
+VR_RE = re.compile(
+    r"(\bvr\b|[-_ ]vr[-_ ]|180°|360°|"
+    r"\b(?:dsvr|wpvr|vrkm|kmvr|savr|crvr|hunvr|ipvr|mdvr|tmavr|urvrsp|vovs)\b)",
+    re.IGNORECASE,
+)
+
 SIZE_RE = re.compile(r"^\s*([\d.]+)\s*(gb|mb|g|m)?\s*$", re.IGNORECASE)
 
 
@@ -39,6 +46,10 @@ def has_uc(title: str) -> bool:
 
 def has_uhd(title: str) -> bool:
     return bool(UHD_RE.search(title or ""))
+
+
+def has_vr(title: str) -> bool:
+    return bool(VR_RE.search(title or ""))
 
 
 def _parse_size_mb(value: str) -> float:
@@ -79,6 +90,8 @@ def filter_torrents(
     exclude_uc = bool(config.get("exclude_uc"))
     only_uhd = bool(config.get("only_uhd"))
     exclude_uhd = bool(config.get("exclude_uhd"))
+    only_vr = bool(config.get("only_vr"))
+    exclude_vr = bool(config.get("exclude_vr"))
     only_free = bool(config.get("only_free"))
     include_keywords = config.get("include_keywords") or ""
     exclude_keywords = config.get("exclude_keywords") or ""
@@ -93,6 +106,7 @@ def filter_torrents(
         chinese = torrent.chinese or has_chinese(title)
         uc = torrent.uc or has_uc(title)
         uhd = torrent.uhd or has_uhd(title)
+        vr = torrent.vr or has_vr(title)
 
         if only_chinese and not chinese:
             continue
@@ -103,6 +117,10 @@ def filter_torrents(
         if only_uhd and not uhd:
             continue
         if exclude_uhd and uhd:
+            continue
+        if only_vr and not vr:
+            continue
+        if exclude_vr and vr:
             continue
         if only_free and not torrent.free:
             continue
@@ -116,7 +134,7 @@ def filter_torrents(
             continue
 
         # 回填推断结果，后续排序直接用
-        torrent.chinese, torrent.uc, torrent.uhd = chinese, uc, uhd
+        torrent.chinese, torrent.uc, torrent.uhd, torrent.vr = chinese, uc, uhd, vr
         out.append(torrent)
 
     logger.debug(f"过滤: {len(torrents)} → {len(out)}")
@@ -130,7 +148,7 @@ def sort_torrents(
 ) -> list[Torrent]:
     """按规则多级排序，靠前的键优先级更高。
 
-    支持的键：free / chinese / uc / uhd / seeders / size / site
+    支持的键：free / chinese / uc / uhd / vr / seeders / size / site
     `!` 前缀表示希望该属性为假（降权），如 `!uhd` 会把非 4K 排前面。
     """
     if not torrents:
@@ -154,6 +172,8 @@ def sort_torrents(
             value = float(torrent.uc)
         elif name == "uhd":
             value = float(torrent.uhd)
+        elif name == "vr":
+            value = float(torrent.vr)
         elif name == "seeders":
             value = float(torrent.seeders)
         elif name == "size":
