@@ -6,18 +6,84 @@ from loguru import logger
 
 from app.core.config import get_settings
 from app.schemas.reponse import ResponseEntity
-from app.utils import find_serial_number, get_true_code
+from app.utils import get_true_code
+from app.utils.codefilter import extract_subscribable_codes, normalize_explicit_codes
 
 router = APIRouter(tags=["message"])
 
 HELP_TEXT = (
     "可用指令：\n"
-    "/sub 番号 — 订阅\n"
-    "/cancel 番号 — 取消订阅\n"
+    "/sub 番号 — 订阅，可一次给多个\n"
+    "/cancel 番号 — 取消订阅，可一次给多个\n"
     "/search 番号 — 搜索种子\n"
     "/status — 查看统计\n"
     "直接发送番号等同于 /sub"
 )
+
+
+def _filter_options() -> dict:
+    """当前生效的番号过滤配置。"""
+    settings = get_settings()
+    return {
+        "allow_prefixes": settings.msg_allow_prefixes,
+        "block_prefixes": settings.msg_block_prefixes,
+        "max_count": settings.msg_max_codes,
+    }
+
+
+def _format_result(
+    passed: list[str],
+    rejected: list[str],
+    action: str,
+    existing: list[str] | None = None,
+) -> str:
+    """把订阅/取消的结果拼成回复文本。"""
+    lines: list[str] = []
+    if passed:
+        lines.append(f"✅ 已{action} {len(passed)} 个：{', '.join(passed)}")
+    if existing:
+        lines.append(f"🎬 媒体库已有 {len(existing)} 个：{', '.join(existing)}")
+    if rejected:
+        lines.append(f"🚫 已过滤 {len(rejected)} 个：{', '.join(rejected)}")
+    return "\n".join(lines)
+
+
+def _split_existing(codes: list[str]) -> tuple[list[str], list[str]]:
+    """按媒体库是否已有拆分番号。
+
+    ENABLE_AUTO_COMPLETE 关闭时不查，保持"用户要什么就订什么"。
+    媒体库不可达时按不存在处理，宁可多订也别漏订。
+    """
+    from app import services
+
+    settings = get_settings()
+    if not settings.enable_auto_complete or not codes:
+        return codes, []
+
+    wanted, existing = [], []
+    for code in codes:
+        try:
+            (existing if services.is_exist_server(code) else wanted).append(code)
+        except Exception as exc:
+            logger.warning(f"[{code}] 查询媒体库失败，按未入库处理: {exc}")
+            wanted.append(code)
+    return wanted, existing
+
+
+def _subscribe_batch(codes: list[str], rejected: list[str]) -> str:
+    """订阅一批番号：先过媒体库，再按配置决定是否立即检索。"""
+    from app import services
+
+    wanted, existing = _split_existing(codes)
+    for code in wanted:
+        services.subscribe_code(code)
+
+    reply = _format_result(wanted, rejected, "订阅", existing)
+
+    if wanted and get_settings().msg_auto_download:
+        services.download_codes_async(wanted)
+        reply += "\n🔎 正在后台检索资源…"
+    return reply
 
 
 @router.get("/message")
@@ -148,17 +214,22 @@ def _dispatch_command(text: str) -> str:
         )
 
     if command == "/sub":
-        code = get_true_code(argument)
-        if not code:
+        passed, rejected = normalize_explicit_codes(argument, **_filter_options())
+        if not passed and not rejected:
             return "用法: /sub 番号"
-        services.subscribe_code(code)
-        return f"已订阅 {code}"
+        return _subscribe_batch(passed, rejected)
 
     if command == "/cancel":
-        code = get_true_code(argument)
-        if not code:
+        passed, rejected = normalize_explicit_codes(argument, **_filter_options())
+        if not passed and not rejected:
             return "用法: /cancel 番号"
-        return f"已取消订阅 {code}" if services.cancel_subscribe(code) else f"{code} 不在订阅列表"
+        removed = [code for code in passed if services.cancel_subscribe(code)]
+        missing = [code for code in passed if code not in removed]
+        reply = _format_result(removed, rejected, "取消订阅")
+        if missing:
+            reply = f"{reply}\n" if reply else ""
+            reply += f"ℹ️ 不在订阅列表：{', '.join(missing)}"
+        return reply
 
     if command == "/search":
         code = get_true_code(argument)
@@ -175,10 +246,10 @@ def _dispatch_command(text: str) -> str:
             )
         return "\n".join(lines)
 
-    # 不带指令时，识别到番号就当订阅
-    code = find_serial_number(text)
-    if code:
-        services.subscribe_code(code)
-        return f"已订阅 {code}"
+    # 不带指令时，识别到番号就当订阅。一条消息里列一串番号是常见写法，
+    # 全部取出后按过滤规则筛一遍再订阅。
+    passed, rejected = extract_subscribable_codes(text, **_filter_options())
+    if not passed and not rejected:
+        return ""
 
-    return ""
+    return _subscribe_batch(passed, rejected)

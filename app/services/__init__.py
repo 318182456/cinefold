@@ -176,6 +176,35 @@ def run_sub_task() -> int:
     return success
 
 
+def download_codes_async(codes: list[str], notify_result: bool = True) -> None:
+    """后台检索并下载指定番号。
+
+    给消息订阅用：webhook 里同步搜种会卡住请求，Telegram 超时后会重投同一条
+    消息，导致重复订阅，所以丢到后台线程。
+    """
+    if not codes:
+        return
+
+    from app.utils import run_in_background
+
+    def _task() -> None:
+        started, missed = [], []
+        for code in codes:
+            try:
+                (started if download_torrent(code) else missed).append(code)
+            except Exception as exc:
+                logger.warning(f"[{code}] 自动检索失败: {exc}")
+                missed.append(code)
+
+        logger.info(f"消息订阅自动检索完成，已推送 {len(started)}/{len(codes)}")
+        if not notify_result or not missed:
+            return
+        # download_torrent 成功时自身会推送通知，这里只补一条未命中的汇总
+        send_message(f"🔎 自动检索：{len(missed)} 个暂无资源\n{', '.join(missed)}")
+
+    run_in_background(_task)
+
+
 def run_run_actor() -> int:
     """演员订阅：把已订阅演员的新作品加入订阅队列。"""
     with session_scope() as session:

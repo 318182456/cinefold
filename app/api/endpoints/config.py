@@ -59,6 +59,15 @@ def get_version():
     return ResponseEntity.ok({"version": VERSION})
 
 
+@router.get("/version/check")
+def check_version(
+    refresh: bool = False, current_user: str = Depends(get_current_user)
+):
+    """对比镜像仓库里的最新版本。查不到时 checked 为 False，前端不提示。"""
+    from app.utils.updatecheck import check_update
+    return ResponseEntity.ok(check_update(use_cache=not refresh))
+
+
 @router.get("/logs")
 def get_logs(
     lines: int = 200,

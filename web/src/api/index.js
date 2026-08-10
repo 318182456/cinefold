@@ -49,6 +49,8 @@ export const resetLongToken = () => http.post('/user/token')
 // ---------------------------------------------------------------- 看板
 export const getDashboard = () => http.get('/dashboard')
 export const getVersion = () => http.get('/version')
+export const checkVersion = (refresh = false) =>
+  http.get('/version/check', { params: { refresh } })
 
 // ---------------------------------------------------------------- 番号
 export const listCodes = (params) => http.get('/codes/list', { params })

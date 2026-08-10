@@ -1,7 +1,7 @@
 <script setup>
 import { onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { getVersion } from '@/api'
+import { checkVersion, getVersion } from '@/api'
 import { useConfigStore } from '@/stores/config'
 
 const route = useRoute()
@@ -10,6 +10,8 @@ const configStore = useConfigStore()
 
 const menuOpen = ref(false)
 const version = ref('')
+// 检测不到新版本时（镜像私有、无网络）保持为空，不显示红点
+const update = ref(null)
 
 const groups = [
   {
@@ -54,6 +56,12 @@ onMounted(async () => {
   } catch {
     // 版本获取失败不影响使用
   }
+  try {
+    const data = await checkVersion()
+    if (data?.has_update) update.value = data
+  } catch {
+    // 检测失败就当没有新版本，不打扰使用
+  }
 })
 </script>
 
@@ -97,12 +105,23 @@ onMounted(async () => {
               <path stroke-linecap="round" stroke-linejoin="round" :d="item.icon" />
             </svg>
             {{ item.label }}
+            <span
+              v-if="update && item.name === 'Config'"
+              class="ml-auto h-1.5 w-1.5 rounded-full bg-red-500"
+              :title="`有新版本 v${update.latest}`"
+            />
           </RouterLink>
         </div>
       </nav>
 
       <div class="border-t border-gray-800 p-3">
-        <p v-if="version" class="px-2 pb-2 text-[11px] text-gray-600">v{{ version }}</p>
+        <p v-if="version" class="flex items-center gap-1.5 px-2 pb-2 text-[11px] text-gray-600">
+          <span>v{{ version }}</span>
+          <template v-if="update">
+            <span class="h-1.5 w-1.5 shrink-0 rounded-full bg-red-500" />
+            <span class="text-gray-400">可更新 v{{ update.latest }}</span>
+          </template>
+        </p>
         <button class="btn-ghost w-full text-xs" @click="logout">退出登录</button>
       </div>
     </aside>

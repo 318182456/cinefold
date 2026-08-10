@@ -32,6 +32,7 @@ SENSITIVE_KEYS = {
     "mteam_api_key", "wechat_corp_secret", "wechat_token",
     "wechat_encoding_aes_key", "telegram_bot_token", "secret_key",
     "cloudnas_password", "baidu_api_key", "google_api_key", "openai_api_key",
+    "github_token",
     # 连接串里通常内嵌账号密码
     "database_url", "redis_url",
 }
@@ -147,6 +148,15 @@ class Settings:
     telegram_spoiler: bool = False
     telegram_whitelist: str = ""
 
+    # --- 上行消息的番号订阅过滤 ---
+    # 前缀名单，逗号分隔（如 NHDTB,SSIS）。白名单非空时只订阅名单内的前缀
+    msg_allow_prefixes: str = ""
+    msg_block_prefixes: str = ""
+    # 单条消息最多订阅几个番号，0 表示不限
+    msg_max_codes: int = 50
+    # 订阅后立刻在后台检索 PT 并推送下载器，而不是等定时任务
+    msg_auto_download: bool = False
+
     # --- 网络 ---
     proxy: str = ""
     external_domain: str = ""
@@ -218,6 +228,8 @@ class Settings:
     # --- 其他 ---
     javdb_host: str = "https://javdb.com"
     secret_key: str = ""
+    # 检测新版本用。公开镜像可留空；私有镜像需要带 read:packages 权限的 token
+    github_token: str = ""
 
     def to_safe_dict(self) -> dict:
         """返回给前端的配置，敏感字段打码。"""
@@ -310,6 +322,11 @@ def load_settings() -> Settings:
         telegram_spoiler=_env_bool("TELEGRAM_SPOILER"),
         telegram_whitelist=_env("TELEGRAM_WHITELIST"),
 
+        msg_allow_prefixes=_env("MSG_ALLOW_PREFIXES"),
+        msg_block_prefixes=_env("MSG_BLOCK_PREFIXES"),
+        msg_max_codes=_env_int("MSG_MAX_CODES", 50),
+        msg_auto_download=_env_bool("MSG_AUTO_DOWNLOAD", False),
+
         proxy=_env("PROXY"),
         external_domain=_env("EXTERNAL_DOMAIN"),
         bypass_url=_env("BYPASS_URL") or _env("FLARE_SOLVERR_URL"),
@@ -365,6 +382,7 @@ def load_settings() -> Settings:
 
         javdb_host=_env("JAVDB_HOST", "https://javdb.com"),
         secret_key=_env("SECRET_KEY"),
+        github_token=_env("GITHUB_TOKEN"),
     )
 
     # SECRET_KEY 为空时生成并回写，保证重启后 JWT 仍然有效

@@ -17,10 +17,12 @@ from loguru import logger
 T = TypeVar("T")
 
 # 番号形如 ABP-984 / SSIS-001 / 259LUXU-1234 / FC2-PPV-1234567
+# 边界用 lookaround 而非消耗字符，否则 "nhdta-800、nhdta-526" 这类连写会
+# 因为分隔符被前一次匹配吃掉，导致后面的番号丢失。
 CODE_PATTERN = re.compile(
-    r"(?:^|[^A-Za-z0-9])"
+    r"(?<![A-Za-z0-9])"
     r"((?:FC2[-_ ]?PPV[-_ ]?\d{6,8})|(?:[0-9]{0,4}[A-Za-z]{2,6}[-_ ]?\d{2,5}))"
-    r"(?:[^A-Za-z0-9]|$)",
+    r"(?![A-Za-z0-9])",
     re.IGNORECASE,
 )
 
@@ -52,6 +54,33 @@ def find_serial_number(text: str) -> str:
             continue
         return get_true_code(candidate)
     return ""
+
+
+def find_serial_numbers(text: str, limit: int = 0) -> list[str]:
+    """提取文本中出现的所有番号，按出现顺序去重。
+
+    一条消息里列一串番号（"nhdta-800、nhdta-526、..."）是常见写法，
+    find_serial_number 只取第一个，这里返回全部。limit>0 时截断。
+    """
+    if not text:
+        return []
+    cleaned = re.sub(r"\.(mp4|mkv|avi|wmv|rmvb|iso|torrent)$", "", text, flags=re.IGNORECASE)
+    cleaned = cleaned.replace("_", "-").replace(" ", "-")
+
+    out: list[str] = []
+    seen: set[str] = set()
+    for match in CODE_PATTERN.finditer(cleaned):
+        candidate = match.group(1).upper().replace("_", "-").replace(" ", "-")
+        if candidate in NOISE_WORDS:
+            continue
+        code = get_true_code(candidate)
+        if not code or code in seen:
+            continue
+        seen.add(code)
+        out.append(code)
+        if limit and len(out) >= limit:
+            break
+    return out
 
 
 def get_true_code(code: str) -> str:
