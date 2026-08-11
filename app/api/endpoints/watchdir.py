@@ -86,12 +86,17 @@ def list_watchdirs(current_user: str = Depends(get_current_user)):
     # 维护，不是监控规则，但用户需要看得见「这个目录也在管辖范围内」，
     # 且不该能从这里删掉它。留空时退回库根（两者等同的旧配置）。
     # 放在列表最前，用 id=0 与真实规则区分（真实规则 id 从 1 起）
+    #
+    # source_dir 留空是有意为之：刮削没有固定源目录 —— 源文件在哪由刮削工具
+    # 逐条通过 webhook 上报，一个番号一个位置。填成输出目录会显示出
+    # 「源目录 = 目标目录」这种自相矛盾的结果，页面据 source_dir 为空
+    # 改显示成「由刮削 webhook 逐条登记」
     scrape_dir = (settings.medialink_scrape_dir or "").strip() or library
     if scrape_dir:
         rows.insert(0, {
             "id": 0,
             "protected": True,
-            "source_dir": scrape_dir,
+            "source_dir": "",
             "target_dir": scrape_dir,
             "target_subdir": "",
             "resolved_target": scrape_dir,
@@ -100,7 +105,7 @@ def list_watchdirs(current_user: str = Depends(get_current_user)):
             "recursive": True,
             "reverse_delete": settings.medialink_delete_enabled,
             "code_prefix": "",
-            "source_exists": Path(scrape_dir).is_dir(),
+            "source_exists": False,
             "target_exists": Path(scrape_dir).is_dir(),
             "last_scan_time": "",
             "file_count": 0,

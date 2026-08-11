@@ -382,7 +382,18 @@ onMounted(() => {
         </div>
 
         <div class="space-y-1 rounded-lg bg-gray-900/60 px-3 py-2">
-          <div class="flex items-start gap-2">
+          <!-- 刮削输出目录没有固定源目录：源文件位置由 webhook 逐条上报，
+               一个番号一个位置，写死一个路径是错的 -->
+          <div v-if="!item.source_dir" class="flex items-start gap-2">
+            <span class="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-gray-600" />
+            <div class="min-w-0 flex-1">
+              <p class="text-[11px] text-gray-500">源文件</p>
+              <p class="truncate text-xs text-gray-500">
+                由刮削工具通过 webhook 逐条登记，位置随番号而定
+              </p>
+            </div>
+          </div>
+          <div v-else class="flex items-start gap-2">
             <span
               class="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full"
               :class="item.source_exists ? 'bg-emerald-500' : 'bg-red-500'"
@@ -402,7 +413,9 @@ onMounted(() => {
               :title="item.target_exists ? '目标目录已存在' : '目标目录尚未创建，建链接时自动建'"
             />
             <div class="min-w-0 flex-1">
-              <p class="text-[11px] text-gray-500">目标目录</p>
+              <p class="text-[11px] text-gray-500">
+                {{ item.protected ? '输出目录' : '目标目录' }}
+              </p>
               <p
                 class="truncate text-[11px] text-gray-600"
                 :title="item.resolved_target"
