@@ -87,6 +87,18 @@ export const updateDataSource = (key, payload) => http.put(`/datasources/${key}`
 export const checkDataSource = (key) => http.post(`/datasources/${key}/check`)
 export const checkAllDataSources = () => http.post('/datasources/check')
 
+// ---------------------------------------------------------------- 硬链接
+export const listMediaLinks = (params) => http.get('/medialinks', { params })
+export const getMediaLinkStats = () => http.get('/medialinks/stats')
+export const registerMediaLink = (payload) => http.post('/medialinks/register', payload)
+export const previewMediaLinkDelete = (payload) =>
+  http.post('/medialinks/preview', payload)
+export const deleteMediaLink = (payload) => http.post('/medialinks/delete', payload)
+// 只删库里的记录，不碰文件
+export const dropMediaLinkRecord = (linkPath) =>
+  http.delete('/medialinks/record', { params: { link_path: linkPath } })
+export const pruneMediaLinks = () => http.post('/medialinks/prune')
+
 // ---------------------------------------------------------------- 榜单
 export const getRank = (rankType = '', limit = 120) =>
   http.get('/rank', { params: { rank_type: rankType, limit } })
