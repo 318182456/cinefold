@@ -468,6 +468,53 @@ def cancel_subscribe(code: str) -> bool:
     return True
 
 
+def bulk_cancel_subscribe(
+    before_date: str = "",
+    only_vr: bool = False,
+    keep_recent_days: int = 0,
+    dry_run: bool = True,
+) -> dict:
+    """批量取消订阅。默认只试算，dry_run=False 才真正执行。
+
+    演员订阅曾经把全部历史作品一次性拉进来，需要一个批量清理的入口。
+    只动"已订阅"的，下载中/已下载/已入库的不碰。
+    """
+    conditions = [Code.status == CodeStatus.SUBSCRIBED]
+
+    if before_date:
+        conditions.append(Code.release_date < before_date)
+    elif keep_recent_days > 0:
+        cutoff = (
+            datetime.now() - timedelta(days=keep_recent_days)
+        ).strftime("%Y-%m-%d")
+        conditions.append(Code.release_date < cutoff)
+
+    with session_scope() as session:
+        rows = session.scalars(select(Code).where(*conditions)).all()
+
+        if only_vr:
+            rows = [r for r in rows if has_vr(f"{r.code} {r.title or ''}")]
+
+        samples = [
+            {"code": r.code, "title": (r.title or "")[:40],
+             "release_date": r.release_date}
+            for r in rows[:20]
+        ]
+        matched = len(rows)
+
+        if not dry_run:
+            for row in rows:
+                row.status = CodeStatus.NONE
+            logger.info(f"批量取消订阅 {matched} 个番号")
+
+    return {
+        "matched": matched,
+        "cancelled": 0 if dry_run else matched,
+        "dry_run": dry_run,
+        "samples": samples,
+    }
+
+
 def subscribe_actor(name: str, limit_date: str = "") -> bool:
     """订阅演员。不指定起始日期时从今天算起。
 

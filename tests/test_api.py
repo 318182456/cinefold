@@ -803,6 +803,115 @@ class TestActorSubscribeScope:
             assert row.limit_date == datetime.now().strftime("%Y-%m-%d")
 
 
+class TestBulkCancel:
+    """批量取消订阅——只动已订阅的，别碰下载中/已入库。"""
+
+    def _seed(self, entries):
+        from sqlalchemy import select
+
+        from app.database.base import DBBase
+        from app.database.models import Code
+        from app.database.session import engine, session_scope
+
+        DBBase.metadata.create_all(engine)
+        with session_scope() as session:
+            # 清掉上一个用例的数据，避免互相干扰
+            for row in session.scalars(select(Code)).all():
+                session.delete(row)
+            for code, status, release, title in entries:
+                session.merge(Code(
+                    code=code, status=status, release_date=release, title=title,
+                ))
+
+    def test_dry_run_changes_nothing(self):
+        from app import services
+        from app.database.models import Code, CodeStatus
+        from app.database.session import session_scope
+
+        self._seed([("OLD-1", CodeStatus.SUBSCRIBED, "2015-01-01", "t")])
+        result = services.bulk_cancel_subscribe(before_date="2020-01-01")
+
+        assert result["matched"] == 1
+        assert result["cancelled"] == 0
+        with session_scope() as session:
+            assert session.get(Code, "OLD-1").status == CodeStatus.SUBSCRIBED
+
+    def test_executes_when_not_dry_run(self):
+        from app import services
+        from app.database.models import Code, CodeStatus
+        from app.database.session import session_scope
+
+        self._seed([("OLD-2", CodeStatus.SUBSCRIBED, "2015-01-01", "t")])
+        result = services.bulk_cancel_subscribe(
+            before_date="2020-01-01", dry_run=False
+        )
+
+        assert result["cancelled"] == 1
+        with session_scope() as session:
+            assert session.get(Code, "OLD-2").status == CodeStatus.NONE
+
+    def test_other_statuses_are_untouched(self):
+        """下载中、已入库的不该被清掉。"""
+        from app import services
+        from app.database.models import Code, CodeStatus
+        from app.database.session import session_scope
+
+        self._seed([
+            ("DL-1", CodeStatus.DOWNLOADING, "2015-01-01", "t"),
+            ("OK-1", CodeStatus.COMPLETED, "2015-01-01", "t"),
+            ("SUB-1", CodeStatus.SUBSCRIBED, "2015-01-01", "t"),
+        ])
+        services.bulk_cancel_subscribe(before_date="2020-01-01", dry_run=False)
+
+        with session_scope() as session:
+            assert session.get(Code, "DL-1").status == CodeStatus.DOWNLOADING
+            assert session.get(Code, "OK-1").status == CodeStatus.COMPLETED
+            assert session.get(Code, "SUB-1").status == CodeStatus.NONE
+
+    def test_recent_ones_are_kept(self):
+        from datetime import datetime, timedelta
+
+        from app import services
+        from app.database.models import Code, CodeStatus
+        from app.database.session import session_scope
+
+        recent = (datetime.now() - timedelta(days=5)).strftime("%Y-%m-%d")
+        self._seed([
+            ("OLD-3", CodeStatus.SUBSCRIBED, "2015-01-01", "t"),
+            ("NEW-3", CodeStatus.SUBSCRIBED, recent, "t"),
+        ])
+        services.bulk_cancel_subscribe(keep_recent_days=30, dry_run=False)
+
+        with session_scope() as session:
+            assert session.get(Code, "OLD-3").status == CodeStatus.NONE
+            assert session.get(Code, "NEW-3").status == CodeStatus.SUBSCRIBED
+
+    def test_only_vr_filters_by_title(self):
+        from app import services
+        from app.database.models import Code, CodeStatus
+        from app.database.session import session_scope
+
+        self._seed([
+            ("VR-1", CodeStatus.SUBSCRIBED, "2015-01-01", "【VR】8KVR 作品"),
+            ("NORMAL-1", CodeStatus.SUBSCRIBED, "2015-01-01", "普通作品"),
+        ])
+        result = services.bulk_cancel_subscribe(only_vr=True, dry_run=False)
+
+        assert result["cancelled"] == 1
+        with session_scope() as session:
+            assert session.get(Code, "VR-1").status == CodeStatus.NONE
+            assert session.get(Code, "NORMAL-1").status == CodeStatus.SUBSCRIBED
+
+    def test_endpoint_rejects_empty_conditions(self, client, token):
+        """不给条件时拒绝，避免一把清空。"""
+        response = client.post(
+            "/api/v1/codes/cancel/bulk",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"dry_run": False},
+        )
+        assert response.json()["code"] == 400
+
+
 class TestNexusBreaker:
     """站点不可用时熔断，别拿两万个订阅逐个去撞配额。"""
 

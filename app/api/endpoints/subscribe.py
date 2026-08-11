@@ -113,6 +113,39 @@ def cancel(body: SubscribeRequest, current_user: str = Depends(get_current_user)
     return ResponseEntity.ok(message=f"已取消订阅 {code}")
 
 
+class BulkCancelRequest(BaseModel):
+    # 只取消这个日期之前发行的
+    before_date: str = ""
+    # 或者：保留最近多少天的，更早的取消
+    keep_recent_days: int = 0
+    # 只取消 VR
+    only_vr: bool = False
+    # 默认只试算，要真的执行得显式传 False
+    dry_run: bool = True
+
+
+@router.post("/codes/cancel/bulk")
+def bulk_cancel(
+    body: BulkCancelRequest, current_user: str = Depends(get_current_user)
+):
+    """批量取消订阅。默认试算，返回命中数量与样本。"""
+    from app import services
+
+    if not (body.before_date or body.keep_recent_days or body.only_vr):
+        return ResponseEntity.fail(
+            "至少指定一个条件，避免误清空整个订阅列表", code=400
+        )
+
+    result = services.bulk_cancel_subscribe(
+        before_date=body.before_date,
+        only_vr=body.only_vr,
+        keep_recent_days=body.keep_recent_days,
+        dry_run=body.dry_run,
+    )
+    action = "试算" if result["dry_run"] else "已取消"
+    return ResponseEntity.ok(result, message=f"{action} {result['matched']} 个订阅")
+
+
 @router.post("/codes/download")
 def manual_download(body: DownloadRequest, current_user: str = Depends(get_current_user)):
     """手动下载。指定 download_url 时直接推送该种子。"""
