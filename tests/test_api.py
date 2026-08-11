@@ -652,6 +652,76 @@ class TestCacheRemoteCodes:
         assert services.cache_remote_codes([]) == 0
 
 
+class TestVrCodeFilter:
+    """VR 要在番号层就拦住，而不是等种子层——种子名未必带 VR 标记。"""
+
+    def _seed(self, code, title=""):
+        from app.database.base import DBBase
+        from app.database.models import Code
+        from app.database.session import engine, session_scope
+
+        DBBase.metadata.create_all(engine)
+        with session_scope() as session:
+            session.merge(Code(code=code, title=title))
+
+    def _set_exclude_vr(self, monkeypatch, value):
+        from app import services
+
+        settings = services.get_settings()
+        monkeypatch.setattr(
+            settings, "default_filter", {"exclude_vr": value}, raising=False
+        )
+
+    def test_vr_title_blocks_subscribe(self, monkeypatch):
+        from app import services
+        from app.database.models import Code, CodeStatus
+        from app.database.session import session_scope
+
+        self._seed("SSR-028", "【VR】8KVR 女体観察")
+        self._set_exclude_vr(monkeypatch, True)
+
+        assert services.subscribe_code("SSR-028") is False
+        with session_scope() as session:
+            assert session.get(Code, "SSR-028").status == CodeStatus.NONE
+
+    def test_normal_code_still_subscribes(self, monkeypatch):
+        from app import services
+        from app.database.models import Code, CodeStatus
+        from app.database.session import session_scope
+
+        self._seed("SSNI-380", "絶対領域")
+        self._set_exclude_vr(monkeypatch, True)
+        monkeypatch.setattr(services, "send_subscribe_message", lambda code: 0)
+
+        assert services.subscribe_code("SSNI-380") is True
+        with session_scope() as session:
+            assert session.get(Code, "SSNI-380").status == CodeStatus.SUBSCRIBED
+
+    def test_vr_prefix_blocks_even_without_title(self, monkeypatch):
+        from app import services
+
+        self._seed("DSVR-1234")
+        self._set_exclude_vr(monkeypatch, True)
+        assert services.subscribe_code("DSVR-1234") is False
+
+    def test_disabled_switch_lets_vr_through(self, monkeypatch):
+        from app import services
+
+        self._seed("SSR-029", "【VR】作品")
+        self._set_exclude_vr(monkeypatch, False)
+        monkeypatch.setattr(services, "send_subscribe_message", lambda code: 0)
+
+        assert services.subscribe_code("SSR-029") is True
+
+    def test_download_also_blocks_vr(self, monkeypatch):
+        """种子名不带 VR 时，下载环节靠番号情报兜底。"""
+        from app import services
+
+        self._seed("SSR-030", "【VR】作品")
+        self._set_exclude_vr(monkeypatch, True)
+        assert services.download_torrent("SSR-030") is False
+
+
 class TestRousiTokenCache:
     """token 缓存在类上，避免每次搜索都重新登录。"""
 

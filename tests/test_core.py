@@ -281,6 +281,19 @@ class TestFilter:
         items = [_t(id=1, title="SSIS-001 Louvre Special")]
         assert [t.id for t in filter_torrents(items, {"exclude_vr": True})] == [1]
 
+    def test_vr_marker_variants(self):
+        """VR 系列的番号前缀补不全，主要靠标题里的标记。"""
+        from app.utils.filters import has_vr
+
+        assert has_vr("SSR-028 【VR】8KVR 女体観察")
+        assert has_vr("【VR】タイトル")
+        assert has_vr("8KVR 高画質")
+        assert has_vr("VR専用 作品")
+        assert has_vr("DSVR-1234")
+        # 不该命中
+        assert not has_vr("SSNI-380 絶対領域")
+        assert not has_vr("SSIS-001 Louvre")
+
     def test_size_range_defaults_to_mb(self):
         """无单位按 MB 解析，与配置语义一致。"""
         items = [_t(id=1, size_mb=500), _t(id=2, size_mb=5000), _t(id=3, size_mb=15000)]

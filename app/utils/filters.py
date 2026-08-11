@@ -24,9 +24,11 @@ UC_RE = re.compile(r"(无码|無碼|uncensored|破解|流出|leak)", re.IGNORECA
 # 高清
 UHD_RE = re.compile(r"(4k|8k|2160p|uhd|2160)", re.IGNORECASE)
 
-# VR。番号前缀（DSVR/VRKM 等）与标题标记都算，体积普遍很大且普通播放器看不了
+# VR。体积普遍很大且普通播放器看不了。
+# 番号前缀列表补不全（SSR 这类看不出是 VR 的系列很多），主要靠标题里的
+# 【VR】8KVR VR専用 这类标记，前缀只作补充
 VR_RE = re.compile(
-    r"(\bvr\b|[-_ ]vr[-_ ]|180°|360°|"
+    r"(\bvr\b|[-_ ]vr[-_ ]|\d+kvr|vr専用|vr动画|vr動画|180°|360°|"
     r"\b(?:dsvr|wpvr|vrkm|kmvr|savr|crvr|hunvr|ipvr|mdvr|tmavr|urvrsp|vovs)\b)",
     re.IGNORECASE,
 )

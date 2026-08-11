@@ -16,7 +16,7 @@ from app.database.session import session_scope
 from app.modules import downloadclient, mediaserver, notify, ptsite, translate
 from app.schemas.torrent import Torrent
 from app.utils import get_magnet_hash
-from app.utils.filters import filter_torrents, sort_torrents
+from app.utils.filters import filter_torrents, has_vr, sort_torrents
 
 
 # ======================================================================
@@ -210,6 +210,12 @@ def download_torrent(code: str, torrent: Torrent | None = None) -> bool:
     """下载指定番号。torrent 为空时自动搜索最优种子。"""
     settings = get_settings()
 
+    # 种子名未必带 VR 标记，靠 filter_torrents 拦不住，这里用番号情报再判一次
+    reason = is_filtered_code(code)
+    if reason:
+        logger.info(f"[{code}] 命中 {reason} 过滤，不下载")
+        return False
+
     # 已入库的直接跳过，避免重复占用带宽
     if settings.enable_auto_complete and is_exist_server(code):
         logger.info(f"[{code}] 媒体库中已存在，跳过下载")
@@ -377,16 +383,55 @@ def _subscribe_actor_new_works(actor_name: str, limit_date: str | None) -> int:
             query = query.where(Code.release_date >= limit_date)
 
         rows = session.scalars(query).all()
+
+        # 这里是批量改状态，不走 subscribe_code，过滤要自己判一次
+        exclude_vr = bool((get_settings().default_filter or {}).get("exclude_vr"))
+        wanted, skipped = [], 0
         for row in rows:
+            if exclude_vr and has_vr(f"{row.code} {row.title or ''}"):
+                skipped += 1
+                continue
+            wanted.append(row)
+
+        for row in wanted:
             row.status = CodeStatus.SUBSCRIBED
 
-        if rows:
-            logger.info(f"[{actor_name}] 新增订阅 {len(rows)} 个番号")
-        return len(rows)
+        if wanted:
+            logger.info(f"[{actor_name}] 新增订阅 {len(wanted)} 个番号")
+        if skipped:
+            logger.info(f"[{actor_name}] 跳过 {skipped} 个 VR 番号")
+        return len(wanted)
+
+
+def is_filtered_code(code: str, title: str = "") -> str:
+    """番号本身是否该被过滤掉。返回原因，空串表示放行。
+
+    种子层的过滤看的是种子名，而 PT 站的种子名未必带 VR 标记，
+    等到那时才拦已经晚了——番号早就进了订阅列表。这里按番号情报
+    的标题先筛一道。
+    """
+    config = get_settings().default_filter or {}
+    if not config.get("exclude_vr"):
+        return ""
+
+    if not title:
+        with session_scope() as session:
+            row = session.get(Code, code)
+            title = (row.title or row.cn_title or "") if row else ""
+
+    # 番号本身也过一遍，DSVR-123 这类前缀能直接看出来
+    if has_vr(f"{code} {title}"):
+        return "VR"
+    return ""
 
 
 def subscribe_code(code: str) -> bool:
-    """订阅单个番号。"""
+    """订阅单个番号。被过滤规则拦下时返回 False。"""
+    reason = is_filtered_code(code)
+    if reason:
+        logger.info(f"[{code}] 命中 {reason} 过滤，不订阅")
+        return False
+
     with session_scope() as session:
         row = session.get(Code, code)
         if row is None:
