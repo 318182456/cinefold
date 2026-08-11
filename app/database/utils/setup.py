@@ -56,6 +56,8 @@ def update_database() -> None:
         ("user", "token", "TEXT"),
         # FALSE 而非 0：PostgreSQL 的 boolean 列不接受整数字面量
         ("datasource", "deleted", "BOOLEAN NOT NULL DEFAULT FALSE"),
+        # 目标目录改为可填任意绝对路径。旧规则该列为空，回退到 target_subdir
+        ("watch_dir", "target_dir", "VARCHAR(500) NOT NULL DEFAULT ''"),
     ]
     for table, column, column_type in migrations:
         check_and_create_column(engine, table, column, column_type)

@@ -28,7 +28,13 @@ class WatchDir(DBBase):
 
     # 源目录绝对路径。唯一 —— 同一目录配两条规则会互相打架
     source_dir: Mapped[str] = mapped_column(String(500), nullable=False, unique=True)
-    # 媒体库子目录名（相对 MEDIALINK_LIBRARY_PATH）。留空则直接放在库根下
+
+    # 目标目录绝对路径。填了就直接用它，与 MEDIALINK_LIBRARY_PATH 无关 ——
+    # 短视频、电影、剧集常各有独立的媒体库，硬绑在一个根目录下不够用
+    target_dir: Mapped[str] = mapped_column(String(500), nullable=False, default="")
+
+    # 旧字段：媒体库子目录名（相对 MEDIALINK_LIBRARY_PATH）。
+    # target_dir 为空时回退到它，保证存量规则升级后仍然工作
     target_subdir: Mapped[str] = mapped_column(String(255), nullable=False, default="")
 
     name: Mapped[str] = mapped_column(String(64), nullable=False, default="")
@@ -56,6 +62,7 @@ class WatchDir(DBBase):
         return {
             "id": self.id,
             "source_dir": self.source_dir,
+            "target_dir": self.target_dir,
             "target_subdir": self.target_subdir,
             "name": self.name,
             "enabled": self.enabled,

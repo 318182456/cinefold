@@ -24,6 +24,7 @@ def configure():
     settings = get_settings()
     keys = (
         "medialink_library_path",
+        "medialink_scrape_dir",
         "medialink_delete_enabled",
         "watchdir_delete_grace",
         "qbittorrent_download_path",
@@ -79,6 +80,8 @@ def rule(tmp_path, configure):
 
     configure(
         medialink_library_path=str(library),
+        # 不设刮削输出目录 —— 它会让空目录清理多一道保护，与本文件的用例无关
+        medialink_scrape_dir="",
         medialink_delete_enabled=True,
         # 大部分用例测的是「判定对不对」，不是「等够没等够」
         watchdir_delete_grace=0,
@@ -122,15 +125,28 @@ def test_make_code_applies_prefix():
 
 
 def test_target_path_preserves_relative_structure(tmp_path):
+    """target_path 的第三参是已解析好的目标根，不再重复拼 target_subdir。"""
     rule = WatchDir(source_dir=str(tmp_path / "src"), target_subdir="sv")
     (tmp_path / "src" / "2026").mkdir(parents=True)
-    library = tmp_path / "lib"
-    library.mkdir()
+    base = tmp_path / "lib" / "sv"
+    base.mkdir(parents=True)
 
     target = watchdir.target_path(
-        rule, tmp_path / "src" / "2026" / "a.mp4", library
+        rule, tmp_path / "src" / "2026" / "a.mp4", base
     )
-    assert target == library / "sv" / "2026" / "a.mp4"
+    assert target == base / "2026" / "a.mp4"
+
+
+def test_target_path_resolves_base_when_omitted(tmp_path, configure):
+    """省略 base 时自行按规则解析。"""
+    library = tmp_path / "lib"
+    library.mkdir()
+    configure(medialink_library_path=str(library))
+    (tmp_path / "src").mkdir()
+    rule = WatchDir(source_dir=str(tmp_path / "src"), target_subdir="sv")
+
+    target = watchdir.target_path(rule, tmp_path / "src" / "a.mp4")
+    assert target == library.resolve() / "sv" / "a.mp4"
 
 
 def test_target_path_rejects_file_outside_source(tmp_path):
@@ -139,6 +155,89 @@ def test_target_path_rejects_file_outside_source(tmp_path):
     assert watchdir.target_path(
         rule, tmp_path / "elsewhere.mp4", tmp_path / "lib"
     ) is None
+
+
+# ----------------------------------------------------------------------
+# 目标目录解析：target_dir 优先，回退到库根 + 子目录
+# ----------------------------------------------------------------------
+def test_target_dir_takes_precedence_over_library(tmp_path, configure):
+    configure(medialink_library_path=str(tmp_path / "library"))
+    rule = WatchDir(
+        source_dir=str(tmp_path / "src"),
+        target_dir=str(tmp_path / "elsewhere" / "短视频"),
+        target_subdir="ignored",
+    )
+    assert watchdir.target_base(rule) == tmp_path / "elsewhere" / "短视频"
+
+
+def test_target_base_falls_back_to_library_subdir(tmp_path, configure):
+    library = tmp_path / "library"
+    library.mkdir()
+    configure(medialink_library_path=str(library))
+    rule = WatchDir(source_dir=str(tmp_path / "src"), target_dir="", target_subdir="sv")
+    assert watchdir.target_base(rule) == library.resolve() / "sv"
+
+
+def test_target_base_none_without_any_config(tmp_path, configure):
+    configure(medialink_library_path="")
+    rule = WatchDir(source_dir=str(tmp_path / "src"), target_dir="", target_subdir="")
+    assert watchdir.target_base(rule) is None
+
+
+def test_sync_uses_absolute_target_dir(tmp_path, configure):
+    """目标目录填绝对路径时，链接建到那里，与媒体库根目录无关。"""
+    source_dir = tmp_path / "downloads"
+    target = tmp_path / "independent_library" / "短视频"
+    source_dir.mkdir(parents=True)
+    # 目标目录故意不预先创建 —— 建链接时应自动 mkdir
+    configure(
+        medialink_library_path=str(tmp_path / "unrelated"),
+        medialink_delete_enabled=True,
+        watchdir_delete_grace=0,
+    )
+
+    with session_scope() as session:
+        session.add(WatchDir(
+            source_dir=str(source_dir), target_dir=str(target),
+            name="sv", enabled=True, recursive=True, code_prefix="SV",
+        ))
+    with session_scope() as session:
+        rule_id = session.scalar(sa.select(WatchDir.id))
+
+    (source_dir / "2026").mkdir()
+    a = source_dir / "2026" / "a.mp4"
+    a.write_bytes(b"A" * 64)
+
+    result = watchdir.sync_rule(rule_id, dry_run=False)
+
+    assert result.errors == []
+    link = target / "2026" / "a.mp4"
+    assert link.exists()
+    assert _same_inode(a, link)
+    # 不该在媒体库根目录下建任何东西
+    assert not (tmp_path / "unrelated").exists()
+
+
+def test_sync_with_target_dir_works_without_library_config(tmp_path, configure):
+    """填了目标目录时，完全不配媒体库根目录也应能同步。"""
+    source_dir = tmp_path / "downloads"
+    target = tmp_path / "target"
+    source_dir.mkdir(parents=True)
+    configure(medialink_library_path="", watchdir_delete_grace=0)
+
+    with session_scope() as session:
+        session.add(WatchDir(
+            source_dir=str(source_dir), target_dir=str(target),
+            name="sv", enabled=True, recursive=True,
+        ))
+    with session_scope() as session:
+        rule_id = session.scalar(sa.select(WatchDir.id))
+
+    (source_dir / "a.mp4").write_bytes(b"A" * 64)
+    result = watchdir.sync_rule(rule_id, dry_run=False)
+
+    assert result.errors == []
+    assert (target / "a.mp4").exists()
 
 
 # ----------------------------------------------------------------------
@@ -663,13 +762,100 @@ def test_create_rejects_missing_source_dir(client, tmp_path, configure):
     assert resp.json()["code"] == 400
 
 
-def test_create_requires_library_config(client, tmp_path, configure):
+def test_create_requires_target_when_no_library(client, tmp_path, configure):
+    """既没配库根、也没填目标目录时要报错 —— 不知道往哪建链接。"""
     configure(medialink_library_path="")
     (tmp_path / "src").mkdir()
     resp = client.post("/api/v1/watchdirs", json={"source_dir": str(tmp_path / "src")})
     body = resp.json()
     assert body["code"] == 400
-    assert "媒体库" in body["message"]
+    assert "目标目录" in body["message"]
+
+
+def test_create_accepts_target_dir_without_library(client, tmp_path, configure):
+    configure(medialink_library_path="")
+    (tmp_path / "src").mkdir()
+    resp = client.post("/api/v1/watchdirs", json={
+        "source_dir": str(tmp_path / "src"),
+        "target_dir": str(tmp_path / "target"),
+    })
+    assert resp.json()["code"] == 200
+
+    with session_scope() as session:
+        row = session.scalar(sa.select(WatchDir))
+    assert row.target_dir == str(tmp_path / "target")
+
+
+def test_create_rejects_relative_target_dir(client, tmp_path, configure):
+    configure(medialink_library_path=str(tmp_path))
+    (tmp_path / "src").mkdir()
+    resp = client.post("/api/v1/watchdirs", json={
+        "source_dir": str(tmp_path / "src"),
+        "target_dir": "relative/path",
+    })
+    body = resp.json()
+    assert body["code"] == 400
+    assert "绝对路径" in body["message"]
+
+
+def test_list_reports_resolved_target(client, rule):
+    _, _, library = rule
+    items = client.get("/api/v1/watchdirs").json()["data"]["items"]
+    # 第一条是刮削输出目录的受保护占位项，真实规则在它之后
+    real = [i for i in items if not i.get("protected")]
+    assert real[0]["resolved_target"] == str(library / "sv")
+
+
+# ----------------------------------------------------------------------
+# 刮削输出目录：受保护的占位条目
+# ----------------------------------------------------------------------
+def test_scrape_dir_listed_as_protected(client, tmp_path, configure):
+    scrape = tmp_path / "h_video" / "日本AV"
+    scrape.mkdir(parents=True)
+    configure(
+        medialink_library_path=str(tmp_path / "h_video"),
+        medialink_scrape_dir=str(scrape),
+    )
+
+    items = client.get("/api/v1/watchdirs").json()["data"]["items"]
+
+    assert items[0]["protected"] is True
+    assert items[0]["id"] == 0
+    assert items[0]["resolved_target"] == str(scrape)
+
+
+def test_scrape_dir_falls_back_to_library(client, tmp_path, configure):
+    configure(
+        medialink_library_path=str(tmp_path / "lib"),
+        medialink_scrape_dir="",
+    )
+    items = client.get("/api/v1/watchdirs").json()["data"]["items"]
+    assert items[0]["resolved_target"] == str(tmp_path / "lib")
+
+
+def test_protected_entry_cannot_be_deleted(client, tmp_path, configure):
+    configure(medialink_library_path=str(tmp_path), medialink_scrape_dir=str(tmp_path))
+    body = client.delete("/api/v1/watchdirs/0").json()
+    assert body["code"] == 400
+    assert "受保护" in body["message"]
+
+
+def test_protected_entry_cannot_be_edited_or_synced(client, tmp_path, configure):
+    configure(medialink_library_path=str(tmp_path), medialink_scrape_dir=str(tmp_path))
+    assert client.put("/api/v1/watchdirs/0", json={"enabled": False}).json()["code"] == 400
+    assert client.post("/api/v1/watchdirs/0/sync").json()["code"] == 400
+
+
+def test_update_target_dir_is_validated(client, rule, tmp_path):
+    """单独改目标目录也要走文件系统校验，不能绕过。"""
+    rule_id, _, _ = rule
+    resp = client.put(f"/api/v1/watchdirs/{rule_id}", json={
+        "target_dir": str(tmp_path / "new_target"),
+    })
+    assert resp.json()["code"] == 200
+
+    with session_scope() as session:
+        assert session.get(WatchDir, rule_id).target_dir == str(tmp_path / "new_target")
 
 
 def test_duplicate_source_dir_is_rejected(client, rule):

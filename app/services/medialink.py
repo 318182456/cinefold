@@ -510,6 +510,11 @@ def _prune_empty_dirs(videos: list[str], result: DeleteResult) -> None:
     for start in candidates:
         current = start
         while _within(current, root):
+            # 刮削输出目录（如 <库根>/日本AV）不能删：库根常设成上一层，
+            # 这个分类目录一旦空了就会被往上删掉，Emby 会认为媒体库掉线
+            if _is_download_root(current):
+                logger.info(f"目录受保护，停止向上清理: {current}")
+                break
             try:
                 if any(current.iterdir()):
                     break  # 还有内容，本条链到此为止
@@ -577,6 +582,8 @@ def _is_download_root(path: Path) -> bool:
     for raw in (
         settings.qbittorrent_download_path,
         settings.transmission_download_path,
+        # 刮削输出目录：整个分类目录空了也不该删，Emby 会认为媒体库掉线
+        settings.medialink_scrape_dir,
     ):
         if raw:
             try:

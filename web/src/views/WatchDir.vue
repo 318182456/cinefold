@@ -34,6 +34,9 @@ const confirmingRule = ref(null)
 function blankDraft() {
   return {
     source_dir: '',
+    // 目标目录绝对路径，与媒体库根目录无关
+    target_dir: '',
+    // 旧字段：相对媒体库根目录的子目录。target_dir 为空时才生效
     target_subdir: '',
     name: '',
     enabled: true,
@@ -42,6 +45,15 @@ function blankDraft() {
     code_prefix: '',
   }
 }
+
+// 目标目录的实际落点，与后端 _resolve_target 的优先级保持一致
+const targetPreview = computed(() => {
+  const dir = (draft.value.target_dir || '').trim()
+  if (dir) return dir
+  if (!libraryPath.value) return ''
+  const sub = (draft.value.target_subdir || '').trim()
+  return sub ? `${libraryPath.value}/${sub}` : libraryPath.value
+})
 
 const graceLabel = computed(() => {
   const s = graceSeconds.value
@@ -100,6 +112,7 @@ function openEdit(item) {
   editing.value = item
   draft.value = {
     source_dir: item.source_dir,
+    target_dir: item.target_dir || '',
     target_subdir: item.target_subdir,
     name: item.name,
     enabled: item.enabled,
@@ -271,15 +284,16 @@ onMounted(() => {
       </div>
     </div>
 
-    <!-- 环境提示 -->
-    <p v-if="!libraryPath" class="rounded-lg bg-amber-950/40 px-3 py-2 text-xs text-amber-300">
-      未配置媒体库根目录（MEDIALINK_LIBRARY_PATH），无法建立硬链接。请先在设置中配置。
+    <!-- 环境提示。媒体库根目录不再是必需的 —— 每条规则可自带目标目录，
+         所以这里只提示「没配根目录时新建规则必须填目标目录」 -->
+    <p v-if="!libraryPath" class="rounded-lg bg-gray-800/60 px-3 py-2 text-xs text-gray-400">
+      未配置媒体库根目录（MEDIALINK_LIBRARY_PATH）。不影响使用，但每条规则都必须自己填目标目录。
     </p>
     <p
       v-else-if="!libraryExists"
       class="rounded-lg bg-amber-950/40 px-3 py-2 text-xs text-amber-300"
     >
-      媒体库根目录不存在或不可读：{{ libraryPath }}
+      媒体库根目录不存在或不可读：{{ libraryPath }}。填了目标目录的规则不受影响。
     </p>
     <p v-if="!watching" class="rounded-lg bg-gray-800/60 px-3 py-2 text-xs text-gray-400">
       实时监听未运行，同步依赖每 30 分钟的定时对账。可能是未安装 watchdog、
@@ -317,7 +331,11 @@ onMounted(() => {
           <span class="text-sm font-medium text-gray-200">
             {{ item.name || fileName(item.source_dir) }}
           </span>
+          <span v-if="item.protected" class="badge bg-sky-950/60 text-sky-400">
+            受保护
+          </span>
           <span
+            v-else
             class="badge"
             :class="item.enabled ? 'bg-emerald-950/60 text-emerald-400' : 'bg-gray-800 text-gray-500'"
           >
@@ -326,7 +344,10 @@ onMounted(() => {
           <span v-if="item.reverse_delete" class="badge bg-red-950/60 text-red-400">
             反向删除
           </span>
-          <span v-if="!item.recursive" class="badge bg-gray-800 text-gray-400">不含子目录</span>
+          <span
+            v-if="!item.recursive && !item.protected"
+            class="badge bg-gray-800 text-gray-400"
+          >不含子目录</span>
           <span v-if="item.code_prefix" class="badge bg-gray-800 text-gray-400">
             前缀 {{ item.code_prefix }}
           </span>
@@ -337,7 +358,11 @@ onMounted(() => {
             {{ item.last_scan_time }}
           </span>
 
-          <div class="ml-auto flex items-center gap-1">
+          <!-- 刮削输出目录是占位项，由刮削工具与 webhook 联动维护，无可操作动作 -->
+          <span v-if="item.protected" class="ml-auto text-[11px] text-gray-600">
+            由刮削联动维护 · 在「设置 → 媒体联动」中修改
+          </span>
+          <div v-else class="ml-auto flex items-center gap-1">
             <button class="btn-ghost px-2 py-0.5 text-[11px]" @click="preview(item)">
               同步
             </button>
@@ -371,11 +396,18 @@ onMounted(() => {
             </div>
           </div>
           <div class="flex items-start gap-2 border-t border-gray-800 pt-1.5">
-            <span class="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-gray-600" />
+            <span
+              class="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full"
+              :class="item.target_exists ? 'bg-emerald-500' : 'bg-gray-600'"
+              :title="item.target_exists ? '目标目录已存在' : '目标目录尚未创建，建链接时自动建'"
+            />
             <div class="min-w-0 flex-1">
-              <p class="text-[11px] text-gray-500">媒体库目标</p>
-              <p class="truncate text-[11px] text-gray-600">
-                {{ libraryPath }}{{ item.target_subdir ? '/' + item.target_subdir : '' }}
+              <p class="text-[11px] text-gray-500">目标目录</p>
+              <p
+                class="truncate text-[11px] text-gray-600"
+                :title="item.resolved_target"
+              >
+                {{ item.resolved_target || '未配置' }}
               </p>
             </div>
           </div>
@@ -432,18 +464,42 @@ onMounted(() => {
           <label class="text-xs text-gray-500">源目录（绝对路径）</label>
           <input v-model="draft.source_dir" class="input" placeholder="/downloads/短视频" />
           <p class="text-[11px] text-gray-600">
-            必须与媒体库在同一文件系统，否则无法建硬链接。
+            必须与目标目录在同一文件系统，否则无法建硬链接。
           </p>
         </div>
 
         <div class="space-y-1">
-          <label class="text-xs text-gray-500">媒体库子目录（可留空）</label>
-          <input v-model="draft.target_subdir" class="input" placeholder="短视频" />
+          <label class="text-xs text-gray-500">目标目录（绝对路径）</label>
+          <input
+            v-model="draft.target_dir"
+            class="input"
+            placeholder="/volume3/h_video/短视频"
+          />
           <p class="text-[11px] text-gray-600">
-            链接建到 {{ libraryPath || '<媒体库根>' }}/{{ draft.target_subdir || '' }}，
-            源目录内的层级结构会原样保留。
+            想放哪就填哪，与设置里的媒体库根目录无关 —— 短视频、电影各有独立媒体库时用这个。
           </p>
         </div>
+
+        <!-- 旧配置方式，只在还没填目标目录时露出来，避免两个字段同时可见让人困惑 -->
+        <div v-if="!draft.target_dir.trim()" class="space-y-1">
+          <label class="text-xs text-gray-500">或：媒体库子目录（可留空）</label>
+          <input v-model="draft.target_subdir" class="input" placeholder="短视频" />
+          <p class="text-[11px] text-gray-600">
+            留空目标目录时才生效，拼在媒体库根目录
+            {{ libraryPath || '（未配置）' }} 之后。
+          </p>
+        </div>
+
+        <p
+          v-if="targetPreview"
+          class="rounded-lg bg-gray-900/60 px-3 py-2 text-[11px] text-gray-400"
+        >
+          链接将建到 <span class="text-gray-300">{{ targetPreview }}</span>，
+          源目录内的层级结构原样保留。
+        </p>
+        <p v-else class="rounded-lg bg-amber-950/40 px-3 py-2 text-[11px] text-amber-300">
+          请填写目标目录 —— 媒体库根目录也没配置，无处建立链接。
+        </p>
 
         <div class="grid gap-3 sm:grid-cols-2">
           <div class="space-y-1">
