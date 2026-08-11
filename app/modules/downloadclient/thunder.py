@@ -112,6 +112,14 @@ class Thunder:
             logger.info("迅雷不支持删除种子，已跳过")
         return []
 
+    def list_torrent_files(self, hashes: Sequence[str]) -> list[str]:
+        """文件在网盘上，没有本地路径可删。"""
+        return []
+
+    def find_torrents_by_path(self, paths: Sequence[str]) -> dict[str, list[str]]:
+        """文件在网盘上，本地路径反查无从谈起。"""
+        return {}
+
     def monitor_torrent(self, hashes: Sequence[str] | None = None) -> list[dict]:
         if not self.authorization:
             return []

@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import base64
+from pathlib import PurePath
 from typing import Sequence
 from urllib.parse import urlparse
 
@@ -133,6 +134,74 @@ class TransmissionClient:
         except Exception as exc:
             logger.error(f"查询 Transmission 任务状态失败: {exc}")
             return []
+
+    def list_torrent_files(self, hashes: Sequence[str]) -> list[str]:
+        """列出这些种子包含的全部文件，返回绝对路径。语义同 qBittorrent 版。"""
+        if not hashes:
+            return []
+        if not self._ensure_client():
+            return []
+
+        wanted = [h for h in hashes if h]
+        paths: list[str] = []
+        try:
+            for t in self.client.get_torrents(ids=wanted):
+                # files() 里的 name 含种子根目录名，相对 download_dir
+                root = t.download_dir
+                for f in t.get_files():
+                    paths.append(str(PurePath(root) / f.name))
+        except Exception as exc:
+            logger.warning(f"读取 Transmission 种子文件清单失败: {exc}")
+        return paths
+
+    def find_torrents_by_path(self, paths: Sequence[str]) -> dict[str, list[str]]:
+        """按文件路径反查种子 hash。语义同 qBittorrent 版。
+
+        Transmission 也没有按路径查种子的 RPC，同样是全量拉取建索引。
+        只取 hashString 与文件清单两个字段，减少 RPC 负载。
+        """
+        if not paths:
+            return {}
+        if not self._ensure_client():
+            return {}
+
+        wanted: dict[str, list[str]] = {}
+        for raw in paths:
+            if raw:
+                wanted.setdefault(str(PurePath(raw)), []).append(raw)
+        if not wanted:
+            return {}
+
+        out: dict[str, list[str]] = {}
+        try:
+            torrents = self.client.get_torrents()
+        except Exception as exc:
+            logger.warning(f"读取 Transmission 种子列表失败: {exc}")
+            return {}
+
+        for t in torrents:
+            try:
+                root = t.download_dir
+                files = t.get_files()
+            except Exception as exc:
+                logger.debug(f"读取 Transmission 种子 {t.hashString} 文件清单失败: {exc}")
+                continue
+
+            for f in files:
+                key = str(PurePath(root) / f.name)
+                if key not in wanted:
+                    continue
+                for original in wanted[key]:
+                    bucket = out.setdefault(original, [])
+                    if t.hashString not in bucket:
+                        bucket.append(t.hashString)
+
+        if out:
+            total = sum(len(v) for v in out.values())
+            logger.info(
+                f"Transmission 按路径反查到 {total} 个种子，覆盖 {len(out)} 个文件"
+            )
+        return out
 
     def delete_torrent(
         self, hashes: Sequence[str], delete_files: bool = False

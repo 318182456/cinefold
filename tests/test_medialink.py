@@ -226,6 +226,336 @@ def test_delete_matches_by_filename_when_path_differs(linked):
 
 
 # ----------------------------------------------------------------------
+# 刮削附属文件与空目录清理
+# ----------------------------------------------------------------------
+def test_delete_removes_sidecars_and_empty_dirs(linked):
+    """nfo / 海报 / 字幕 / extrafanart 跟着影片一起删，番号目录随后清掉。"""
+    source, link = linked
+    folder = link.parent
+
+    nfo = folder / "ABS-001.nfo"
+    poster = folder / "ABS-001-poster.jpg"
+    subtitle = folder / "ABS-001.zh.srt"
+    dir_poster = folder / "poster.jpg"
+    extrafanart = folder / "extrafanart"
+    for f in (nfo, poster, subtitle, dir_poster):
+        f.write_bytes(b"meta")
+    extrafanart.mkdir()
+    (extrafanart / "fanart1.jpg").write_bytes(b"img")
+
+    medialink.register_scrape("ABS-001", str(source))
+    result = medialink.handle_media_deleted(link_path=str(link))
+
+    for f in (nfo, poster, subtitle, dir_poster):
+        assert not f.exists(), f
+    assert not extrafanart.exists()
+    # 番号目录空了，应被清掉；媒体库根目录必须保留
+    assert not folder.exists()
+    assert folder.parent.exists()
+    assert str(folder) in result.dirs_deleted
+    assert not result.errors
+
+
+def test_delete_prunes_nested_empty_dirs_up_to_library_root(linked, configure):
+    """演员/厂牌等中间层空了要继续往上删，但根目录永远保留。"""
+    source, _link = linked
+    library = Path(get_settings().medialink_library_path)
+    nested = library / "女优A" / "厂牌B" / "ABS-002"
+    nested.mkdir(parents=True)
+
+    link2 = nested / "ABS-002.mp4"
+    os.link(source, link2)
+    (nested / "ABS-002.nfo").write_bytes(b"meta")
+
+    medialink.register_scrape("ABS-002", str(source), str(link2))
+    medialink.handle_media_deleted(link_path=str(link2))
+
+    assert not nested.exists()
+    assert not (library / "女优A" / "厂牌B").exists()
+    assert not (library / "女优A").exists()
+    assert library.exists(), "媒体库根目录不能被删掉"
+
+
+def test_delete_keeps_shared_dir_with_other_video(linked):
+    """同目录还有别的影片时，目录级 poster.jpg 和目录本身都要留着。"""
+    source, link = linked
+    folder = link.parent
+
+    other = folder / "ABS-999.mp4"
+    other.write_bytes(b"another movie")
+    dir_poster = folder / "poster.jpg"
+    dir_poster.write_bytes(b"shared")
+    own_nfo = folder / "ABS-001.nfo"
+    own_nfo.write_bytes(b"meta")
+
+    medialink.register_scrape("ABS-001", str(source))
+    medialink.handle_media_deleted(link_path=str(link))
+
+    assert not own_nfo.exists(), "自己的 nfo 该删"
+    assert dir_poster.exists(), "共用的目录级封面不能删"
+    assert other.exists()
+    assert folder.exists()
+
+
+def test_delete_never_touches_paths_outside_library(linked, configure, tmp_path):
+    """硬链接落在媒体库之外时，不清附属也不删目录。"""
+    source, _link = linked
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    stray = outside / "ABS-003.mp4"
+    os.link(source, stray)
+    stray_nfo = outside / "ABS-003.nfo"
+    stray_nfo.write_bytes(b"meta")
+
+    medialink.register_scrape("ABS-003", str(source), str(stray))
+    medialink.handle_media_deleted(link_path=str(stray))
+
+    assert not stray.exists(), "影片本身仍然要删"
+    assert stray_nfo.exists(), "库外的附属文件不能碰"
+    assert outside.exists()
+
+
+def test_dry_run_previews_sidecars_without_deleting(linked):
+    """演练要报出附属文件和会空掉的目录，但一个都不能真删。"""
+    source, link = linked
+    folder = link.parent
+    nfo = folder / "ABS-001.nfo"
+    nfo.write_bytes(b"meta")
+
+    medialink.register_scrape("ABS-001", str(source))
+    result = medialink.handle_media_deleted(link_path=str(link), dry_run=True)
+
+    assert str(nfo) in result.sidecars_deleted
+    assert str(folder) in result.dirs_deleted
+    assert nfo.exists() and link.exists() and folder.exists()
+
+
+def test_sidecar_prefix_match_does_not_hit_other_codes(linked):
+    """前缀匹配不能误伤番号相近的另一部片子。"""
+    source, link = linked
+    folder = link.parent
+    # ABS-001 与 ABS-0011 前缀相同，后者的 nfo 不能被带走
+    neighbour = folder / "ABS-0011.mp4"
+    neighbour.write_bytes(b"other movie")
+    neighbour_nfo = folder / "ABS-0011.nfo"
+    neighbour_nfo.write_bytes(b"meta")
+
+    medialink.register_scrape("ABS-001", str(source))
+    medialink.handle_media_deleted(link_path=str(link))
+
+    assert neighbour.exists()
+    assert neighbour_nfo.exists(), "ABS-0011 的 nfo 不该被 ABS-001 带走"
+
+
+# ----------------------------------------------------------------------
+# 种子关联删除：文件清单由下载器给出
+# ----------------------------------------------------------------------
+@pytest.fixture
+def fake_client(monkeypatch):
+    """注入一个假下载器，可指定它汇报的种子文件清单。"""
+    import app.modules.downloadclient as dc
+
+    def _install(files: list[str]):
+        class FakeClient:
+            def delete_torrent(self, hashes, delete_files=False):
+                return list(hashes)
+
+            def list_torrent_files(self, hashes):
+                return list(files)
+
+        monkeypatch.setattr(dc, "list_configured_clients", lambda: ["qbittorrent"])
+        monkeypatch.setattr(dc, "get_download_client", lambda name="": FakeClient())
+
+    return _install
+
+
+def test_delete_removes_all_files_reported_by_torrent(linked, fake_client, tmp_path):
+    """种子里的样品图、说明 txt 等一并删掉，不只删影片。"""
+    source, link = linked
+    task_dir = source.parent / "[厂牌]ABS-001[1080p]"
+    task_dir.mkdir()
+    movie = task_dir / "ABS-001.mp4"
+    movie.write_bytes(b"movie")
+    sample = task_dir / "sample.jpg"
+    sample.write_bytes(b"img")
+    readme = task_dir / "说明.txt"
+    readme.write_bytes(b"text")
+
+    fake_client([str(movie), str(sample), str(readme)])
+    with session_scope() as session:
+        session.add(History(hash="d" * 40, code="ABS-001", save_path=str(movie)))
+    medialink.register_scrape("ABS-001", str(source))
+
+    result = medialink.handle_media_deleted(link_path=str(link))
+
+    for f in (movie, sample, readme):
+        assert not f.exists(), f
+    assert str(sample) in result.files_deleted
+    # 任务目录空了要清掉，但下载根目录必须留着
+    assert not task_dir.exists()
+    assert source.parent.exists()
+
+
+def test_torrent_files_queried_before_deletion(linked, monkeypatch, tmp_path):
+    """文件清单必须赶在删种前取 —— 种子删了就查不到了。"""
+    source, link = linked
+    extra = source.parent / "extra.jpg"
+    extra.write_bytes(b"img")
+
+    calls: list[str] = []
+
+    class OrderTrackingClient:
+        def list_torrent_files(self, hashes):
+            calls.append("list")
+            return [str(extra)]
+
+        def delete_torrent(self, hashes, delete_files=False):
+            calls.append("delete")
+            return list(hashes)
+
+    import app.modules.downloadclient as dc
+    monkeypatch.setattr(dc, "list_configured_clients", lambda: ["qbittorrent"])
+    monkeypatch.setattr(dc, "get_download_client", lambda name="": OrderTrackingClient())
+
+    with session_scope() as session:
+        session.add(History(hash="e" * 40, code="ABS-001", save_path=str(source)))
+    medialink.register_scrape("ABS-001", str(source))
+
+    medialink.handle_media_deleted(link_path=str(link))
+
+    assert calls == ["list", "delete"], f"取清单必须在删种之前: {calls}"
+    assert not extra.exists()
+
+
+def test_single_file_torrent_never_deletes_download_root(linked, fake_client):
+    """单文件种子直接躺在下载根目录时，绝不能把下载根删掉。"""
+    source, link = linked
+    download_root = source.parent
+
+    fake_client([str(source)])
+    with session_scope() as session:
+        session.add(History(hash="f" * 40, code="ABS-001", save_path=str(source)))
+    medialink.register_scrape("ABS-001", str(source))
+
+    medialink.handle_media_deleted(link_path=str(link))
+
+    assert not source.exists()
+    assert download_root.exists(), "下载根目录不能被删掉"
+
+
+def test_nested_torrent_dirs_cleaned_but_not_above_task_dir(linked, fake_client):
+    """种子内的多层子目录要清干净，但不能越过任务目录往上删。"""
+    source, link = linked
+    downloads = source.parent
+    task = downloads / "ABS-001.1080p"
+    subs = task / "subs"
+    imgs = task / "images"
+    subs.mkdir(parents=True)
+    imgs.mkdir()
+
+    movie = task / "ABS-001.mp4"
+    movie.write_bytes(b"movie")
+    sub = subs / "ABS-001.srt"
+    sub.write_bytes(b"sub")
+    img = imgs / "cover.jpg"
+    img.write_bytes(b"img")
+
+    fake_client([str(movie), str(sub), str(img)])
+    with session_scope() as session:
+        session.add(History(hash="2" * 40, code="ABS-001", save_path=str(movie)))
+    medialink.register_scrape("ABS-001", str(source))
+
+    medialink.handle_media_deleted(link_path=str(link))
+
+    assert not subs.exists() and not imgs.exists()
+    assert not task.exists(), "任务目录应被清掉"
+    assert downloads.exists(), "下载根目录不能被删掉"
+
+
+def test_task_dir_kept_when_other_files_remain(linked, fake_client):
+    """任务目录里还有种子之外的文件时，目录要保留。"""
+    source, link = linked
+    task = source.parent / "ABS-001.1080p"
+    task.mkdir()
+    movie = task / "ABS-001.mp4"
+    movie.write_bytes(b"movie")
+    extra = task / "我自己放的笔记.txt"
+    extra.write_bytes(b"keep me")
+
+    fake_client([str(movie)])
+    with session_scope() as session:
+        session.add(History(hash="3" * 40, code="ABS-001", save_path=str(movie)))
+    medialink.register_scrape("ABS-001", str(source))
+
+    medialink.handle_media_deleted(link_path=str(link))
+
+    assert not movie.exists()
+    assert extra.exists(), "种子之外的文件不能删"
+    assert task.exists(), "目录非空时必须保留"
+
+
+def test_torrent_files_absent_falls_back_to_source_path(linked, monkeypatch):
+    """下载器查不到清单（种子已被手动删除）时，仍按登记的 source_path 删。"""
+    source, link = linked
+
+    class EmptyClient:
+        def list_torrent_files(self, hashes):
+            return []
+
+        def delete_torrent(self, hashes, delete_files=False):
+            return []
+
+    import app.modules.downloadclient as dc
+    monkeypatch.setattr(dc, "list_configured_clients", lambda: ["qbittorrent"])
+    monkeypatch.setattr(dc, "get_download_client", lambda name="": EmptyClient())
+
+    medialink.register_scrape("ABS-001", str(source))
+    result = medialink.handle_media_deleted(link_path=str(link))
+
+    assert not source.exists()
+    assert str(source) in result.files_deleted
+
+
+def test_dry_run_lists_torrent_files(linked, fake_client):
+    """演练要把种子里的文件也报出来，且一个都不能删。"""
+    source, link = linked
+    extra = source.parent / "sample.jpg"
+    extra.write_bytes(b"img")
+
+    fake_client([str(source), str(extra)])
+    with session_scope() as session:
+        session.add(History(hash="0" * 40, code="ABS-001", save_path=str(source)))
+    medialink.register_scrape("ABS-001", str(source))
+
+    result = medialink.handle_media_deleted(link_path=str(link), dry_run=True)
+
+    assert str(extra) in result.files_deleted
+    assert extra.exists() and source.exists()
+
+
+def test_client_without_list_method_is_skipped(linked, monkeypatch):
+    """老下载器没实现 list_torrent_files 时要跳过，不能抛异常。"""
+    source, link = linked
+
+    class LegacyClient:
+        def delete_torrent(self, hashes, delete_files=False):
+            return list(hashes)
+
+    import app.modules.downloadclient as dc
+    monkeypatch.setattr(dc, "list_configured_clients", lambda: ["qbittorrent"])
+    monkeypatch.setattr(dc, "get_download_client", lambda name="": LegacyClient())
+
+    with session_scope() as session:
+        session.add(History(hash="1" * 40, code="ABS-001", save_path=str(source)))
+    medialink.register_scrape("ABS-001", str(source))
+
+    result = medialink.handle_media_deleted(link_path=str(link))
+
+    assert not source.exists()
+    assert not result.errors
+
+
+# ----------------------------------------------------------------------
 def test_scrape_webhook_repairs_unescaped_backslashes(linked, configure):
     """MDCng 模板输出的 Windows 路径常带未转义反斜杠，JSON 非法但要能救回来。"""
     from fastapi.testclient import TestClient
@@ -354,3 +684,45 @@ def test_emby_webhook_deletes_on_item_remove(linked):
     assert response.json()["code"] == 200
     assert not source.exists()
     assert not link.exists()
+
+
+# ----------------------------------------------------------------------
+# 硬链接保护
+# ----------------------------------------------------------------------
+def test_delete_refuses_source_with_external_hardlink(linked, tmp_path):
+    """源文件还被别处硬链接引用时不删它。
+
+    删了那些引用会全部变成坏文件，而空间根本不会释放 —— 引用计数没到 0。
+    """
+    source, link = linked
+    external = tmp_path / "another_library"
+    external.mkdir()
+    extra = external / "ABS-001.mp4"
+    os.link(source, extra)
+
+    medialink.register_scrape("ABS-001", str(source))
+    result = medialink.handle_media_deleted(link_path=str(link), dry_run=False)
+
+    # 源文件与外部引用都得留着
+    assert source.exists()
+    assert extra.exists()
+    assert extra.read_bytes() == source.read_bytes()
+    # 媒体库那份链接仍然删掉 —— 那是本次删除的目标
+    assert not link.exists()
+    assert any("其它硬链接引用" in e for e in result.errors)
+    assert str(source) not in result.files_deleted
+
+
+def test_delete_proceeds_once_external_hardlink_is_gone(linked, tmp_path):
+    source, link = linked
+    external = tmp_path / "another_library"
+    external.mkdir()
+    extra = external / "ABS-001.mp4"
+    os.link(source, extra)
+    extra.unlink()
+
+    medialink.register_scrape("ABS-001", str(source))
+    result = medialink.handle_media_deleted(link_path=str(link), dry_run=False)
+
+    assert not source.exists()
+    assert not any("其它硬链接引用" in e for e in result.errors)

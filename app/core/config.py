@@ -118,6 +118,12 @@ class Settings:
     # webhook 校验密钥。请求需带 X-Cinefold-Token，留空则不校验
     medialink_webhook_token: str = ""
 
+    # --- 监控目录 ---
+    # 文件消失后的删除宽限期（秒）。期间若同 inode 的文件在别处出现，判定为
+    # 移动而非删除，只改记录不动文件。也能挡住网络存储瞬时不可达导致的误删。
+    # 默认 30 分钟；设为 0 则发现即删
+    watchdir_delete_grace: int = 1800
+
     # --- 下载器 ---
     qbittorrent_url: str = ""
     qbittorrent_username: str = ""
@@ -343,6 +349,8 @@ def load_settings() -> Settings:
         medialink_library_path=_env("MEDIALINK_LIBRARY_PATH"),
         medialink_delete_enabled=_env_bool("MEDIALINK_DELETE_ENABLED", False),
         medialink_webhook_token=_env("MEDIALINK_WEBHOOK_TOKEN"),
+
+        watchdir_delete_grace=_env_int("WATCHDIR_DELETE_GRACE", 1800),
 
         qbittorrent_url=_env("QBITTORRENT_URL"),
         qbittorrent_username=_env("QBITTORRENT_USERNAME"),

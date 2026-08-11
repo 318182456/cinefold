@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import re
+from pathlib import PurePath
 from typing import Sequence
 
 import qbittorrentapi
@@ -242,6 +243,88 @@ class QBitTorrentClient:
         except Exception as exc:
             logger.error(f"查询 qBittorrent 任务状态失败: {exc}")
             return []
+
+    def list_torrent_files(self, hashes: Sequence[str]) -> list[str]:
+        """列出这些种子包含的全部文件，返回绝对路径。
+
+        用于联动删除：种子的文件清单是下载器给的权威信息，比按路径猜测
+        「同目录下哪些文件属于这部片子」可靠得多。查不到就返回空，
+        调用方据此退回到路径策略。
+        """
+        if not hashes:
+            return []
+        if not self._ensure_client():
+            return []
+
+        paths: list[str] = []
+        for h in [x for x in hashes if x]:
+            try:
+                # save_path 是种子的根目录，files 里的 name 是相对它的路径
+                info = self.client.torrents_info(torrent_hashes=[h])
+                if not info:
+                    continue
+                root = info[0].save_path
+                for f in self.client.torrents_files(torrent_hash=h):
+                    paths.append(str(PurePath(root) / f.name))
+            except Exception as exc:
+                logger.warning(f"读取 qBittorrent 种子 {h} 的文件清单失败: {exc}")
+        return paths
+
+    def find_torrents_by_path(self, paths: Sequence[str]) -> dict[str, list[str]]:
+        """按文件路径反查种子 hash。返回 {路径: [hash, ...]}。
+
+        做法是把 qb 里所有种子的文件清单拉一遍，建「绝对路径 → hash」索引，
+        再拿待查路径去命中。一次全量拉取换 N 次精确匹配 —— qb 没有
+        「按路径查种子」的 API，只能这样。
+
+        路径比对前统一成 PurePath 再转字符串：qb 在 Windows 上返回的分隔符
+        可能与传入路径不一致，直接比字符串会漏。大小写不做归一化 ——
+        Linux 上路径大小写敏感，抹平会导致误匹配到别的文件。
+        """
+        if not paths:
+            return {}
+        if not self._ensure_client():
+            return {}
+
+        # 待查路径归一化，同时保留原始形式用于回填结果
+        wanted: dict[str, list[str]] = {}
+        for raw in paths:
+            if raw:
+                wanted.setdefault(str(PurePath(raw)), []).append(raw)
+        if not wanted:
+            return {}
+
+        out: dict[str, list[str]] = {}
+        try:
+            torrents = self.client.torrents_info()
+        except Exception as exc:
+            logger.warning(f"读取 qBittorrent 种子列表失败: {exc}")
+            return {}
+
+        for t in torrents:
+            try:
+                root = t.save_path
+                files = self.client.torrents_files(torrent_hash=t.hash)
+            except Exception as exc:
+                # 单个种子读不到不影响其余种子
+                logger.debug(f"读取 qBittorrent 种子 {t.hash} 文件清单失败: {exc}")
+                continue
+
+            for f in files:
+                key = str(PurePath(root) / f.name)
+                if key not in wanted:
+                    continue
+                for original in wanted[key]:
+                    bucket = out.setdefault(original, [])
+                    if t.hash not in bucket:
+                        bucket.append(t.hash)
+
+        if out:
+            total = sum(len(v) for v in out.values())
+            logger.info(
+                f"qBittorrent 按路径反查到 {total} 个种子，覆盖 {len(out)} 个文件"
+            )
+        return out
 
     def delete_torrent(
         self, hashes: Sequence[str], delete_files: bool = False

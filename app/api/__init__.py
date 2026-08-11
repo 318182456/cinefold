@@ -31,6 +31,11 @@ def init_cinefold() -> None:
     from app.modules.notify.tgpolling import start_polling
     start_polling()
 
+    # 目录实时监听。watchdog 缺失或没有规则时会自行跳过，
+    # 此时功能退化为定时全量对账，不影响启动
+    from app.modules.watcher import start_watching
+    start_watching()
+
     logger.info("cinefold 启动完成")
 
 
@@ -42,6 +47,8 @@ async def lifespan(app: FastAPI):
     await close_client()
     from app.modules.notify.tgpolling import stop_polling
     stop_polling()
+    from app.modules.watcher import stop_watching
+    stop_watching()
     from app.scheduler import stop_scheduler
     stop_scheduler()
     logger.info("cinefold 已停止")
@@ -66,12 +73,12 @@ def create_app() -> FastAPI:
 
     from app.api.endpoints import (
         actors, admin, auth, config, datasource, medialink, message, migrate, picproxy,
-        subscribe, webhook,
+        subscribe, watchdir, webhook,
     )
 
     for module in (
         admin, auth, config, subscribe, actors, picproxy, message, migrate, datasource,
-        medialink, webhook,
+        medialink, watchdir, webhook,
     ):
         app.include_router(module.router, prefix=API_PREFIX)
 

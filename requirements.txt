@@ -12,6 +12,8 @@ pyquery~=2.0.0
 lxml~=5.3.0
 html5lib~=1.1
 apscheduler~=3.10.4
+# 监控目录的实时文件事件。缺失时功能退化为定时全量对账，不影响启动
+watchdog~=6.0.0
 PyJWT~=2.9.0
 bcrypt~=4.2.0
 # Passkey（WebAuthn）签名验证

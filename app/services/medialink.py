@@ -9,11 +9,14 @@
     Emby 删除影片 ──webhook──> handle_media_deleted()
         按 link_path / code 反查 media_link
         再按 code 去 history 拿到全部种子 hash（含转种）
-        删种（不删文件）→ 删源文件 → 删硬链接 → 清记录
+        删种（不删文件）→ 删源文件 → 删硬链接 → 删刮削附属 → 清空目录 → 清记录
 
 删除顺序是有讲究的：种子必须先停，否则下载器可能在文件消失后把任务标记为
 错误并重新下载；源文件先于硬链接删，是因为源文件才是占空间的那份，
 硬链接删掉只减引用计数，源文件不删空间就不会释放。
+
+刮削附属文件（nfo / 海报 / 字幕 / trickplay 等）跟着硬链接一起删，删完再逐级
+向上清理空目录。边界严格限定在媒体库根目录内，根目录本身永不删。
 """
 from __future__ import annotations
 
@@ -34,6 +37,31 @@ VIDEO_SUFFIXES = {
     ".flv", ".rmvb", ".iso", ".mpg", ".mpeg", ".m4v", ".strm",
 }
 
+# 刮削产物：Emby/Jellyfin 认得的元数据、图片、字幕。
+# 只按扩展名判定还不够 —— 删除范围另外靠"与影片同名前缀"约束（见 _sidecar_files）
+SIDECAR_SUFFIXES = {
+    # 元数据
+    ".nfo", ".xml",
+    # 图片（海报、背景、缩略图、剧照）
+    ".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".tbn",
+    # 字幕
+    ".srt", ".ass", ".ssa", ".sub", ".idx", ".sup", ".vtt", ".smi", ".txt",
+}
+
+# 影片所在目录里，与影片不同名但同属这部片子的刮削文件。
+# Emby 的目录级图片就叫 poster.jpg / fanart.jpg，没有番号前缀
+SIDECAR_STEMS = {
+    "poster", "fanart", "banner", "thumb", "landscape", "clearart",
+    "clearlogo", "logo", "disc", "discart", "backdrop", "folder",
+    "cover", "movie", "season", "keyart", "characterart",
+}
+
+# 影片同名的附属目录（Emby 的 trickplay 缩略图、extrafanart 等），整个删掉
+SIDECAR_DIR_NAMES = {
+    "extrafanart", "extrathumbs", "behind the scenes", "trailers",
+    ".actors", "subs", "subtitles",
+}
+
 
 @dataclass
 class DeleteResult:
@@ -43,6 +71,10 @@ class DeleteResult:
     torrents_deleted: list[str] = field(default_factory=list)
     files_deleted: list[str] = field(default_factory=list)
     links_deleted: list[str] = field(default_factory=list)
+    # 刮削附属：nfo、海报、字幕、extrafanart 目录等
+    sidecars_deleted: list[str] = field(default_factory=list)
+    # 清理掉的空目录，自下而上
+    dirs_deleted: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict:
@@ -52,6 +84,8 @@ class DeleteResult:
             "torrents_deleted": self.torrents_deleted,
             "files_deleted": self.files_deleted,
             "links_deleted": self.links_deleted,
+            "sidecars_deleted": self.sidecars_deleted,
+            "dirs_deleted": self.dirs_deleted,
             "errors": self.errors,
         }
 
@@ -214,12 +248,68 @@ def _torrent_hashes(code: str) -> list[str]:
         ).all())
 
 
-def _delete_file(path: str, result: DeleteResult) -> None:
+def _torrent_hashes_by_path(paths: set[str]) -> list[str]:
+    """按源文件路径向下载器反查种子 hash。
+
+    这是 code → History → hash 之外的第二条路，补的是这个缺口：手动放进
+    监控目录的文件，code 是从文件名生成的，History 里没有对应记录，
+    按 code 一个种子都查不到 —— 但文件确实是某个种子下载下来的，
+    下载器手里有「这个文件属于哪个种子」的答案。
+
+    两条路取并集：History 覆盖 cinefold 自己下载的，反查覆盖其余的。
+    """
+    if not paths:
+        return []
+
+    from app.modules.downloadclient import find_torrents_by_path
+
+    try:
+        mapping = find_torrents_by_path(sorted(paths))
+    except Exception as exc:
+        logger.warning(f"按路径反查种子失败: {exc}")
+        return []
+
+    found: list[str] = []
+    for hashes in mapping.values():
+        for h in hashes:
+            if h not in found:
+                found.append(h)
+    return found
+
+
+def _delete_file(
+    path: str, result: DeleteResult, expected_links: int = 0
+) -> None:
+    """删除一个文件。
+
+    expected_links 非 0 时启用硬链接保护：文件的链接数超过这个值，说明除了
+    我们即将删掉的那些链接之外，还有别处引用同一份数据（另一个媒体库、
+    手工建的链接、别的整理工具），此时不删源文件 —— 删了那些引用会全部
+    变成坏文件，而空间根本不会释放（引用计数没到 0）。
+
+    传 0 表示不做这项检查，用于删硬链接本身。
+    """
     try:
         p = Path(path)
         if not p.exists():
             logger.info(f"文件已不存在，跳过: {path}")
             return
+
+        if expected_links:
+            try:
+                nlink = p.stat().st_nlink
+            except OSError:
+                nlink = 0
+            # Windows 上 st_nlink 可能为 0/1 不可信，取到 0 时跳过检查
+            if nlink and nlink > expected_links:
+                msg = (
+                    f"源文件还有 {nlink - expected_links} 处其它硬链接引用，"
+                    f"未删除以免破坏它们: {path}"
+                )
+                logger.warning(msg)
+                result.errors.append(msg)
+                return
+
         p.unlink()
         result.files_deleted.append(path)
         logger.info(f"已删除文件: {path}")
@@ -227,6 +317,430 @@ def _delete_file(path: str, result: DeleteResult) -> None:
         msg = f"删除文件失败 {path}: {exc}"
         logger.error(msg)
         result.errors.append(msg)
+
+
+def _library_root() -> Path | None:
+    """媒体库根目录，解析成绝对路径。未配置或不存在时返回 None。
+
+    空目录清理的所有边界判断都以它为准，拿不到就一律不清目录 ——
+    宁可留下空壳，也不能在库外乱删。
+    """
+    library = get_settings().medialink_library_path
+    if not library:
+        return None
+    try:
+        root = Path(library).resolve()
+    except OSError:
+        return None
+    return root if root.is_dir() else None
+
+
+def _within(path: Path, root: Path) -> bool:
+    """path 是否严格位于 root 之内（不含 root 自身）。"""
+    try:
+        resolved = path.resolve()
+    except OSError:
+        return False
+    if resolved == root:
+        return False
+    return root in resolved.parents
+
+
+def _sidecar_files(video: Path) -> tuple[list[Path], list[Path]]:
+    """列出影片对应的刮削附属文件与附属目录。
+
+    命中规则，三者取并集：
+      1. 与影片同名 —— ABS-001.nfo / ABS-001-fanart.jpg / ABS-001.zh.srt
+      2. 目录级图片 —— poster.jpg / folder.jpg，Emby 不带番号前缀
+      3. 附属目录 —— extrafanart/ .actors/ 以及 ABS-001.trickplay/
+
+    第 1 条不能用裸前缀匹配：ABS-0011.nfo 也以 "ABS-001" 开头，那是另一部
+    片子。名字要么与影片主名完全相同，要么其后紧跟 . 或 - 分隔符。
+
+    第 2 条只在"该目录下已无其它影片"时才算数，否则会误删同目录另一部片子
+    共用的 poster.jpg。判断放在调用处（_cleanup_sidecars）。
+    """
+    parent = video.parent
+    stem = video.stem.lower()
+    files: list[Path] = []
+    dirs: list[Path] = []
+
+    def belongs(name: str) -> bool:
+        """name（不含扩展名的部分也可能带后缀）是否属于这部影片。"""
+        if not name.startswith(stem):
+            return False
+        rest = name[len(stem):]
+        # 完全同名，或后面紧跟分隔符：ABS-001-poster / ABS-001.zh
+        return rest == "" or rest[0] in ".-"
+
+    try:
+        entries = list(parent.iterdir())
+    except OSError as exc:
+        logger.warning(f"无法列出目录 {parent}: {exc}")
+        return [], []
+
+    for entry in entries:
+        name = entry.name.lower()
+        try:
+            is_dir = entry.is_dir()
+        except OSError:
+            continue
+
+        if is_dir:
+            # ABS-001.trickplay / ABS-001-extrafanart 这类同名附属目录
+            if name in SIDECAR_DIR_NAMES or belongs(name):
+                dirs.append(entry)
+            continue
+
+        if entry == video or entry.suffix.lower() not in SIDECAR_SUFFIXES:
+            continue
+        # ABS-001.nfo、ABS-001-poster.jpg、ABS-001.zh.srt 都以影片主名打头。
+        # 比 stem 而非全名：ABS-001.zh.srt 的 stem 是 "ABS-001.zh"
+        if belongs(entry.stem.lower()):
+            files.append(entry)
+
+    return files, dirs
+
+
+def _other_videos(directory: Path, exclude: set[Path]) -> bool:
+    """目录里除 exclude 外是否还有别的影片文件。"""
+    try:
+        for entry in directory.iterdir():
+            if entry.suffix.lower() not in VIDEO_SUFFIXES:
+                continue
+            if not entry.is_file() or entry in exclude:
+                continue
+            return True
+    except OSError:
+        return True  # 读不了就当有，宁可少删
+    return False
+
+
+def _remove_tree(path: Path, result: DeleteResult) -> None:
+    """整棵删掉附属目录（extrafanart、trickplay 之类，里面全是刮削产物）。"""
+    import shutil
+
+    try:
+        shutil.rmtree(path)
+        result.sidecars_deleted.append(str(path))
+        logger.info(f"已删除附属目录: {path}")
+    except OSError as exc:
+        msg = f"删除附属目录失败 {path}: {exc}"
+        logger.error(msg)
+        result.errors.append(msg)
+
+
+def _cleanup_sidecars(videos: list[str], result: DeleteResult) -> None:
+    """删除影片对应的刮削配置、图片、字幕。
+
+    videos 是刚被删掉的硬链接路径。文件此时已不在，但路径信息仍然有效。
+    """
+    root = _library_root()
+    if root is None:
+        logger.warning("未配置媒体库根目录，跳过刮削附属文件清理")
+        return
+
+    removed = {Path(v) for v in videos}
+    for raw in videos:
+        video = Path(raw)
+        if not _within(video, root):
+            logger.warning(f"硬链接不在媒体库根目录内，跳过附属清理: {raw}")
+            continue
+
+        files, dirs = _sidecar_files(video)
+        for f in files:
+            try:
+                f.unlink()
+                result.sidecars_deleted.append(str(f))
+                logger.info(f"已删除刮削附属: {f}")
+            except OSError as exc:
+                msg = f"删除刮削附属失败 {f}: {exc}"
+                logger.error(msg)
+                result.errors.append(msg)
+        for d in dirs:
+            _remove_tree(d, result)
+
+        # 目录级图片（poster.jpg 等）只在这个目录已经没有别的影片时才删，
+        # 否则会连带删掉同目录另一部片子的封面
+        parent = video.parent
+        if _other_videos(parent, removed):
+            continue
+        try:
+            entries = list(parent.iterdir())
+        except OSError:
+            continue
+        for entry in entries:
+            try:
+                if not entry.is_file():
+                    continue
+            except OSError:
+                continue
+            if entry.suffix.lower() not in SIDECAR_SUFFIXES:
+                continue
+            if entry.stem.lower() not in SIDECAR_STEMS:
+                continue
+            try:
+                entry.unlink()
+                result.sidecars_deleted.append(str(entry))
+                logger.info(f"已删除目录级刮削文件: {entry}")
+            except OSError as exc:
+                msg = f"删除目录级刮削文件失败 {entry}: {exc}"
+                logger.error(msg)
+                result.errors.append(msg)
+
+
+def _prune_empty_dirs(videos: list[str], result: DeleteResult) -> None:
+    """自下而上删掉空目录，止于媒体库根目录。
+
+    番号目录空了就删，父目录（演员名/厂牌/年份）跟着空了继续往上删，
+    但根目录本身无论多空都保留 —— 删了 Emby 会认为整个库掉线。
+    """
+    root = _library_root()
+    if root is None:
+        logger.warning("未配置媒体库根目录，跳过空目录清理")
+        return
+
+    # 深的目录排前面，保证子目录先于父目录被处理
+    candidates = sorted(
+        {Path(v).parent for v in videos},
+        key=lambda p: len(p.parts),
+        reverse=True,
+    )
+
+    for start in candidates:
+        current = start
+        while _within(current, root):
+            try:
+                if any(current.iterdir()):
+                    break  # 还有内容，本条链到此为止
+                current.rmdir()
+            except OSError as exc:
+                # 目录已被上一轮删掉时不算错误
+                if not current.exists():
+                    break
+                msg = f"删除空目录失败 {current}: {exc}"
+                logger.error(msg)
+                result.errors.append(msg)
+                break
+            result.dirs_deleted.append(str(current))
+            logger.info(f"已删除空目录: {current}")
+            current = current.parent
+
+
+def _torrent_files(hashes: list[str]) -> list[str]:
+    """向下载器要这些种子的完整文件清单。
+
+    这是删源文件侧最可靠的依据：种子里有什么，下载器最清楚，不用去猜
+    「下载目录里哪些文件属于这部片子」。多下载器都问一遍，取并集。
+
+    必须在删种之前调用 —— 种子一删，清单就查不到了。
+    """
+    if not hashes:
+        return []
+
+    from app.modules.downloadclient import get_download_client, list_configured_clients
+
+    found: list[str] = []
+    seen: set[str] = set()
+    for name in list_configured_clients():
+        client = get_download_client(name)
+        if client is None:
+            continue
+        lister = getattr(client, "list_torrent_files", None)
+        if lister is None:
+            continue  # 老客户端未实现该接口，跳过即可
+        try:
+            for path in lister(hashes):
+                if path and path not in seen:
+                    seen.add(path)
+                    found.append(path)
+        except Exception as exc:
+            logger.warning(f"{name} 读取种子文件清单异常: {exc}")
+
+    if found:
+        logger.info(f"从下载器取到 {len(found)} 个种子内文件")
+    return found
+
+
+def _is_download_root(path: Path) -> bool:
+    """path 是否为某个下载器配置的下载根目录（或其祖先）。
+
+    下载根装着所有任务，删掉下载器就瘸了。种子文件直接散落在下载根下时
+    （多文件种子未建自己的子目录），公共路径会算出下载根，必须挡住。
+
+    顺带把监控目录也算进保护范围 —— 那些目录是用户明确配置的，同样不该
+    因为一次删除而消失。
+    """
+    settings = get_settings()
+    guarded: set[Path] = set()
+
+    for raw in (
+        settings.qbittorrent_download_path,
+        settings.transmission_download_path,
+    ):
+        if raw:
+            try:
+                guarded.add(Path(raw).resolve())
+            except OSError:
+                continue
+
+    # 监控目录同样受保护
+    try:
+        from app.database.models import WatchDir
+        with session_scope() as session:
+            for row in session.scalars(select(WatchDir.source_dir)).all():
+                if row:
+                    try:
+                        guarded.add(Path(row).resolve())
+                    except OSError:
+                        continue
+    except Exception as exc:
+        # 表还没建（首次启动）或库不可用时，仅依赖下载器配置
+        logger.debug(f"读取监控目录保护名单失败: {exc}")
+
+    if not guarded:
+        return False
+
+    try:
+        resolved = path.resolve()
+    except OSError:
+        return False
+
+    # path 本身是保护目录，或是它的祖先（更靠上，更不能删）
+    for root in guarded:
+        if resolved == root or resolved in root.parents:
+            return True
+    return False
+
+
+def _prune_torrent_dirs(torrent_files: list[str], result: DeleteResult) -> None:
+    """清掉种子建的任务目录（如果它空了）。
+
+    只处理种子自己那一层，**不向上递归**。再往上是下载器的组织结构
+    （下载根、分类目录），里面装着别的任务，不归这次删除管 —— 而且源文件
+    此刻已删，"目录看起来空了"根本不能作为可删的证据。
+
+    任务目录怎么认：种子全部文件的公共路径。多文件种子（`任务名/xxx.mp4`
+    加 `任务名/subs/`）算出来就是任务目录本身；单文件种子只有一个文件，
+    公共路径落在文件上，说明种子没建目录，跳过 —— 那一层是下载根。
+    """
+    dirs = {Path(p).parent for p in torrent_files}
+    if not dirs:
+        return
+
+    try:
+        common = Path(os.path.commonpath([str(p) for p in torrent_files]))
+    except ValueError:
+        return  # 跨盘符，没有公共路径，放弃
+
+    # commonpath 落在文件上（单文件种子）说明种子没建目录，无事可做
+    if common in {Path(p) for p in torrent_files}:
+        return
+
+    # common 可能就是下载根目录本身：多文件种子若没建自己的子目录
+    # （文件全散在下载根下），公共路径算出来就是下载根。那一层装着别的任务，
+    # 删掉会让下载器整个失效，必须挡住。
+    if _is_download_root(common):
+        logger.info(f"种子文件直接位于下载根目录，不清理目录: {common}")
+        return
+
+    # common 就是任务目录。自下而上删空目录，删到 common 自己为止
+    candidates = sorted(
+        {d for d in dirs if d == common or common in d.parents} | {common},
+        key=lambda p: len(p.parts),
+        reverse=True,
+    )
+
+    def _rmdir_if_empty(path: Path) -> None:
+        # 逐个再挡一次：候选目录里可能混着受保护的路径
+        if _is_download_root(path):
+            logger.info(f"目录受保护（下载根/监控目录），不删: {path}")
+            return
+        try:
+            if any(path.iterdir()):
+                return
+            path.rmdir()
+        except OSError as exc:
+            if path.exists():
+                msg = f"删除种子空目录失败 {path}: {exc}"
+                logger.error(msg)
+                result.errors.append(msg)
+            return
+        result.dirs_deleted.append(str(path))
+        logger.info(f"已删除种子空目录: {path}")
+
+    for path in candidates:
+        _rmdir_if_empty(path)
+
+
+def _preview_cleanup(videos: list[str]) -> tuple[list[str], list[str]]:
+    """演练模式：算出附属文件与空目录会删掉哪些，不动磁盘。
+
+    影片此刻还在，所以目录"删完后是否为空"要靠推算：把即将删掉的影片、
+    附属文件、附属目录从目录内容里扣掉，剩下为空才算会被清理。
+    """
+    root = _library_root()
+    if root is None:
+        return [], []
+
+    doomed: set[Path] = {Path(v) for v in videos}
+    sidecars: list[str] = []
+
+    for raw in videos:
+        video = Path(raw)
+        if not _within(video, root):
+            continue
+        files, dirs = _sidecar_files(video)
+        for p in files + dirs:
+            if p not in doomed:
+                doomed.add(p)
+                sidecars.append(str(p))
+
+        parent = video.parent
+        if _other_videos(parent, doomed):
+            continue
+        try:
+            entries = list(parent.iterdir())
+        except OSError:
+            continue
+        for entry in entries:
+            try:
+                if not entry.is_file():
+                    continue
+            except OSError:
+                continue
+            if entry.suffix.lower() not in SIDECAR_SUFFIXES:
+                continue
+            if entry.stem.lower() not in SIDECAR_STEMS:
+                continue
+            if entry not in doomed:
+                doomed.add(entry)
+                sidecars.append(str(entry))
+
+    # 自下而上推算哪些目录会空
+    dirs_removed: set[Path] = set()
+    candidates = sorted(
+        {Path(v).parent for v in videos},
+        key=lambda p: len(p.parts),
+        reverse=True,
+    )
+    for start in candidates:
+        current = start
+        while _within(current, root):
+            try:
+                remaining = [
+                    e for e in current.iterdir()
+                    if e not in doomed and e not in dirs_removed
+                ]
+            except OSError:
+                break
+            if remaining:
+                break
+            dirs_removed.add(current)
+            current = current.parent
+
+    ordered = sorted(dirs_removed, key=lambda p: len(p.parts), reverse=True)
+    return sidecars, [str(p) for p in ordered]
 
 
 def handle_media_deleted(
@@ -250,7 +764,19 @@ def handle_media_deleted(
     result.code = code or links[0].code
     source_paths = {row.source_path for row in links if row.source_path}
     link_paths = [row.link_path for row in links]
+
+    # 查种子有两条路，取并集：
+    #   1. code → History → hash    cinefold 自己下载的走这条
+    #   2. 源文件路径 → 下载器 → hash  手动放进监控目录的走这条（code 对不上）
     hashes = _torrent_hashes(result.code)
+    for h in _torrent_hashes_by_path(source_paths):
+        if h not in hashes:
+            hashes.append(h)
+
+    # 种子里的文件也算源文件。必须赶在删种之前问，种子删了清单就没了。
+    # 登记的 source_path 只有影片一个文件，种子里的样品图、说明 txt 得靠这个补全
+    torrent_files = _torrent_files(hashes)
+    source_paths.update(torrent_files)
 
     logger.warning(
         f"[{result.code}] 媒体联动删除{'（演练）' if dry_run else ''} —— "
@@ -271,6 +797,7 @@ def handle_media_deleted(
         result.torrents_deleted = hashes
         result.files_deleted = sorted(source_paths)
         result.links_deleted = link_paths
+        result.sidecars_deleted, result.dirs_deleted = _preview_cleanup(link_paths)
         return result
 
     # 1) 删种。转种下同一文件对应多个种子，全部删掉；文件不交给下载器删
@@ -289,16 +816,39 @@ def handle_media_deleted(
                 logger.error(msg)
                 result.errors.append(msg)
 
-    # 2) 删源文件（占空间的那份）
+    # 2) 删源文件（占空间的那份），含种子里的全部文件。
+    #
+    # 硬链接保护：此刻硬链接还没删（第 3 步才删），所以源文件的链接数应当是
+    #   1（源文件自己）+ 本次要删的链接数
+    # 超出这个数，说明还有别处引用同一份数据 —— 另一个媒体库、手工建的链接、
+    # 别的整理工具。那种情况下删源文件既释放不了空间（引用计数不到 0），
+    # 又会让那些引用无从追溯，所以宁可留着。
+    #
+    # 只保护登记过的源文件；种子里的其它文件（样品图、说明 txt）不设这层
+    # 保护 —— 它们本来就没有硬链接，多一次 stat 是白费
+    registered_sources = {row.source_path for row in links if row.source_path}
+    allowed_links = 1 + len(link_paths)
     for path in sorted(source_paths):
-        _delete_file(path, result)
+        expected = allowed_links if path in registered_sources else 0
+        _delete_file(path, result, expected_links=expected)
+
+    # 种子文件删完，任务目录多半空了。只清种子自己那棵目录树，
+    # 边界取种子文件的公共父目录 —— 下载根目录下还有别的任务，不能往上爬
+    if torrent_files:
+        _prune_torrent_dirs(torrent_files, result)
 
     # 3) 删硬链接
     for path in link_paths:
         _delete_file(path, result)
         result.links_deleted.append(path)
 
-    # 4) 清关联记录与下载历史
+    # 4) 删刮削附属（nfo / 海报 / 字幕 / extrafanart），再清掉空掉的目录。
+    #    必须排在删硬链接之后：_other_videos 靠"目录里还剩没剩影片"判断能否
+    #    删目录级 poster.jpg，影片还在时会误判成"还有别的片子"
+    _cleanup_sidecars(link_paths, result)
+    _prune_empty_dirs(link_paths, result)
+
+    # 5) 清关联记录与下载历史
     with session_scope() as session:
         for path in link_paths:
             row = session.get(MediaLink, path)
@@ -312,6 +862,8 @@ def handle_media_deleted(
 
     logger.warning(
         f"[{result.code}] 联动删除完成 —— 种子 {len(result.torrents_deleted)}，"
-        f"文件 {len(result.files_deleted)}，错误 {len(result.errors)}"
+        f"文件 {len(result.files_deleted)}，"
+        f"刮削附属 {len(result.sidecars_deleted)}，"
+        f"目录 {len(result.dirs_deleted)}，错误 {len(result.errors)}"
     )
     return result

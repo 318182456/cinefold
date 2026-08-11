@@ -1,0 +1,717 @@
+"""监控目录：硬链接同步、移动判定、延迟删除、种子登记。
+
+硬链接是真的建、真的删，所以全部用 tmp_path 里的真实文件跑 —— mock 掉
+文件系统就测不出 inode 相关的行为，而这个功能的正确性几乎全靠 inode。
+"""
+from __future__ import annotations
+
+import os
+from datetime import datetime, timedelta
+from pathlib import Path
+
+import pytest
+import sqlalchemy as sa
+
+from app.core.config import get_settings
+from app.database.models import History, MediaLink, PendingDelete, WatchDir
+from app.database.session import session_scope
+from app.services import watchdir
+
+
+@pytest.fixture
+def configure():
+    """直接改写已加载的 Settings。理由同 test_medialink.py。"""
+    settings = get_settings()
+    keys = (
+        "medialink_library_path",
+        "medialink_delete_enabled",
+        "watchdir_delete_grace",
+        "qbittorrent_download_path",
+        "transmission_download_path",
+    )
+    original = {key: getattr(settings, key) for key in keys}
+
+    def _apply(**kwargs):
+        for key, value in kwargs.items():
+            setattr(settings, key, value)
+
+    yield _apply
+    for key, value in original.items():
+        setattr(settings, key, value)
+
+
+@pytest.fixture(autouse=True)
+def clean_tables():
+    """建表并清掉本模块用到的表，避免用例相互污染。"""
+    from app.database.base import DBBase
+    from app.database.session import engine
+
+    DBBase.metadata.create_all(engine)
+
+    def _clear():
+        with session_scope() as session:
+            for model in (PendingDelete, MediaLink, WatchDir, History):
+                for row in session.scalars(sa.select(model)).all():
+                    session.delete(row)
+
+    _clear()
+    yield
+    _clear()
+
+
+@pytest.fixture(autouse=True)
+def instant_stability(monkeypatch):
+    """稳定性检查在测试里没必要真等 —— 文件都是一次写完的。"""
+    monkeypatch.setattr(watchdir, "STABLE_CHECK_INTERVAL", 0.0)
+    monkeypatch.setattr(watchdir, "STABLE_CHECK_ROUNDS", 1)
+
+
+@pytest.fixture
+def rule(tmp_path, configure):
+    """造一条监控规则：源目录 + 媒体库，宽限期默认关掉。
+
+    返回 (rule_id, 源目录, 媒体库根)。
+    """
+    source_dir = tmp_path / "downloads"
+    library = tmp_path / "library"
+    source_dir.mkdir(parents=True)
+    library.mkdir(parents=True)
+
+    configure(
+        medialink_library_path=str(library),
+        medialink_delete_enabled=True,
+        # 大部分用例测的是「判定对不对」，不是「等够没等够」
+        watchdir_delete_grace=0,
+    )
+
+    with session_scope() as session:
+        session.add(WatchDir(
+            source_dir=str(source_dir), target_subdir="sv", name="short",
+            enabled=True, recursive=True, reverse_delete=True, code_prefix="SV",
+        ))
+    with session_scope() as session:
+        rule_id = session.scalar(sa.select(WatchDir.id))
+
+    return rule_id, source_dir, library
+
+
+def _links() -> dict[str, str]:
+    with session_scope() as session:
+        return {
+            r.link_path: r.code
+            for r in session.scalars(sa.select(MediaLink)).all()
+        }
+
+
+def _same_inode(a: Path, b: Path) -> bool:
+    sa_, sb = a.stat(), b.stat()
+    return (sa_.st_ino, sa_.st_dev) == (sb.st_ino, sb.st_dev)
+
+
+# ----------------------------------------------------------------------
+# 命名规则
+# ----------------------------------------------------------------------
+def test_make_code_uses_filename_without_prefix():
+    plain = WatchDir(source_dir="/x", code_prefix="")
+    assert watchdir.make_code(plain, Path("/x/ABC-123.mp4")) == "ABC-123"
+
+
+def test_make_code_applies_prefix():
+    prefixed = WatchDir(source_dir="/x", code_prefix="SV")
+    assert watchdir.make_code(prefixed, Path("/x/clip.mp4")) == "SV-clip"
+
+
+def test_target_path_preserves_relative_structure(tmp_path):
+    rule = WatchDir(source_dir=str(tmp_path / "src"), target_subdir="sv")
+    (tmp_path / "src" / "2026").mkdir(parents=True)
+    library = tmp_path / "lib"
+    library.mkdir()
+
+    target = watchdir.target_path(
+        rule, tmp_path / "src" / "2026" / "a.mp4", library
+    )
+    assert target == library / "sv" / "2026" / "a.mp4"
+
+
+def test_target_path_rejects_file_outside_source(tmp_path):
+    rule = WatchDir(source_dir=str(tmp_path / "src"), target_subdir="sv")
+    (tmp_path / "src").mkdir()
+    assert watchdir.target_path(
+        rule, tmp_path / "elsewhere.mp4", tmp_path / "lib"
+    ) is None
+
+
+# ----------------------------------------------------------------------
+# 正向同步
+# ----------------------------------------------------------------------
+def test_sync_creates_hardlinks_and_records(rule):
+    rule_id, source_dir, library = rule
+    (source_dir / "2026").mkdir()
+    a = source_dir / "a.mp4"
+    b = source_dir / "2026" / "b.mkv"
+    a.write_bytes(b"A" * 64)
+    b.write_bytes(b"B" * 64)
+
+    result = watchdir.sync_rule(rule_id, dry_run=False)
+
+    assert result.errors == []
+    la = library / "sv" / "a.mp4"
+    lb = library / "sv" / "2026" / "b.mkv"
+    assert la.exists() and lb.exists()
+    # 硬链接而非拷贝：inode 必须相同
+    assert _same_inode(a, la)
+    assert _same_inode(b, lb)
+    assert sorted(_links().values()) == ["SV-a", "SV-b"]
+
+
+def test_dry_run_touches_nothing(rule):
+    rule_id, source_dir, library = rule
+    (source_dir / "a.mp4").write_bytes(b"A")
+
+    result = watchdir.sync_rule(rule_id, dry_run=True)
+
+    assert len(result.linked) == 1
+    assert not (library / "sv" / "a.mp4").exists()
+    assert _links() == {}
+
+
+def test_sync_is_idempotent(rule):
+    rule_id, source_dir, _ = rule
+    (source_dir / "a.mp4").write_bytes(b"A")
+    watchdir.sync_rule(rule_id, dry_run=False)
+
+    again = watchdir.sync_rule(rule_id, dry_run=False)
+
+    assert again.linked == []
+    assert again.unlinked == []
+    assert again.errors == []
+
+
+def test_sync_skips_partial_download_files(rule):
+    rule_id, source_dir, library = rule
+    (source_dir / "incomplete.mp4.part").write_bytes(b"X")
+    (source_dir / "incomplete.mp4.!qb").write_bytes(b"X")
+
+    watchdir.sync_rule(rule_id, dry_run=False)
+
+    assert list((library / "sv").glob("*")) == [] or _links() == {}
+
+
+def test_non_recursive_ignores_subdirectories(rule):
+    rule_id, source_dir, library = rule
+    with session_scope() as session:
+        session.get(WatchDir, rule_id).recursive = False
+    (source_dir / "deep").mkdir()
+    (source_dir / "top.mp4").write_bytes(b"T")
+    (source_dir / "deep" / "nested.mp4").write_bytes(b"N")
+
+    watchdir.sync_rule(rule_id, dry_run=False)
+
+    assert (library / "sv" / "top.mp4").exists()
+    assert not (library / "sv" / "deep" / "nested.mp4").exists()
+
+
+def test_disabled_rule_does_nothing(rule):
+    rule_id, source_dir, library = rule
+    with session_scope() as session:
+        session.get(WatchDir, rule_id).enabled = False
+    (source_dir / "a.mp4").write_bytes(b"A")
+
+    result = watchdir.sync_rule(rule_id, dry_run=False)
+
+    assert not (library / "sv" / "a.mp4").exists()
+    assert result.skipped
+
+
+def test_missing_library_config_reports_error(rule, configure):
+    rule_id, source_dir, _ = rule
+    configure(medialink_library_path="")
+    (source_dir / "a.mp4").write_bytes(b"A")
+
+    result = watchdir.sync_rule(rule_id, dry_run=False)
+
+    assert any("媒体库根目录" in e for e in result.errors)
+
+
+# ----------------------------------------------------------------------
+# 源侧删除
+# ----------------------------------------------------------------------
+def test_source_deleted_removes_link(rule):
+    rule_id, source_dir, library = rule
+    a = source_dir / "a.mp4"
+    a.write_bytes(b"A")
+    watchdir.sync_rule(rule_id, dry_run=False)
+    link = library / "sv" / "a.mp4"
+    assert link.exists()
+
+    a.unlink()
+    result = watchdir.sync_rule(rule_id, dry_run=False)
+
+    assert len(result.unlinked) == 1
+    assert not link.exists()
+    assert _links() == {}
+
+
+def test_source_outside_scope_keeps_link(rule):
+    """源文件还在但已不在监控范围（移出目录）时不该删链接。"""
+    rule_id, source_dir, library = rule
+    a = source_dir / "a.mp4"
+    a.write_bytes(b"A")
+    watchdir.sync_rule(rule_id, dry_run=False)
+
+    # 记录仍指向原路径，但把文件挪到监控范围之外且保持存在
+    outside = source_dir.parent / "moved_away.mp4"
+    a.rename(outside)
+    with session_scope() as session:
+        row = session.scalar(sa.select(MediaLink))
+        row.source_path = str(outside)
+        row.inode = None  # 关掉移动判定，单测「范围外」这条分支
+        row.device = None
+
+    result = watchdir.sync_rule(rule_id, dry_run=False)
+
+    assert result.unlinked == []
+    assert any("已不在监控范围" in s for s in result.skipped)
+
+
+# ----------------------------------------------------------------------
+# 移动判定
+# ----------------------------------------------------------------------
+def test_move_within_source_updates_record_without_relinking(rule):
+    """移动不该走「删了又建」—— inode 变了 Emby 的观看记录就丢了。"""
+    rule_id, source_dir, library = rule
+    old = source_dir / "movable.mp4"
+    old.write_bytes(b"M" * 64)
+    watchdir.sync_rule(rule_id, dry_run=False)
+
+    link_old = library / "sv" / "movable.mp4"
+    inode_before = link_old.stat().st_ino
+
+    (source_dir / "moved").mkdir()
+    new = source_dir / "moved" / "movable.mp4"
+    old.rename(new)
+
+    result = watchdir.sync_rule(rule_id, dry_run=False)
+
+    link_new = library / "sv" / "moved" / "movable.mp4"
+    assert len(result.moved) == 1
+    assert result.unlinked == []
+    assert result.reverse_deleted == []
+    assert link_new.exists() and not link_old.exists()
+    # 关键：inode 不变
+    assert link_new.stat().st_ino == inode_before
+    assert new.exists()
+    assert list(_links()) == [str(link_new)]
+
+
+def test_rename_is_treated_as_move(rule):
+    rule_id, source_dir, library = rule
+    old = source_dir / "before.mp4"
+    old.write_bytes(b"R" * 64)
+    watchdir.sync_rule(rule_id, dry_run=False)
+    inode_before = (library / "sv" / "before.mp4").stat().st_ino
+
+    old.rename(source_dir / "after.mp4")
+    result = watchdir.sync_rule(rule_id, dry_run=False)
+
+    assert len(result.moved) == 1
+    link_new = library / "sv" / "after.mp4"
+    assert link_new.exists()
+    assert link_new.stat().st_ino == inode_before
+
+
+# ----------------------------------------------------------------------
+# 反向删除
+# ----------------------------------------------------------------------
+def test_library_deletion_removes_source_when_enabled(rule):
+    rule_id, source_dir, library = rule
+    a = source_dir / "a.mp4"
+    a.write_bytes(b"A" * 64)
+    watchdir.sync_rule(rule_id, dry_run=False)
+
+    (library / "sv" / "a.mp4").unlink()  # 模拟 Emby 删除
+    result = watchdir.sync_rule(rule_id, dry_run=False)
+
+    assert len(result.reverse_deleted) == 1
+    assert not a.exists()
+    assert _links() == {}
+
+
+def test_library_deletion_keeps_source_when_disabled(rule):
+    rule_id, source_dir, library = rule
+    with session_scope() as session:
+        session.get(WatchDir, rule_id).reverse_delete = False
+    a = source_dir / "a.mp4"
+    a.write_bytes(b"A" * 64)
+    watchdir.sync_rule(rule_id, dry_run=False)
+
+    (library / "sv" / "a.mp4").unlink()
+    result = watchdir.sync_rule(rule_id, dry_run=False)
+
+    assert result.reverse_deleted == []
+    assert a.exists()
+    assert any("未开启反向删除" in s for s in result.skipped)
+
+
+def test_library_deletion_does_not_relink(rule):
+    """媒体库侧删掉的不能被正向同步重建，否则来回拉锯。"""
+    rule_id, source_dir, library = rule
+    with session_scope() as session:
+        session.get(WatchDir, rule_id).reverse_delete = False
+    a = source_dir / "a.mp4"
+    a.write_bytes(b"A" * 64)
+    watchdir.sync_rule(rule_id, dry_run=False)
+
+    link = library / "sv" / "a.mp4"
+    link.unlink()
+    result = watchdir.sync_rule(rule_id, dry_run=False)
+
+    assert result.linked == []
+    assert not link.exists()
+
+
+# ----------------------------------------------------------------------
+# 延迟删除
+# ----------------------------------------------------------------------
+def test_grace_period_holds_deletion(rule, configure):
+    rule_id, source_dir, library = rule
+    configure(watchdir_delete_grace=3600)
+    a = source_dir / "a.mp4"
+    a.write_bytes(b"A")
+    watchdir.sync_rule(rule_id, dry_run=False)
+    link = library / "sv" / "a.mp4"
+
+    a.unlink()
+    result = watchdir.sync_rule(rule_id, dry_run=False)
+
+    assert result.unlinked == []
+    assert len(result.held) == 1
+    assert link.exists()
+    assert len(watchdir.list_holds(rule_id)) == 1
+
+
+def test_deletion_executes_after_grace_expires(rule, configure):
+    rule_id, source_dir, library = rule
+    configure(watchdir_delete_grace=3600)
+    a = source_dir / "a.mp4"
+    a.write_bytes(b"A")
+    watchdir.sync_rule(rule_id, dry_run=False)
+    link = library / "sv" / "a.mp4"
+    a.unlink()
+    watchdir.sync_rule(rule_id, dry_run=False)
+
+    # 把发现时间往前挪，等价于宽限期已过
+    with session_scope() as session:
+        session.get(PendingDelete, str(link)).detected_time = (
+            datetime.now() - timedelta(seconds=7200)
+        )
+    result = watchdir.sync_rule(rule_id, dry_run=False)
+
+    assert len(result.unlinked) == 1
+    assert not link.exists()
+    assert watchdir.list_holds(rule_id) == []
+
+
+def test_recovered_file_cancels_hold(rule, configure):
+    """网络存储瞬时不可达 / 用户放回文件 —— 不该删。"""
+    rule_id, source_dir, library = rule
+    configure(watchdir_delete_grace=3600)
+    a = source_dir / "a.mp4"
+    a.write_bytes(b"A")
+    watchdir.sync_rule(rule_id, dry_run=False)
+    link = library / "sv" / "a.mp4"
+
+    a.unlink()
+    watchdir.sync_rule(rule_id, dry_run=False)
+    assert len(watchdir.list_holds(rule_id)) == 1
+
+    a.write_bytes(b"A")  # 文件回来了
+    result = watchdir.sync_rule(rule_id, dry_run=False)
+
+    assert result.unlinked == []
+    assert link.exists()
+    assert watchdir.list_holds(rule_id) == []
+
+
+def test_cancel_hold_manually(rule, configure):
+    rule_id, source_dir, library = rule
+    configure(watchdir_delete_grace=3600)
+    a = source_dir / "a.mp4"
+    a.write_bytes(b"A")
+    watchdir.sync_rule(rule_id, dry_run=False)
+    link = library / "sv" / "a.mp4"
+    a.unlink()
+    watchdir.sync_rule(rule_id, dry_run=False)
+
+    assert watchdir.cancel_hold(str(link)) is True
+    assert watchdir.list_holds(rule_id) == []
+    assert watchdir.cancel_hold("/nonexistent/x.mp4") is False
+
+
+# ----------------------------------------------------------------------
+# 种子登记
+# ----------------------------------------------------------------------
+class _FakeClient:
+    """假下载器：torrents 是 {hash: [文件绝对路径]}。"""
+
+    def __init__(self, torrents=None):
+        self.torrents = dict(torrents or {})
+        self.deleted: list[str] = []
+
+    def find_torrents_by_path(self, paths):
+        wanted = set(paths)
+        out: dict[str, list[str]] = {}
+        for h, files in self.torrents.items():
+            for f in files:
+                if f in wanted:
+                    out.setdefault(f, []).append(h)
+        return out
+
+    def list_torrent_files(self, hashes):
+        out: list[str] = []
+        for h in hashes:
+            out.extend(self.torrents.get(h, []))
+        return out
+
+    def delete_torrent(self, hashes, delete_files=False):
+        hit = [h for h in hashes if h in self.torrents]
+        self.deleted.extend(hit)
+        for h in hit:
+            self.torrents.pop(h, None)
+        return hit
+
+
+@pytest.fixture
+def fake_downloader(monkeypatch):
+    """接管下载器工厂。返回可改 torrents 的假客户端。"""
+    client = _FakeClient()
+    import app.modules.downloadclient as dc
+
+    monkeypatch.setattr(dc, "get_download_client", lambda name="": client)
+    monkeypatch.setattr(dc, "list_configured_clients", lambda: ["qbittorrent"])
+    return client
+
+
+def test_torrent_hash_recorded_at_link_time(rule, fake_downloader):
+    rule_id, source_dir, _ = rule
+    a = source_dir / "clip.mp4"
+    a.write_bytes(b"V" * 64)
+    fake_downloader.torrents["HASH_A"] = [str(a)]
+
+    watchdir.sync_rule(rule_id, dry_run=False)
+
+    with session_scope() as session:
+        rows = {h.hash: h.code for h in session.scalars(sa.select(History)).all()}
+    assert rows == {"HASH_A": "SV-clip"}
+
+
+def test_torrent_deleted_even_when_downloader_lookup_fails(
+    rule, fake_downloader, monkeypatch
+):
+    """种子已从下载器消失（做种到期/换下载器）时仍要能删 —— 靠建链接时落的库。"""
+    rule_id, source_dir, library = rule
+    a = source_dir / "clip.mp4"
+    a.write_bytes(b"V" * 64)
+    fake_downloader.torrents["HASH_A"] = [str(a)]
+    watchdir.sync_rule(rule_id, dry_run=False)
+
+    # 现查能力失效，只留删除能力
+    monkeypatch.setattr(fake_downloader, "find_torrents_by_path", lambda paths: {})
+
+    (library / "sv" / "clip.mp4").unlink()
+    result = watchdir.sync_rule(rule_id, dry_run=False)
+
+    assert len(result.reverse_deleted) == 1
+    assert result.reverse_deleted[0]["torrents"] == ["HASH_A"]
+    assert fake_downloader.deleted == ["HASH_A"]
+
+
+def test_manual_file_without_torrent_is_not_an_error(rule, fake_downloader):
+    rule_id, source_dir, library = rule
+    (source_dir / "manual.mp4").write_bytes(b"M")
+
+    result = watchdir.sync_rule(rule_id, dry_run=False)
+
+    assert result.errors == []
+    assert (library / "sv" / "manual.mp4").exists()
+    with session_scope() as session:
+        assert session.scalars(sa.select(History)).all() == []
+
+
+def test_existing_history_code_is_not_overwritten(rule, fake_downloader):
+    """cinefold 自己下载的 code 是真番号，比文件名生成的更准，不该被覆盖。"""
+    rule_id, source_dir, _ = rule
+    a = source_dir / "ABC-123.mp4"
+    a.write_bytes(b"R")
+    fake_downloader.torrents["HASH_R"] = [str(a)]
+    with session_scope() as session:
+        session.add(History(hash="HASH_R", code="ABC-123", save_path=str(a)))
+
+    watchdir.sync_rule(rule_id, dry_run=False)
+
+    with session_scope() as session:
+        assert session.get(History, "HASH_R").code == "ABC-123"
+
+
+def test_backfill_records_torrent_that_appeared_later(rule, fake_downloader):
+    """建链接时下载器里还没有种子（下载未完成 / 完成后才移入），事后补上。"""
+    rule_id, source_dir, _ = rule
+    a = source_dir / "late.mp4"
+    a.write_bytes(b"L" * 64)
+
+    # 建链接时下载器是空的
+    watchdir.sync_rule(rule_id, dry_run=False)
+    with session_scope() as session:
+        assert session.scalars(sa.select(History)).all() == []
+
+    # 种子随后出现（下载完成 / 移入完成 / 事后做种）
+    fake_downloader.torrents["HASH_LATE"] = [str(a)]
+    added = watchdir.backfill_torrents()
+
+    assert added == 1
+    with session_scope() as session:
+        row = session.get(History, "HASH_LATE")
+        assert row is not None and row.code == "SV-late"
+
+
+def test_backfill_skips_already_recorded(rule, fake_downloader):
+    rule_id, source_dir, _ = rule
+    a = source_dir / "clip.mp4"
+    a.write_bytes(b"V" * 64)
+    fake_downloader.torrents["HASH_A"] = [str(a)]
+    watchdir.sync_rule(rule_id, dry_run=False)
+
+    # 建链接时已登记，补查不该重复写
+    assert watchdir.backfill_torrents() == 0
+
+
+def test_backfill_makes_later_torrent_deletable(rule, fake_downloader, monkeypatch):
+    """补登记之后，即使下载器现查失效也能删掉种子。"""
+    rule_id, source_dir, library = rule
+    a = source_dir / "late.mp4"
+    a.write_bytes(b"L" * 64)
+    watchdir.sync_rule(rule_id, dry_run=False)
+
+    fake_downloader.torrents["HASH_LATE"] = [str(a)]
+    watchdir.backfill_torrents()
+
+    monkeypatch.setattr(fake_downloader, "find_torrents_by_path", lambda paths: {})
+    (library / "sv" / "late.mp4").unlink()
+    result = watchdir.sync_rule(rule_id, dry_run=False)
+
+    assert result.reverse_deleted[0]["torrents"] == ["HASH_LATE"]
+    assert fake_downloader.deleted == ["HASH_LATE"]
+
+
+def test_watch_dir_is_protected_from_directory_pruning(rule, fake_downloader):
+    """种子文件散落在监控目录下时，那个目录不能被当成任务目录删掉。"""
+    rule_id, source_dir, library = rule
+    video = source_dir / "clip.mp4"
+    sample = source_dir / "clip_sample.jpg"
+    video.write_bytes(b"V" * 64)
+    sample.write_bytes(b"I")
+    fake_downloader.torrents["HASH_A"] = [str(video), str(sample)]
+    watchdir.sync_rule(rule_id, dry_run=False)
+
+    (library / "sv" / "clip.mp4").unlink()
+    watchdir.sync_rule(rule_id, dry_run=False)
+
+    assert source_dir.is_dir()
+
+
+# ----------------------------------------------------------------------
+# 全量对账
+# ----------------------------------------------------------------------
+# ----------------------------------------------------------------------
+# 接口
+# ----------------------------------------------------------------------
+@pytest.fixture
+def client():
+    """带鉴权绕过的测试客户端。"""
+    from fastapi.testclient import TestClient
+    from app.api import create_app
+    from app.api.endpoints import get_current_user
+
+    app = create_app()
+    app.dependency_overrides[get_current_user] = lambda: "admin"
+    return TestClient(app)
+
+
+def test_literal_routes_are_not_shadowed_by_rule_id(client):
+    """/holds 等固定路径必须声明在 /{rule_id} 之前。
+
+    否则 FastAPI 会先匹配 /{rule_id}，把 "holds" 当成 int 解析，返回 422 ——
+    撤销扣留的接口就永远调不通。
+    """
+    resp = client.delete("/api/v1/watchdirs/holds", params={"link_path": "/x/y.mp4"})
+    body = resp.json()
+    # 记录不存在返回 404 是对的；422 说明被 {rule_id} 抢先匹配了
+    assert body["code"] == 404, body
+    assert "int_parsing" not in str(body)
+
+    assert client.get("/api/v1/watchdirs/holds").json()["code"] == 200
+    assert client.post("/api/v1/watchdirs/backfill").json()["code"] == 200
+    assert client.post("/api/v1/watchdirs/sync").json()["code"] == 200
+
+
+def test_create_rejects_missing_source_dir(client, tmp_path, configure):
+    configure(medialink_library_path=str(tmp_path))
+    resp = client.post(
+        "/api/v1/watchdirs",
+        json={"source_dir": str(tmp_path / "nope"), "target_subdir": "sv"},
+    )
+    assert resp.json()["code"] == 400
+
+
+def test_create_requires_library_config(client, tmp_path, configure):
+    configure(medialink_library_path="")
+    (tmp_path / "src").mkdir()
+    resp = client.post("/api/v1/watchdirs", json={"source_dir": str(tmp_path / "src")})
+    body = resp.json()
+    assert body["code"] == 400
+    assert "媒体库" in body["message"]
+
+
+def test_duplicate_source_dir_is_rejected(client, rule):
+    _, source_dir, _ = rule
+    resp = client.post("/api/v1/watchdirs", json={"source_dir": str(source_dir)})
+    assert resp.json()["code"] == 400
+
+
+def test_delete_rule_keeps_existing_links(client, rule):
+    rule_id, source_dir, library = rule
+    (source_dir / "a.mp4").write_bytes(b"A")
+    watchdir.sync_rule(rule_id, dry_run=False)
+    link = library / "sv" / "a.mp4"
+
+    assert client.delete(f"/api/v1/watchdirs/{rule_id}").json()["code"] == 200
+
+    # 删规则只是「不再自动同步」，不该顺手删用户媒体库里的文件
+    assert link.exists()
+    assert str(link) in _links()
+
+
+def test_sync_all_skips_disabled_rules(rule):
+    rule_id, source_dir, _ = rule
+    (source_dir / "a.mp4").write_bytes(b"A")
+    with session_scope() as session:
+        session.get(WatchDir, rule_id).enabled = False
+
+    assert watchdir.sync_all() == []
+
+
+def test_sync_all_survives_one_bad_rule(rule, tmp_path):
+    """一条规则的源目录不存在，不该影响其余规则。"""
+    rule_id, source_dir, library = rule
+    (source_dir / "a.mp4").write_bytes(b"A")
+    with session_scope() as session:
+        session.add(WatchDir(
+            source_dir=str(tmp_path / "does_not_exist"), target_subdir="x",
+            name="broken", enabled=True,
+        ))
+
+    results = watchdir.sync_all()
+
+    assert len(results) == 2
+    assert (library / "sv" / "a.mp4").exists()
+    assert any(r.errors for r in results)

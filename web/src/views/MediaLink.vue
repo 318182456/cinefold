@@ -147,8 +147,15 @@ async function confirmDelete() {
       // 后端因全局开关未启用降级成了演练
       toast.error('联动删除未启用，本次仅演练。请先在设置中开启')
     } else {
-      const n = (data.files_deleted || []).length + (data.links_deleted || []).length
-      toast.success(`已删除 ${n} 个文件、${(data.torrents_deleted || []).length} 个种子`)
+      const n =
+        (data.files_deleted || []).length +
+        (data.links_deleted || []).length +
+        (data.sidecars_deleted || []).length
+      const dirs = (data.dirs_deleted || []).length
+      toast.success(
+        `已删除 ${n} 个文件、${(data.torrents_deleted || []).length} 个种子` +
+          (dirs ? `，清理 ${dirs} 个空目录` : ''),
+      )
     }
     if ((data.errors || []).length) toast.error(data.errors.join('; '))
     confirming.value = null
@@ -443,6 +450,34 @@ onMounted(() => {
               </p>
               <p
                 v-for="p in preview.links_deleted"
+                :key="p"
+                class="truncate text-red-400"
+                :title="p"
+              >
+                {{ p }}
+              </p>
+            </div>
+
+            <div v-if="(preview.sidecars_deleted || []).length">
+              <p class="text-gray-500">
+                刮削附属（{{ preview.sidecars_deleted.length }} 个，配置/图片/字幕）
+              </p>
+              <p
+                v-for="p in preview.sidecars_deleted"
+                :key="p"
+                class="truncate text-red-400"
+                :title="p"
+              >
+                {{ p }}
+              </p>
+            </div>
+
+            <div v-if="(preview.dirs_deleted || []).length">
+              <p class="text-gray-500">
+                空目录（{{ preview.dirs_deleted.length }} 个）
+              </p>
+              <p
+                v-for="p in preview.dirs_deleted"
                 :key="p"
                 class="truncate text-red-400"
                 :title="p"

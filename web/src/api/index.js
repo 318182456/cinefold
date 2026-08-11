@@ -83,7 +83,10 @@ export const translateTitles = () => http.post('/codes/translate')
 
 // ---------------------------------------------------------------- 数据源
 export const listDataSources = () => http.get('/datasources')
+export const createDataSource = (payload) => http.post('/datasources', payload)
 export const updateDataSource = (key, payload) => http.put(`/datasources/${key}`, payload)
+export const deleteDataSource = (key) => http.delete(`/datasources/${key}`)
+export const restoreDataSource = (key) => http.post(`/datasources/${key}/restore`)
 export const checkDataSource = (key) => http.post(`/datasources/${key}/check`)
 export const checkAllDataSources = () => http.post('/datasources/check')
 
@@ -98,6 +101,25 @@ export const deleteMediaLink = (payload) => http.post('/medialinks/delete', payl
 export const dropMediaLinkRecord = (linkPath) =>
   http.delete('/medialinks/record', { params: { link_path: linkPath } })
 export const pruneMediaLinks = () => http.post('/medialinks/prune')
+
+// ---------------------------------------------------------------- 监控目录
+export const listWatchDirs = () => http.get('/watchdirs')
+export const createWatchDir = (payload) => http.post('/watchdirs', payload)
+export const updateWatchDir = (id, payload) => http.put(`/watchdirs/${id}`, payload)
+export const deleteWatchDir = (id) => http.delete(`/watchdirs/${id}`)
+// dry_run 默认为真，只报会做什么
+export const syncWatchDir = (id, dryRun = true) =>
+  http.post(`/watchdirs/${id}/sync`, null, { params: { dry_run: dryRun } })
+export const syncAllWatchDirs = (dryRun = true) =>
+  http.post('/watchdirs/sync', null, { params: { dry_run: dryRun } })
+// 给还没登记种子的关联补查下载器
+export const backfillWatchDirTorrents = (watchId = 0) =>
+  http.post('/watchdirs/backfill', null, { params: { watch_id: watchId } })
+// 扣留中的删除：文件已消失但还在宽限期内观察
+export const listWatchDirHolds = (watchId = 0) =>
+  http.get('/watchdirs/holds', { params: { watch_id: watchId } })
+export const cancelWatchDirHold = (linkPath) =>
+  http.delete('/watchdirs/holds', { params: { link_path: linkPath } })
 
 // ---------------------------------------------------------------- 榜单
 export const getRank = (rankType = '', limit = 120) =>
