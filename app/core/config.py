@@ -32,7 +32,7 @@ SENSITIVE_KEYS = {
     "mteam_api_key", "wechat_corp_secret", "wechat_token",
     "wechat_encoding_aes_key", "telegram_bot_token", "secret_key",
     "cloudnas_password", "baidu_api_key", "google_api_key", "openai_api_key",
-    "github_token",
+    "github_token", "oidc_client_secret",
     # 连接串里通常内嵌账号密码
     "database_url", "redis_url",
 }
@@ -235,6 +235,30 @@ class Settings:
     # 开启后 APScheduler 的任务状态持久化到 Redis，重启不丢
     redis_job_store: bool = False
 
+    # --- 单点登录 (OIDC) ---
+    # 总开关。关掉后即使填了凭证也不显示 SSO 登录
+    oidc_enabled: bool = False
+    # 提供商地址，用它拼 /.well-known/openid-configuration
+    oidc_issuer: str = ""
+    oidc_client_id: str = ""
+    oidc_client_secret: str = ""
+    # 登录按钮上的文案
+    oidc_display_name: str = "SSO"
+    # 请求的 scope，一般不用改
+    oidc_scope: str = "openid profile email"
+    # Claim 映射：从 userinfo 的哪个字段取用户名
+    oidc_username_claim: str = "preferred_username"
+    oidc_email_claim: str = "email"
+    oidc_name_claim: str = "name"
+    # 所有 SSO 用户都登录到这个本地账号。留空则用 username claim 的值，
+    # 单用户部署通常填 admin
+    oidc_bind_username: str = ""
+
+    # --- Passkey (WebAuthn) ---
+    # Relying Party ID，必须是站点域名（不带端口与协议）。留空则从请求推断
+    webauthn_rp_id: str = ""
+    webauthn_rp_name: str = "byte-muse"
+
     # --- 其他 ---
     javdb_host: str = "https://javdb.com"
     secret_key: str = ""
@@ -392,6 +416,20 @@ def load_settings() -> Settings:
         redis_url=_env("REDIS_URL"),
         redis_cache_ttl=_env_int("REDIS_CACHE_TTL", 86400),
         redis_job_store=_env_bool("REDIS_JOB_STORE", False),
+
+        oidc_enabled=_env_bool("OIDC_ENABLED", False),
+        oidc_issuer=_env("OIDC_ISSUER").rstrip("/"),
+        oidc_client_id=_env("OIDC_CLIENT_ID"),
+        oidc_client_secret=_env("OIDC_CLIENT_SECRET"),
+        oidc_display_name=_env("OIDC_DISPLAY_NAME", "SSO"),
+        oidc_scope=_env("OIDC_SCOPE", "openid profile email"),
+        oidc_username_claim=_env("OIDC_USERNAME_CLAIM", "preferred_username"),
+        oidc_email_claim=_env("OIDC_EMAIL_CLAIM", "email"),
+        oidc_name_claim=_env("OIDC_NAME_CLAIM", "name"),
+        oidc_bind_username=_env("OIDC_BIND_USERNAME"),
+
+        webauthn_rp_id=_env("WEBAUTHN_RP_ID"),
+        webauthn_rp_name=_env("WEBAUTHN_RP_NAME", "byte-muse"),
 
         javdb_host=_env("JAVDB_HOST", "https://javdb.com"),
         secret_key=_env("SECRET_KEY"),

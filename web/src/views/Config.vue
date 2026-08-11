@@ -1,9 +1,11 @@
 <script setup>
 import { onMounted, reactive, ref } from 'vue'
 import {
-  deleteTelegramWebhook, getConfig, getTelegramReceive, listPtSites,
-  saveConfig, setTelegramWebhook, testConnection,
+  deletePasskey, deleteTelegramWebhook, getConfig, getOidcRedirectUri,
+  getTelegramReceive, listPasskeys, listPtSites, passkeyRegisterBegin,
+  passkeyRegisterFinish, saveConfig, setTelegramWebhook, testConnection, testOidc,
 } from '@/api'
+import { PasskeyCancelled, createCredential, isSupported } from '@/utils/webauthn'
 import { useToast } from '@/composables/useToast'
 import { useConfigStore } from '@/stores/config'
 import ConfigField from '@/components/ConfigField.vue'
@@ -25,6 +27,15 @@ const tgBusy = ref('')
 
 // PT 主站下拉。取实际配好的站点，空串表示不指定
 const ptSiteOptions = ref([''])
+
+// 登录方式
+const oidcRedirectUri = ref('')
+const oidcTest = ref(null)
+const oidcBusy = ref(false)
+const passkeys = ref([])
+const passkeyLabel = ref('')
+const passkeyBusy = ref(false)
+const passkeySupported = isSupported()
 
 // 字段类型 t: text(默认) / password / bool / select / textarea / tags / size
 // 每个分组按用途拆成若干 section，每个 section 一张卡片
@@ -290,6 +301,50 @@ const GROUPS = [
     ],
   },
   {
+    key: 'auth',
+    title: '登录方式',
+    sections: [
+      {
+        title: '单点登录 (OIDC)',
+        hint: '接入 Authelia / Authentik / Keycloak 等身份提供商',
+        fields: [
+          { k: 'oidc_enabled', label: '启用此 OIDC 提供商', t: 'bool' },
+          { k: 'oidc_display_name', label: '按钮文案', ph: 'SSO',
+            hint: '登录页上「使用 XX 登录」的那个 XX' },
+          { k: 'oidc_issuer', label: '提供商地址', ph: 'https://auth.example.com',
+            hint: '用它拼 /.well-known/openid-configuration' },
+          { k: 'oidc_client_id', label: '客户端 ID (Client ID)' },
+          { k: 'oidc_client_secret', label: '客户端密钥 (Client Secret)', t: 'password' },
+          { k: 'oidc_scope', label: '范围 (Scopes)', ph: 'openid profile email' },
+        ],
+        panel: 'oidc',
+      },
+      {
+        title: 'Claim 映射',
+        hint: '把 OIDC 返回的字段映射到本地账号',
+        fields: [
+          { k: 'oidc_username_claim', label: 'Username claim',
+            ph: 'preferred_username' },
+          { k: 'oidc_email_claim', label: '电子邮件 Claim', ph: 'email' },
+          { k: 'oidc_name_claim', label: '显示名称 Claim', ph: 'name' },
+          { k: 'oidc_bind_username', label: '绑定到本地账号',
+            ph: '留空则用 Username claim 的值',
+            hint: '单用户部署填 admin，所有 SSO 用户都登录到这个账号' },
+        ],
+      },
+      {
+        title: 'Passkey',
+        hint: '指纹、面容或硬件密钥登录。需要 HTTPS',
+        fields: [
+          { k: 'webauthn_rp_id', label: 'RP ID', ph: '留空则自动推断',
+            hint: '站点域名，不含端口与协议，如 example.com' },
+          { k: 'webauthn_rp_name', label: '显示名称', ph: 'byte-muse' },
+        ],
+        panel: 'passkey',
+      },
+    ],
+  },
+  {
     key: 'other',
     title: '其他',
     sections: [
@@ -394,6 +449,70 @@ async function loadPtSites() {
   }
 }
 
+async function loadAuthExtras() {
+  try {
+    const data = await getOidcRedirectUri()
+    oidcRedirectUri.value = data.redirect_uri || ''
+  } catch {
+    oidcRedirectUri.value = ''
+  }
+  try {
+    const data = await listPasskeys()
+    passkeys.value = data.items || []
+  } catch {
+    passkeys.value = []
+  }
+}
+
+async function runOidcTest() {
+  oidcBusy.value = true
+  try {
+    // 用输入框里的当前值探测，省得先保存
+    oidcTest.value = await testOidc(form.oidc_issuer || '')
+    if (oidcTest.value.success) toast.success('提供商连接成功')
+    else toast.error(oidcTest.value.message)
+  } catch (err) {
+    oidcTest.value = { success: false, message: err.message }
+    toast.error(err.message)
+  } finally {
+    oidcBusy.value = false
+  }
+}
+
+function copyRedirectUri() {
+  if (!oidcRedirectUri.value) return
+  navigator.clipboard?.writeText(oidcRedirectUri.value)
+    .then(() => toast.success('已复制回调地址'))
+    .catch(() => toast.error('复制失败，请手动选择'))
+}
+
+async function addPasskey() {
+  passkeyBusy.value = true
+  try {
+    const { options } = await passkeyRegisterBegin()
+    const credential = await createCredential(options)
+    await passkeyRegisterFinish(credential, passkeyLabel.value)
+    toast.success('Passkey 已添加')
+    passkeyLabel.value = ''
+    await loadAuthExtras()
+  } catch (err) {
+    if (!(err instanceof PasskeyCancelled)) toast.error(err.message)
+  } finally {
+    passkeyBusy.value = false
+  }
+}
+
+async function removePasskey(item) {
+  if (!window.confirm(`删除「${item.label}」？删除后这把钥匙不能再用于登录。`)) return
+  try {
+    await deletePasskey(item.credential_id)
+    toast.success('已删除')
+    await loadAuthExtras()
+  } catch (err) {
+    toast.error(err.message)
+  }
+}
+
 async function loadTgReceive() {
   try {
     tgReceive.value = await getTelegramReceive()
@@ -451,6 +570,7 @@ onMounted(async () => {
   await load()
   loadPtSites()
   loadTgReceive()
+  loadAuthExtras()
 })
 </script>
 
@@ -490,6 +610,100 @@ onMounted(async () => {
               :options="field.k === 'primary_site' ? ptSiteOptions : null"
             />
           </div>
+
+          <!-- OIDC 回调地址与连接测试 -->
+          <template v-if="section.panel === 'oidc'">
+            <div class="space-y-2 border-t border-gray-800 pt-3">
+              <p class="text-xs font-medium text-gray-400">回调重定向 URI</p>
+              <div class="flex items-center gap-2">
+                <code class="min-w-0 flex-1 truncate rounded bg-gray-900 px-2 py-1.5 font-mono text-[11px] text-emerald-400">
+                  {{ oidcRedirectUri || '保存外网地址后显示' }}
+                </code>
+                <button
+                  class="btn-ghost shrink-0 px-2 py-1 text-[11px]"
+                  :disabled="!oidcRedirectUri"
+                  @click="copyRedirectUri"
+                >
+                  复制
+                </button>
+              </div>
+              <p class="text-[11px] text-gray-600">
+                把这个地址加到提供商的允许回调 URL 列表里
+              </p>
+
+              <div class="flex flex-wrap items-center gap-2 pt-1">
+                <button
+                  class="btn-ghost px-3 py-1.5 text-xs"
+                  :disabled="oidcBusy"
+                  @click="runOidcTest"
+                >
+                  {{ oidcBusy ? '探测中…' : '测试提供商' }}
+                </button>
+                <span
+                  v-if="oidcTest"
+                  class="text-xs"
+                  :class="oidcTest.success ? 'text-emerald-400' : 'text-red-400'"
+                >
+                  {{ oidcTest.message }}
+                </span>
+              </div>
+
+              <div v-if="oidcTest?.success" class="space-y-0.5 pt-1">
+                <p class="font-mono text-[11px] text-gray-600">
+                  authorize: {{ oidcTest.authorization_endpoint }}
+                </p>
+                <p class="font-mono text-[11px] text-gray-600">
+                  token: {{ oidcTest.token_endpoint }}
+                </p>
+              </div>
+            </div>
+          </template>
+
+          <!-- Passkey 管理 -->
+          <template v-if="section.panel === 'passkey'">
+            <div class="space-y-3 border-t border-gray-800 pt-3">
+              <p v-if="!passkeySupported" class="text-xs text-amber-400">
+                当前浏览器或环境不支持 Passkey，需要 HTTPS
+              </p>
+
+              <template v-else>
+                <div class="flex flex-wrap items-center gap-2">
+                  <input
+                    v-model="passkeyLabel"
+                    class="input w-44"
+                    placeholder="给这把钥匙起个名"
+                  />
+                  <button
+                    class="btn-ghost px-3 py-1.5 text-xs"
+                    :disabled="passkeyBusy"
+                    @click="addPasskey"
+                  >
+                    {{ passkeyBusy ? '等待验证…' : '添加 Passkey' }}
+                  </button>
+                </div>
+
+                <div v-if="passkeys.length" class="space-y-1">
+                  <div
+                    v-for="item in passkeys"
+                    :key="item.credential_id"
+                    class="flex items-center gap-2 text-xs"
+                  >
+                    <span class="text-gray-200">{{ item.label }}</span>
+                    <span class="text-[11px] text-gray-600">
+                      {{ item.last_used ? `最近使用 ${item.last_used}` : '未使用过' }}
+                    </span>
+                    <button
+                      class="ml-auto text-[11px] text-red-400 hover:underline"
+                      @click="removePasskey(item)"
+                    >
+                      删除
+                    </button>
+                  </div>
+                </div>
+                <p v-else class="text-xs text-gray-600">还没有注册任何 Passkey</p>
+              </template>
+            </div>
+          </template>
 
           <!-- Telegram 上行消息接收状态与操作 -->
           <template v-if="section.panel === 'telegram-receive'">

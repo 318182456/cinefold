@@ -63,6 +63,10 @@ def save_config(body: ConfigRequest, current_user: str = Depends(get_current_use
     from app.modules.ptsite.nexus import NexusSite
     NexusSite.reset_breakers()
 
+    # issuer 可能换了，端点配置得重新探测
+    from app.modules.auth.oidc import reset_discovery_cache
+    reset_discovery_cache()
+
     return ResponseEntity.ok(message=f"已更新 {len(updates)} 项配置")
 
 

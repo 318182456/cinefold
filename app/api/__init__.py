@@ -65,10 +65,10 @@ def create_app() -> FastAPI:
     )
 
     from app.api.endpoints import (
-        actors, admin, config, message, migrate, picproxy, subscribe,
+        actors, admin, auth, config, message, migrate, picproxy, subscribe,
     )
 
-    for module in (admin, config, subscribe, actors, picproxy, message, migrate):
+    for module in (admin, auth, config, subscribe, actors, picproxy, message, migrate):
         app.include_router(module.router, prefix=API_PREFIX)
 
     @app.exception_handler(Exception)

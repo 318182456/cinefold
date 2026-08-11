@@ -30,7 +30,10 @@ class UpdateUserRequest(BaseModel):
 def login(body: LoginRequest):
     with session_scope() as session:
         user = session.get(User, body.username)
-        if user is None or not verify_password(body.password, user.password):
+        # 密码为空的是 SSO 创建的账号，只能走单点登录
+        if user is None or not user.password:
+            return ResponseEntity.fail("用户名或密码错误", code=401)
+        if not verify_password(body.password, user.password):
             return ResponseEntity.fail("用户名或密码错误", code=401)
         username = user.username
 

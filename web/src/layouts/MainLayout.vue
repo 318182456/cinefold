@@ -3,6 +3,7 @@ import { onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { checkVersion, getVersion } from '@/api'
 import { useConfigStore } from '@/stores/config'
+import AppLogo from '@/components/AppLogo.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -80,7 +81,7 @@ onMounted(async () => {
       :class="menuOpen ? 'translate-x-0' : '-translate-x-full'"
     >
       <div class="flex h-14 items-center gap-2 border-b border-gray-800 px-5">
-        <div class="h-7 w-7 rounded-lg bg-brand" />
+        <AppLogo :size="28" />
         <span class="font-semibold tracking-tight">byte-muse</span>
       </div>
 

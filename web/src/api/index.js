@@ -41,6 +41,23 @@ export default http
 
 // ---------------------------------------------------------------- 认证
 export const login = (username, password) => http.post('/login', { username, password })
+export const getAuthMethods = () => http.get('/auth/methods')
+export const getOidcRedirectUri = () => http.get('/auth/oidc/redirect-uri')
+export const testOidc = (issuer = '') => http.post('/auth/oidc/test', { issuer })
+// SSO 要整页跳转，不能走 axios
+export const oidcLoginUrl = (next = '/') =>
+  `/api/v1/auth/oidc/login?next=${encodeURIComponent(next)}`
+
+export const passkeyRegisterBegin = () => http.post('/auth/passkey/register/begin')
+export const passkeyRegisterFinish = (credential, label = '') =>
+  http.post('/auth/passkey/register/finish', { credential, label })
+export const passkeyLoginBegin = (username = '') =>
+  http.post('/auth/passkey/login/begin', { username })
+export const passkeyLoginFinish = (credential) =>
+  http.post('/auth/passkey/login/finish', { credential })
+export const listPasskeys = () => http.get('/auth/passkey/list')
+export const deletePasskey = (credentialId) =>
+  http.delete(`/auth/passkey/${encodeURIComponent(credentialId)}`)
 export const getProfile = () => http.get('/profile')
 export const updateProfile = (data) => http.post('/profile', data)
 export const getLongToken = () => http.get('/user/token')

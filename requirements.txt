@@ -14,6 +14,8 @@ html5lib~=1.1
 apscheduler~=3.10.4
 PyJWT~=2.9.0
 bcrypt~=4.2.0
+# Passkey（WebAuthn）签名验证
+webauthn~=3.0.0
 loguru~=0.7.3
 torrentool~=1.2.0
 xmltodict~=0.14.0
