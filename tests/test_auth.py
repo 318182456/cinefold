@@ -197,6 +197,105 @@ class TestPasskeyStorage:
         assert passkey.has_credentials() is True
 
 
+class TestOriginResolution:
+    """origin 算错是 SSO 与 Passkey 最常见的失败原因。
+
+    容器内 nginx 监听明文 HTTP，转发的 X-Forwarded-Proto 是 http、
+    Host 里也没有对外端口，直接用会得到 http://host 而不是
+    https://host:8443。
+    """
+
+    def _request(self, headers, settings, monkeypatch, external=""):
+        from starlette.datastructures import Headers
+        from starlette.requests import Request
+
+        from app.api.endpoints.auth import _origin
+
+        monkeypatch.setattr(settings, "external_domain", external, raising=False)
+        scope = {
+            "type": "http",
+            "scheme": "http",
+            "headers": Headers(headers).raw,
+            "method": "GET",
+            "path": "/",
+            "query_string": b"",
+        }
+        return _origin(Request(scope))
+
+    def test_origin_header_wins_over_forwarded(self, settings, monkeypatch):
+        """浏览器带的 Origin 最可靠，压过容器 nginx 的转发头。"""
+        got = self._request(
+            {
+                "origin": "https://lady.example.com:8443",
+                "host": "lady.example.com",
+                "x-forwarded-proto": "http",
+            },
+            settings, monkeypatch,
+        )
+        assert got == "https://lady.example.com:8443"
+
+    def test_falls_back_to_referer(self, settings, monkeypatch):
+        got = self._request(
+            {
+                "referer": "https://lady.example.com:8443/config",
+                "host": "lady.example.com",
+                "x-forwarded-proto": "http",
+            },
+            settings, monkeypatch,
+        )
+        assert got == "https://lady.example.com:8443"
+
+    def test_forwarded_port_is_appended(self, settings, monkeypatch):
+        """Host 没带端口时用 X-Forwarded-Port 补。"""
+        got = self._request(
+            {
+                "host": "lady.example.com",
+                "x-forwarded-proto": "https",
+                "x-forwarded-port": "8443",
+            },
+            settings, monkeypatch,
+        )
+        assert got == "https://lady.example.com:8443"
+
+    def test_default_port_not_appended(self, settings, monkeypatch):
+        """443 是 https 默认端口，加上反而对不上浏览器地址。"""
+        got = self._request(
+            {
+                "host": "lady.example.com",
+                "x-forwarded-proto": "https",
+                "x-forwarded-port": "443",
+            },
+            settings, monkeypatch,
+        )
+        assert got == "https://lady.example.com"
+
+    def test_multi_hop_forwarded_takes_first(self, settings, monkeypatch):
+        """多级反代时 X-Forwarded-* 是逗号分隔的链。"""
+        got = self._request(
+            {
+                "host": "lady.example.com",
+                "x-forwarded-proto": "https, http",
+                "x-forwarded-host": "lady.example.com, inner",
+            },
+            settings, monkeypatch,
+        )
+        assert got == "https://lady.example.com"
+
+    def test_configured_external_domain_wins(self, settings, monkeypatch):
+        got = self._request(
+            {"origin": "https://other.test"},
+            settings, monkeypatch,
+            external="https://lady.example.com:8443",
+        )
+        assert got == "https://lady.example.com:8443"
+
+    def test_external_domain_gets_https_prefix(self, settings, monkeypatch):
+        got = self._request(
+            {}, settings, monkeypatch, external="lady.example.com:8443",
+        )
+        assert got == "https://lady.example.com:8443"
+
+
 class TestSsoAccountCannotUsePassword:
     """OIDC 建的账号密码为空，不能走密码登录。"""
 

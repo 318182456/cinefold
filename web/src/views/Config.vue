@@ -1,5 +1,5 @@
 <script setup>
-import { onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import {
   deletePasskey, deleteTelegramWebhook, getConfig, getOidcRedirectUri,
   getTelegramReceive, listPasskeys, listPtSites, passkeyRegisterBegin,
@@ -29,6 +29,7 @@ const tgBusy = ref('')
 const ptSiteOptions = ref([''])
 
 // 登录方式
+const authOrigin = ref(null)
 const oidcRedirectUri = ref('')
 const oidcTest = ref(null)
 const oidcBusy = ref(false)
@@ -36,6 +37,12 @@ const passkeys = ref([])
 const passkeyLabel = ref('')
 const passkeyBusy = ref(false)
 const passkeySupported = isSupported()
+
+const browserOrigin = window.location.origin
+// 服务端算出的地址与浏览器不符时，SSO 与 Passkey 必然失败
+const originMismatch = computed(
+  () => !!authOrigin.value?.origin && authOrigin.value.origin !== browserOrigin,
+)
 
 // 字段类型 t: text(默认) / password / bool / select / textarea / tags / size
 // 每个分组按用途拆成若干 section，每个 section 一张卡片
@@ -451,9 +458,10 @@ async function loadPtSites() {
 
 async function loadAuthExtras() {
   try {
-    const data = await getOidcRedirectUri()
-    oidcRedirectUri.value = data.redirect_uri || ''
+    authOrigin.value = await getOidcRedirectUri()
+    oidcRedirectUri.value = authOrigin.value.redirect_uri || ''
   } catch {
+    authOrigin.value = null
     oidcRedirectUri.value = ''
   }
   try {
@@ -613,6 +621,24 @@ onMounted(async () => {
 
           <!-- OIDC 回调地址与连接测试 -->
           <template v-if="section.panel === 'oidc'">
+            <!-- 地址算错是这两个功能最常见的失败原因，先把它摆明 -->
+            <div
+              v-if="authOrigin && originMismatch"
+              class="space-y-1 rounded border border-amber-900/60 bg-amber-950/30 p-2.5"
+            >
+              <p class="text-xs text-amber-400">服务端识别的地址与当前浏览器不一致</p>
+              <p class="font-mono text-[11px] text-gray-400">
+                服务端：{{ authOrigin.origin }}
+              </p>
+              <p class="font-mono text-[11px] text-gray-400">
+                浏览器：{{ browserOrigin }}
+              </p>
+              <p class="text-[11px] text-gray-500">
+                SSO 与 Passkey 都会因此失败。请在「其他 → 外网访问地址」填写
+                <code class="text-emerald-400">{{ browserOrigin }}</code> 后保存
+              </p>
+            </div>
+
             <div class="space-y-2 border-t border-gray-800 pt-3">
               <p class="text-xs font-medium text-gray-400">回调重定向 URI</p>
               <div class="flex items-center gap-2">
@@ -664,6 +690,15 @@ onMounted(async () => {
             <div class="space-y-3 border-t border-gray-800 pt-3">
               <p v-if="!passkeySupported" class="text-xs text-amber-400">
                 当前浏览器或环境不支持 Passkey，需要 HTTPS
+              </p>
+
+              <p v-else-if="authOrigin" class="text-[11px] text-gray-600">
+                当前生效的 RP ID：
+                <code class="text-gray-400">{{ authOrigin.rp_id || '—' }}</code>
+                ，校验 origin：
+                <code :class="originMismatch ? 'text-amber-400' : 'text-gray-400'">
+                  {{ authOrigin.origin }}
+                </code>
               </p>
 
               <template v-else>

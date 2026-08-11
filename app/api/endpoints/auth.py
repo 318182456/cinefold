@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import RedirectResponse
@@ -20,10 +21,13 @@ OIDC_CALLBACK_PATH = "/api/v1/auth/oidc/callback"
 
 
 def _origin(request: Request) -> str:
-    """站点根地址。优先用配置里的外网地址，避免反代改写导致对不上。
+    """站点根地址，必须与浏览器地址栏完全一致。
 
-    WebAuthn 校验 origin、OIDC 校验 redirect_uri，两者都必须与浏览器
-    实际访问的地址完全一致。
+    WebAuthn 校验 origin、OIDC 校验 redirect_uri，差一个端口或协议都会被拒。
+
+    容器内的 nginx 监听明文 HTTP，它转发的 X-Forwarded-Proto 是 http、
+    Host 里也没有对外端口——外层 TLS 是用户自己的反代终结的。所以优先
+    用 Origin/Referer（浏览器如实填写的地址），再退回转发头。
     """
     external = (get_settings().external_domain or "").strip().rstrip("/")
     if external:
@@ -31,9 +35,33 @@ def _origin(request: Request) -> str:
             external = f"https://{external}"
         return external
 
-    # 反代会把原始协议放在 X-Forwarded-Proto，直接用 request.url 会拿到 http
-    proto = request.headers.get("x-forwarded-proto", request.url.scheme)
-    host = request.headers.get("x-forwarded-host") or request.headers.get("host", "")
+    # 浏览器发起的请求会带 Origin，这是最可靠的来源
+    origin = (request.headers.get("origin") or "").strip().rstrip("/")
+    if origin.startswith(("http://", "https://")):
+        return origin
+
+    # 表单跳转等场景没有 Origin，从 Referer 里取根地址
+    referer = (request.headers.get("referer") or "").strip()
+    if referer.startswith(("http://", "https://")):
+        parsed = urlparse(referer)
+        if parsed.scheme and parsed.netloc:
+            return f"{parsed.scheme}://{parsed.netloc}"
+
+    # 最后才用转发头。多级反代时 X-Forwarded-* 可能是逗号分隔的链，取第一个
+    proto = (request.headers.get("x-forwarded-proto") or request.url.scheme)
+    proto = proto.split(",")[0].strip()
+    host = (
+        request.headers.get("x-forwarded-host")
+        or request.headers.get("host", "")
+    ).split(",")[0].strip()
+
+    # 外层反代换了端口时 Host 里往往没有，X-Forwarded-Port 补上
+    forwarded_port = (request.headers.get("x-forwarded-port") or "").strip()
+    if forwarded_port and ":" not in host:
+        default_port = "443" if proto == "https" else "80"
+        if forwarded_port != default_port:
+            host = f"{host}:{forwarded_port}"
+
     return f"{proto}://{host}"
 
 
@@ -86,6 +114,8 @@ def oidc_callback(
     """提供商回调。成功后带 token 跳回前端。"""
     from app.modules.auth import oidc
 
+    # 这个请求是从提供商跳回来的，Origin/Referer 指向提供商而非本站，
+    # 不能用它推断。发起授权时存的 redirect_uri 才是准的
     origin = _origin(request)
 
     def fail(message: str):
@@ -102,7 +132,12 @@ def oidc_callback(
 
     try:
         stored = oidc.pop_state(state)
-        tokens = oidc.exchange_code(code, stored["redirect_uri"])
+        # 用发起时那份地址，与提供商登记的完全一致
+        redirect_uri = stored["redirect_uri"]
+        if redirect_uri.endswith(OIDC_CALLBACK_PATH):
+            origin = redirect_uri[: -len(OIDC_CALLBACK_PATH)]
+
+        tokens = oidc.exchange_code(code, redirect_uri)
         userinfo = oidc.fetch_userinfo(tokens)
         username = oidc.resolve_username(userinfo)
     except oidc.OIDCError as exc:
@@ -170,8 +205,30 @@ def oidc_test(
 
 @router.get("/auth/oidc/redirect-uri")
 def oidc_redirect_uri(request: Request, current_user: str = Depends(get_current_user)):
-    """回调地址，填到提供商那边的白名单里。"""
-    return ResponseEntity.ok({"redirect_uri": f"{_origin(request)}{OIDC_CALLBACK_PATH}"})
+    """回调地址与推断依据。
+
+    地址算错是这两个功能最常见的失败原因（少个端口、协议成了 http），
+    把推断结果和依据一并暴露出来，不必靠报错反推。
+    """
+    from urllib.parse import urlparse
+
+    origin = _origin(request)
+    settings = get_settings()
+
+    return ResponseEntity.ok({
+        "redirect_uri": f"{origin}{OIDC_CALLBACK_PATH}",
+        "origin": origin,
+        # RP ID 必须是域名，不带端口
+        "rp_id": settings.webauthn_rp_id or (urlparse(origin).hostname or ""),
+        "source": "配置的外网地址" if settings.external_domain else "请求头推断",
+        "headers": {
+            "origin": request.headers.get("origin", ""),
+            "host": request.headers.get("host", ""),
+            "x-forwarded-proto": request.headers.get("x-forwarded-proto", ""),
+            "x-forwarded-host": request.headers.get("x-forwarded-host", ""),
+            "x-forwarded-port": request.headers.get("x-forwarded-port", ""),
+        },
+    })
 
 
 # ----------------------------------------------------------------------
