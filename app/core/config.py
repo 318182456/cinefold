@@ -26,7 +26,8 @@ FALLBACK_ENV_FILES = (PROJECT_ROOT / "app.env", PROJECT_ROOT / ".env")
 # 这些字段在返回给前端时会被打码
 SENSITIVE_KEYS = {
     "emby_api_key", "plex_token", "jellyfin_api_key",
-    "qbittorrent_password", "transmission_password", "thunder_authorization",
+    "qbittorrent_password", "qbittorrent_apikey",
+    "transmission_password", "thunder_authorization",
     "rousi_password", "rousi_token", "rousi_passkey",
     "ptt_cookie", "nicept_cookie",
     "mteam_api_key", "wechat_corp_secret", "wechat_token",
@@ -121,6 +122,9 @@ class Settings:
     qbittorrent_url: str = ""
     qbittorrent_username: str = ""
     qbittorrent_password: str = ""
+    # Web API Key（qb 5.2.0+ / WebAPI 2.14.1+）。配了就走 Bearer 鉴权，
+    # 无需登录换 Cookie，账号密码可留空
+    qbittorrent_apikey: str = ""
     qbittorrent_download_path: str = ""
     qbittorrent_category: str = ""
     qbittorrent_verify_cert: bool = False
@@ -343,6 +347,7 @@ def load_settings() -> Settings:
         qbittorrent_url=_env("QBITTORRENT_URL"),
         qbittorrent_username=_env("QBITTORRENT_USERNAME"),
         qbittorrent_password=_env("QBITTORRENT_PASSWORD"),
+        qbittorrent_apikey=_env("QBITTORRENT_APIKEY"),
         qbittorrent_download_path=_env("QBITTORRENT_DOWNLOAD_PATH"),
         qbittorrent_category=_env("QBITTORRENT_CATEGORY"),
         qbittorrent_verify_cert=_env_bool("QBITTORRENT_VERIFY_CERT", False),

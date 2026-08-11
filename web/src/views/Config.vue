@@ -114,6 +114,8 @@ const GROUPS = [
         title: 'qBittorrent',
         fields: [
           { k: 'qbittorrent_url', label: '地址', ph: 'http://192.168.1.10:8080' },
+          { k: 'qbittorrent_apikey', label: 'Web API Key', t: 'password', ph: 'qbt_...',
+            hint: 'qb 5.2.0+ 可用。填了就走 Bearer 鉴权，不再反复登录，账号密码可留空' },
           { k: 'qbittorrent_username', label: '用户名' },
           { k: 'qbittorrent_password', label: '密码', t: 'password' },
           { k: 'qbittorrent_download_path', label: '下载路径' },

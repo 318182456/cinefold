@@ -124,6 +124,61 @@ class TestFactories:
         monkeypatch.setattr(settings, "thunder_url", "")
         assert get_download_client() is None
 
+    def test_qb_apikey_uses_bearer_and_skips_login(self, monkeypatch):
+        """配了 API Key 就不能再打 /auth/login —— qb 会拒绝。"""
+        import qbittorrentapi
+
+        from app.modules.downloadclient.qbittorrent import QBitTorrentClient
+
+        captured = {}
+
+        class FakeClient:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+                self.app = type("App", (), {"version": "5.2.3"})()
+
+        monkeypatch.setattr(qbittorrentapi, "Client", FakeClient)
+        # 走到登录就说明分支错了
+        monkeypatch.setattr(
+            QBitTorrentClient,
+            "_auth_log_in",
+            lambda self: pytest.fail("API Key 模式不应调用 _auth_log_in"),
+        )
+
+        client = QBitTorrentClient(url="http://qb:8080", apikey="qbt_testkey123")
+        assert client.login_qb() is True
+        assert captured["EXTRA_HEADERS"] == {"Authorization": "Bearer qbt_testkey123"}
+        # key 模式下不该把账号密码也带上，避免库自作主张去登录
+        assert captured["username"] == ""
+        assert captured["password"] == ""
+
+    def test_qb_without_apikey_still_logs_in(self, monkeypatch):
+        """没配 key 时保持原有的账号密码登录路径。"""
+        import qbittorrentapi
+
+        from app.modules.downloadclient.qbittorrent import QBitTorrentClient
+
+        captured = {}
+        called = []
+
+        class FakeClient:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+                self.app = type("App", (), {"version": "5.1.0"})()
+
+        monkeypatch.setattr(qbittorrentapi, "Client", FakeClient)
+        monkeypatch.setattr(
+            QBitTorrentClient, "_auth_log_in", lambda self: called.append(True)
+        )
+
+        client = QBitTorrentClient(
+            url="http://qb:8080", username="u", password="p", apikey=""
+        )
+        assert client.login_qb() is True
+        assert called == [True]
+        assert captured["EXTRA_HEADERS"] == {}
+        assert captured["username"] == "u"
+
     def test_no_media_server_configured(self, monkeypatch):
         from app.core import config as config_module
         from app.modules.mediaserver import get_media_servers
