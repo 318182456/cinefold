@@ -189,6 +189,8 @@ class Settings:
     rank_schedule_time: str = "0 20 * * *"
     actor_schedule_time: str = "0 21 * * *"
     download_schedule_time: str = "0 22 * * *"
+    # 榜单缓存 30 分钟过期，预热间隔必须比它短，否则用户还是会撞上冷缓存
+    warm_cache_time: str = "*/25 * * * *"
 
     # --- 榜单订阅 ---
     rank_page: int = 0
@@ -383,6 +385,7 @@ def load_settings() -> Settings:
         rank_schedule_time=_env("RANK_SCHEDULE_TIME", "0 20 * * *").strip("'\""),
         actor_schedule_time=_env("ACTOR_SCHEDULE_TIME", "0 21 * * *").strip("'\""),
         download_schedule_time=_env("DOWNLOAD_SCHEDULE_TIME", "0 22 * * *").strip("'\""),
+        warm_cache_time=_env("WARM_CACHE_TIME", "*/25 * * * *").strip("'\""),
 
         rank_page=_env_int("RANK_PAGE", 0),
         rank_type=_env("RANK_TYPE"),

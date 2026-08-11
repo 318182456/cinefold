@@ -70,6 +70,58 @@ def sync_actors() -> int:
     return services.fill_lack_actors()
 
 
+# 页面接口的默认取值，预热必须与其一致，否则算出来的缓存键对不上
+_WARM_BRAND_RANGE = (7, 14)
+_WARM_RANK_TYPES = ("daily", "weekly", "monthly")
+
+
+def warm_page_cache() -> int:
+    """预热推荐、榜单、厂牌三个页面的缓存。
+
+    这三个页面首次打开要跨境抓一遍再补详情，实测几十秒，用户只能干等。
+    提前在后台抓好，打开就是命中缓存。
+
+    与 sync_hot / sync_brands 的区别：那两个任务只把番号入库，
+    不写页面读的那份缓存，所以缓存过期后用户照样要等。
+    """
+    from app import services
+
+    warmed = 0
+
+    for rank_type in _WARM_RANK_TYPES:
+        try:
+            if services.get_rank_items(rank_type):
+                warmed += 1
+        except Exception as exc:
+            logger.warning(f"[任务] 预热榜单 {rank_type} 失败: {exc}")
+
+    # 推荐页读库不抓站，本身就快，不需要预热
+
+    from app.modules.ladysite.brands import BRANDS
+
+    setting = (get_settings().brand_type or "").strip().lower()
+    if setting == "all":
+        brands = list(BRANDS)
+    elif setting:
+        brands = [b.strip() for b in setting.split(",") if b.strip() in BRANDS]
+    else:
+        # 未配置 BRAND_TYPE 时只预热第一个厂牌：厂牌页默认就打开它，
+        # 而把 9 个站全抓一遍代价太大，不该在用户没选的情况下默认做
+        brands = list(BRANDS)[:1]
+
+    past_days, future_days = _WARM_BRAND_RANGE
+    for brand in brands:
+        try:
+            if services.get_brand_items(brand, past_days=past_days, future_days=future_days):
+                warmed += 1
+        except Exception as exc:
+            # 单个厂牌不通不该影响其余厂牌
+            logger.warning(f"[任务] 预热厂牌 {brand} 失败: {exc}")
+
+    logger.info(f"[任务] 页面缓存预热完成，{warmed} 项")
+    return warmed
+
+
 def sync_news() -> int:
     """同步新片。"""
     return _run_ladysite_task("sync_news", "同步新片")
@@ -164,6 +216,7 @@ JOBS: dict[str, dict] = {
     "sync_actors": {"func": sync_actors, "name": "同步演员", "cron_key": "sync_actors_time"},
     "sync_news": {"func": sync_news, "name": "同步新片", "cron_key": "sync_news"},
     "fill_empty_banner": {"func": fill_empty_banner, "name": "补全缺图", "cron_key": "fill_empty_image_time"},
+    "warm_page_cache": {"func": warm_page_cache, "name": "预热页面缓存", "cron_key": "warm_cache_time"},
 }
 
 # 固定间隔任务，不走 crontab

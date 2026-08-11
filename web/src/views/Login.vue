@@ -93,7 +93,7 @@ onMounted(async () => {
 </script>
 
 <template>
-  <div class="flex min-h-screen items-center justify-center px-4">
+  <div class="flex h-full items-center justify-center overflow-y-auto px-4">
     <div class="w-full max-w-sm">
       <div class="mb-8 flex flex-col items-center gap-3">
         <AppLogo :size="48" />

@@ -67,7 +67,7 @@ onMounted(async () => {
 </script>
 
 <template>
-  <div class="h-screen overflow-hidden lg:flex">
+  <div class="h-full overflow-hidden lg:flex">
     <!-- 移动端遮罩 -->
     <div
       v-if="menuOpen"
