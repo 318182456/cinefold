@@ -175,10 +175,12 @@ const GROUPS = [
         hint: '刮削工具建立硬链接后登记关联，媒体服务器删除影片时同步清理种子与文件',
         panel: 'medialink',
         fields: [
-          { k: 'medialink_library_path', label: '媒体库根目录', ph: '/media/JAV',
-            hint: '刮削产物所在目录。必须与下载目录在同一挂载卷，否则建不出硬链接' },
-          { k: 'medialink_webhook_token', label: 'Webhook 密钥', t: 'password',
-            hint: '外部调用需带此密钥。留空则不校验，强烈建议设置' },
+          // Webhook 密钥不放在这里 —— 下方面板里那一份带「生成随机密钥」和
+          // 明文仅一次可见的提示，两处都放会让人以为是两个不同的配置项
+          { k: 'medialink_library_path', label: '媒体库根目录', ph: '/volume3/h_video',
+            hint: '按 inode 反查硬链接的扫描范围。可设成上一层，把多个分类目录都纳入' },
+          { k: 'medialink_scrape_dir', label: '刮削输出目录', ph: '/volume3/h_video/日本AV',
+            hint: '刮削工具实际写入硬链接的目录。留空则等同库根。该目录受保护，不会被当成空目录清掉' },
           { k: 'medialink_delete_enabled', label: '启用联动删除', t: 'bool',
             hint: '删除不可逆。建议先用下方演练确认反查结果无误再开启' },
         ],
@@ -742,6 +744,14 @@ onMounted(async () => {
                   </button>
                 </div>
 
+                <!-- 也允许手填。这里是密钥唯一的输入处 -->
+                <input
+                  v-model="form.medialink_webhook_token"
+                  type="password"
+                  class="input"
+                  placeholder="留空则不校验，强烈建议设置"
+                />
+
                 <!-- 保存后接口只回传掩码，明文仅此一次可见 -->
                 <div v-if="freshWebhookToken" class="space-y-1">
                   <div class="flex items-center gap-2">
@@ -805,7 +815,7 @@ onMounted(async () => {
               >
                 调用时需附带请求头
                 <code class="text-emerald-400">X-Cinefold-Token</code>
-                ，值为上方配置的密钥
+                ，值为上面填的密钥
               </p>
             </div>
           </template>

@@ -12,7 +12,9 @@ const toast = useToast()
 const items = ref([])
 const total = ref(0)
 const page = ref(1)
-const size = 50
+// 每页条数可调：后端对当前页逐条探测文件是否存在，页越大越慢
+const size = ref(20)
+const SIZE_OPTIONS = [20, 50, 100]
 const keyword = ref('')
 const missingOnly = ref(false)
 const loading = ref(false)
@@ -31,7 +33,11 @@ const preview = ref(null)
 const previewing = ref(false)
 const deleting = ref(false)
 
-const pages = computed(() => Math.max(1, Math.ceil(total.value / size)))
+const pages = computed(() => Math.max(1, Math.ceil(total.value / size.value)))
+
+// 当前页覆盖的区间，显示成「第 1–20 条 / 共 41 条」
+const rangeStart = computed(() => (total.value ? (page.value - 1) * size.value + 1 : 0))
+const rangeEnd = computed(() => Math.min(page.value * size.value, total.value))
 
 // 同一番号的多条链接归到一起显示，转种/多集时列表才不会散开
 const grouped = computed(() => {
@@ -59,7 +65,7 @@ async function load() {
       keyword: keyword.value.trim(),
       missing_only: missingOnly.value,
       page: page.value,
-      size,
+      size: size.value,
     })
     items.value = data.items || []
     total.value = data.total || 0
@@ -92,8 +98,16 @@ function toggleMissing() {
 }
 
 function go(next) {
-  if (next < 1 || next > pages.value) return
+  if (next < 1 || next > pages.value || next === page.value) return
   page.value = next
+  load()
+}
+
+function changeSize(next) {
+  const value = Number(next)
+  if (!value || value === size.value) return
+  size.value = value
+  page.value = 1
   load()
 }
 
@@ -336,7 +350,14 @@ onMounted(() => {
     </div>
 
     <!-- 分页 -->
-    <div v-if="pages > 1" class="flex items-center justify-center gap-2">
+    <div v-if="total" class="flex flex-wrap items-center justify-center gap-2">
+      <span class="mr-auto text-xs text-gray-500">
+        第 {{ rangeStart }}–{{ rangeEnd }} 条 / 共 {{ total }} 条
+      </span>
+
+      <button class="btn-ghost px-3 py-1.5 text-xs" :disabled="page <= 1" @click="go(1)">
+        首页
+      </button>
       <button class="btn-ghost px-3 py-1.5 text-xs" :disabled="page <= 1" @click="go(page - 1)">
         上一页
       </button>
@@ -348,6 +369,21 @@ onMounted(() => {
       >
         下一页
       </button>
+      <button
+        class="btn-ghost px-3 py-1.5 text-xs"
+        :disabled="page >= pages"
+        @click="go(pages)"
+      >
+        末页
+      </button>
+
+      <select
+        class="input ml-2 w-auto py-1.5 text-xs"
+        :value="size"
+        @change="changeSize($event.target.value)"
+      >
+        <option v-for="n in SIZE_OPTIONS" :key="n" :value="n">{{ n }} 条/页</option>
+      </select>
     </div>
 
     <!-- 手工登记 -->

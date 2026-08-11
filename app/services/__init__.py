@@ -550,6 +550,37 @@ def cancel_actor(name: str) -> bool:
     return True
 
 
+def purge_migrated_actors(dry_run: bool = True) -> dict:
+    """清掉迁移带进来的伪订阅演员。
+
+    老版本的 actor 表是演员资料缓存，迁移时整表搬了过来，在新版语义下
+    全都成了"已订阅"，演员订阅任务每轮都会拿它们去刷番号。
+    真实订阅一定带 limit_date（subscribe_actor 为空时会填当天），
+    没有这一列值的就是迁移残留。
+    """
+    with session_scope() as session:
+        condition = (Actor.limit_date.is_(None)) | (Actor.limit_date == "")
+        rows = session.scalars(select(Actor).where(condition)).all()
+        matched = len(rows)
+        samples = [row.name for row in rows[:20]]
+        kept = session.scalar(
+            select(func.count()).select_from(Actor).where(~condition)
+        ) or 0
+
+        if not dry_run:
+            for row in rows:
+                session.delete(row)
+            logger.info(f"清理迁移残留演员 {matched} 条，保留真实订阅 {kept} 条")
+
+    return {
+        "matched": matched,
+        "deleted": 0 if dry_run else matched,
+        "kept": kept,
+        "dry_run": dry_run,
+        "samples": samples,
+    }
+
+
 # ======================================================================
 # 下载状态同步
 # ======================================================================

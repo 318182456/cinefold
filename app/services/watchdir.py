@@ -135,23 +135,55 @@ def _library_root() -> Path | None:
     return root if root.is_dir() else None
 
 
-def target_path(rule: WatchDir, source: Path, library: Path) -> Path | None:
-    """算出源文件在媒体库里的目标路径，保持源目录内的相对结构。
+def target_base(rule: WatchDir) -> Path | None:
+    """算出这条规则的目标根目录。取不到返回 None。
+
+    两种配置方式，target_dir 优先：
+
+      target_dir     直接给绝对路径，与 MEDIALINK_LIBRARY_PATH 无关。
+                     短视频、电影各有独立媒体库时用这个
+      target_subdir  旧字段，相对 MEDIALINK_LIBRARY_PATH 的子目录名。
+                     存量规则走这条，保证升级后不失效
+
+    目标目录不要求此刻就存在 —— 建链接时会自动 mkdir。但父目录得能建出来，
+    这个交给 os.link 报错，不在这里预判。
+    """
+    raw = (rule.target_dir or "").strip()
+    if raw:
+        try:
+            return Path(raw)
+        except (OSError, ValueError):
+            return None
+
+    library = _library_root()
+    if library is None:
+        return None
+    return library / rule.target_subdir if rule.target_subdir else library
+
+
+def target_path(
+    rule: WatchDir, source: Path, base: Path | None = None
+) -> Path | None:
+    """算出源文件在目标目录里的路径，保持源目录内的相对结构。
 
         源目录        /downloads/短视频
-        子目录        短视频
+        目标目录      /volume3/h_video/短视频
         源文件        /downloads/短视频/2026/a.mp4
-        目标          <库根>/短视频/2026/a.mp4
+        目标          /volume3/h_video/短视频/2026/a.mp4
 
     源文件不在源目录内时返回 None —— 说明调用方传错了，宁可不建。
+    base 省略时按规则自行解析；批量调用时传进来可省掉重复解析。
     """
+    root = base if base is not None else target_base(rule)
+    if root is None:
+        return None
+
     try:
         relative = source.resolve().relative_to(Path(rule.source_dir).resolve())
     except (ValueError, OSError):
         return None
 
-    base = library / rule.target_subdir if rule.target_subdir else library
-    return base / relative
+    return root / relative
 
 
 def make_code(rule: WatchDir, source: Path) -> str:
@@ -238,13 +270,12 @@ def _unlink(path: Path) -> tuple[bool, str]:
 # ----------------------------------------------------------------------
 # 单个规则的同步
 # ----------------------------------------------------------------------
-def _existing_links(rule: WatchDir, library: Path) -> dict[str, MediaLink]:
+def _existing_links(rule: WatchDir, base: Path) -> dict[str, MediaLink]:
     """取这条规则已登记的关联，按 link_path 索引。
 
     归属判定靠 link_path 落在规则的目标目录内 —— media_link 没存 watch_id，
     这样一条链接被哪条规则管，完全由路径决定，规则改了目标目录也不会认错。
     """
-    base = library / rule.target_subdir if rule.target_subdir else library
     prefix = str(base)
     out: dict[str, MediaLink] = {}
     with session_scope() as session:
@@ -276,7 +307,8 @@ def sync_rule(rule_id: int, dry_run: bool = False) -> SyncResult:
             return result
         # 出了 session 还要用，拷一份detach 的
         rule = WatchDir(
-            id=row.id, source_dir=row.source_dir, target_subdir=row.target_subdir,
+            id=row.id, source_dir=row.source_dir, target_dir=row.target_dir,
+            target_subdir=row.target_subdir,
             name=row.name, enabled=row.enabled, recursive=row.recursive,
             reverse_delete=row.reverse_delete, code_prefix=row.code_prefix,
         )
@@ -287,9 +319,12 @@ def sync_rule(rule_id: int, dry_run: bool = False) -> SyncResult:
         result.skipped.append("规则已禁用")
         return result
 
-    library = _library_root()
-    if library is None:
-        msg = "未配置媒体库根目录（MEDIALINK_LIBRARY_PATH），无法同步"
+    base = target_base(rule)
+    if base is None:
+        msg = (
+            "未配置目标目录，也没有媒体库根目录（MEDIALINK_LIBRARY_PATH）可回退，"
+            "无法同步"
+        )
         logger.warning(msg)
         result.errors.append(msg)
         return result
@@ -303,12 +338,12 @@ def sync_rule(rule_id: int, dry_run: bool = False) -> SyncResult:
         return result
 
     videos = _scan_videos(source_root, rule.recursive)
-    linked_records = _existing_links(rule, library)
+    linked_records = _existing_links(rule, base)
 
     # 源侧当前应该存在的目标路径 → 源文件
     expected: dict[str, Path] = {}
     for source in videos:
-        target = target_path(rule, source, library)
+        target = target_path(rule, source, base)
         if target is None:
             result.skipped.append(f"不在源目录内，跳过: {source}")
             continue
@@ -384,7 +419,7 @@ def sync_rule(rule_id: int, dry_run: bool = False) -> SyncResult:
         # 改记录 + 改链接路径，不删不建 —— inode 不变，Emby 侧无感知
         moved_to = _match_moved(record, inode_index, expected)
         if moved_to is not None:
-            new_target = str(target_path(rule, moved_to, library) or "")
+            new_target = str(target_path(rule, moved_to, base) or "")
             if dry_run:
                 result.moved.append({"from": target_str, "to": new_target})
                 continue
@@ -430,8 +465,8 @@ def sync_rule(rule_id: int, dry_run: bool = False) -> SyncResult:
         record = linked_records[target_str]
 
         # 媒体库侧也可能是移动（用户在库里整理目录结构，或刮削工具重命名）。
-        # 库内同 inode 的文件还在就不算删除，改记录即可
-        moved_to = _find_in_library(record, library)
+        # 目标目录内同 inode 的文件还在就不算删除，改记录即可
+        moved_to = _find_in_library(record, base)
         if moved_to is not None:
             if dry_run:
                 result.moved.append({"from": target_str, "to": str(moved_to)})
@@ -518,16 +553,16 @@ def _match_moved(
     return hit
 
 
-def _find_in_library(record: MediaLink, library: Path) -> Path | None:
-    """媒体库里是否还有同 inode 的文件（链接被移动而非删除）。
+def _find_in_library(record: MediaLink, base: Path) -> Path | None:
+    """目标目录里是否还有同 inode 的文件（链接被移动而非删除）。
 
-    只在链接路径已经不存在时调用。扫描范围限定媒体库内，靠 inode 认人。
+    只在链接路径已经不存在时调用。扫描范围限定目标目录内，靠 inode 认人。
     """
     if record.inode is None or record.device is None:
         return None
 
     try:
-        for path in library.rglob("*"):
+        for path in base.rglob("*"):
             try:
                 if path.suffix.lower() not in VIDEO_SUFFIXES or not path.is_file():
                     continue
@@ -775,10 +810,9 @@ def backfill_torrents(watch_id: int = 0) -> int:
             rule = session.get(WatchDir, watch_id)
             if rule is None:
                 return 0
-            library = _library_root()
-            if library is None:
+            base = target_base(rule)
+            if base is None:
                 return 0
-            base = library / rule.target_subdir if rule.target_subdir else library
             prefix = str(base)
         rows = [r for r in rows if r["link_path"].startswith(prefix)]
 

@@ -24,6 +24,7 @@ def configure():
         key: getattr(settings, key)
         for key in (
             "medialink_library_path",
+            "medialink_scrape_dir",
             "medialink_delete_enabled",
             "medialink_webhook_token",
         )
@@ -711,6 +712,39 @@ def test_delete_refuses_source_with_external_hardlink(linked, tmp_path):
     assert not link.exists()
     assert any("其它硬链接引用" in e for e in result.errors)
     assert str(source) not in result.files_deleted
+
+
+def test_scrape_dir_survives_empty_dir_pruning(tmp_path, configure):
+    """刮削输出目录清空后不能被删 —— 删了 Emby 会认为整个媒体库掉线。
+
+    库根设成分类目录的上一层时才会触发：ABS-001/ 空了往上删到日本AV/，
+    日本AV/ 也空了就会被一起删掉。
+    """
+    library = tmp_path / "h_video"
+    scrape = library / "日本AV"
+    movie = scrape / "ABS-001"
+    source_dir = tmp_path / "downloads"
+    movie.mkdir(parents=True)
+    source_dir.mkdir()
+
+    source = source_dir / "abs-001.mp4"
+    source.write_bytes(b"x" * 512)
+    link = movie / "ABS-001.mp4"
+    os.link(source, link)
+
+    configure(
+        medialink_library_path=str(library),
+        medialink_scrape_dir=str(scrape),
+        medialink_delete_enabled=True,
+    )
+    medialink.register_scrape("ABS-001", str(source))
+
+    medialink.handle_media_deleted(link_path=str(link), dry_run=False)
+
+    # 番号目录空了应该被清掉，但刮削输出目录必须留着
+    assert not movie.exists()
+    assert scrape.is_dir()
+    assert library.is_dir()
 
 
 def test_delete_proceeds_once_external_hardlink_is_gone(linked, tmp_path):

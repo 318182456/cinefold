@@ -113,6 +113,11 @@ class Settings:
     # --- 媒体联动 ---
     # 媒体库根目录，刮削产物（硬链接）所在。按 inode 反查源文件时的扫描范围
     medialink_library_path: str = ""
+    # 刮削工具实际写入硬链接的目录（如 <库根>/日本AV）。留空则等同于库根。
+    # 与库根分开是因为库根常设成上一层，好把多个分类目录都纳入反查范围，
+    # 但刮削产物只落在其中某一个子目录里 —— 这个目录受保护，不会被当成
+    # 空目录清掉，也会在监控目录页列出来
+    medialink_scrape_dir: str = ""
     # 媒体服务器删除影片时，同步删除种子与源文件。关闭时只记录不动手
     medialink_delete_enabled: bool = False
     # webhook 校验密钥。请求需带 X-Cinefold-Token，留空则不校验
@@ -348,6 +353,7 @@ def load_settings() -> Settings:
 
         medialink_library_path=_env("MEDIALINK_LIBRARY_PATH"),
         medialink_delete_enabled=_env_bool("MEDIALINK_DELETE_ENABLED", False),
+        medialink_scrape_dir=_env("MEDIALINK_SCRAPE_DIR"),
         medialink_webhook_token=_env("MEDIALINK_WEBHOOK_TOKEN"),
 
         watchdir_delete_grace=_env_int("WATCHDIR_DELETE_GRACE", 1800),
