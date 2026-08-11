@@ -100,9 +100,16 @@ jobs:
             type=raw,value=${{ steps.version.outputs.value }},enable={{is_default_branch}}
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            type=sha,format=short
+            # sha tag 只在发版时打：每个 tag 都是一次 registry 写入，日常提交
+            # 逐次累积容易触发 GHCR 次级速率限制，而这些 tag 平时用不上
+            type=sha,format=short,enable=${{ steps.version.outputs.released == 'true' }}
 
+      # GHCR 的次级速率限制会把推送打回 403，正文里写的是 secondary rate limit。
+      # 镜像层此时通常已经推完，只差写 tag，等一会儿重试就能过去 —— 所以失败
+      # 不直接判死，退避后再试两次。构建缓存还在，重试几乎只花推送的时间。
       - name: 构建并推送
+        id: push
+        continue-on-error: true
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -113,9 +120,52 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      - name: 推送失败，等待后重试
+        if: steps.push.outcome == 'failure'
+        run: |
+          echo "首次推送失败，多为 GHCR 次级速率限制，等待 120 秒后重试"
+          sleep 120
+
+      - name: 重试推送
+        id: retry
+        if: steps.push.outcome == 'failure'
+        continue-on-error: true
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          # 重试不再写缓存：内容与上一次完全相同，写了是白费时间
+          cache-to: ''
+
+      - name: 二次失败，加长等待后最后一试
+        if: steps.push.outcome == 'failure' && steps.retry.outcome == 'failure'
+        run: |
+          echo "重试仍失败，等待 300 秒后做最后一次尝试"
+          sleep 300
+
+      - name: 最后一次推送
+        if: steps.push.outcome == 'failure' && steps.retry.outcome == 'failure'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: ''
+
       - name: 输出镜像信息
+        # 前面的推送步骤带 continue-on-error，走到这里说明最终推成功了
         run: |
           echo "### 镜像已推送" >> "$GITHUB_STEP_SUMMARY"
+          if [ "${{ steps.push.outcome }}" = "failure" ]; then
+            echo "> 首次推送被 GHCR 限流，重试后成功。" >> "$GITHUB_STEP_SUMMARY"
+          fi
           echo '```' >> "$GITHUB_STEP_SUMMARY"
           echo "${{ steps.meta.outputs.tags }}" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
