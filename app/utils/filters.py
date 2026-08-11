@@ -69,6 +69,17 @@ def _parse_size_mb(value: str) -> float:
     return number * 1024 if unit in ("gb", "g") else number
 
 
+def _parse_int(value) -> int:
+    """配置里的数字项。留空、非法值与 0 一律当作不限。"""
+    if value in (None, ""):
+        return 0
+    try:
+        parsed = int(str(value).strip())
+    except (TypeError, ValueError):
+        return 0
+    return max(parsed, 0)
+
+
 def _match_keywords(title: str, keywords: str) -> bool:
     """关键词用逗号分隔，任一命中即为 True。"""
     title_lower = (title or "").lower()
@@ -99,6 +110,8 @@ def filter_torrents(
     exclude_keywords = config.get("exclude_keywords") or ""
     min_size = _parse_size_mb(config.get("min_size") or "")
     max_size = _parse_size_mb(config.get("max_size") or "")
+    min_seeders = _parse_int(config.get("min_seeders"))
+    max_seeders = _parse_int(config.get("max_seeders"))
 
     out: list[Torrent] = []
     for torrent in torrents:
@@ -133,6 +146,11 @@ def filter_torrents(
         if min_size and torrent.size_mb < min_size:
             continue
         if max_size and torrent.size_mb > max_size:
+            continue
+        # 做种数太少下不动，太多的往往是老片合集
+        if min_seeders and torrent.seeders < min_seeders:
+            continue
+        if max_seeders and torrent.seeders > max_seeders:
             continue
 
         # 回填推断结果，后续排序直接用

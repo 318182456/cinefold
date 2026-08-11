@@ -87,6 +87,7 @@ PRIMARY_SITE=MTeam
 - **过滤**：不满足的种子直接排除
   - `only_*` 只要、`exclude_*` 排除，可选属性 `chinese` `uc` `uhd` `vr` `free`
   - `min_size` / `max_size` 支持 `5GB` 写法，无单位时按 MB
+  - `min_seeders` / `max_seeders` 做种数区间，留空或 0 表示不限
   - `include_keywords` / `exclude_keywords` 逗号分隔，匹配标题
 - **排序**：多个种子都满足时选哪个。逗号分隔，越靠前优先级越高，
   `!` 前缀表示降权（`!uhd` = 优先非 4K）。可用键：

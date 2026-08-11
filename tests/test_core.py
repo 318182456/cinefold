@@ -305,6 +305,32 @@ class TestFilter:
         result = filter_torrents(items, {"min_size": "2GB", "max_size": "10GB"})
         assert [t.id for t in result] == [2]
 
+    def test_min_seeders(self):
+        items = [_t(id=1, seeders=0), _t(id=2, seeders=5), _t(id=3, seeders=99)]
+        result = filter_torrents(items, {"min_seeders": 3})
+        assert [t.id for t in result] == [2, 3]
+
+    def test_max_seeders(self):
+        items = [_t(id=1, seeders=5), _t(id=2, seeders=500)]
+        assert [t.id for t in filter_torrents(items, {"max_seeders": 100})] == [1]
+
+    def test_seeders_range(self):
+        items = [_t(id=1, seeders=1), _t(id=2, seeders=50), _t(id=3, seeders=999)]
+        result = filter_torrents(items, {"min_seeders": 3, "max_seeders": 100})
+        assert [t.id for t in result] == [2]
+
+    def test_blank_seeders_means_unlimited(self):
+        """留空、0 与非法值都不该过滤掉任何东西。"""
+        items = [_t(id=1, seeders=0), _t(id=2, seeders=10)]
+        for value in ("", 0, None, "abc"):
+            result = filter_torrents(items, {"min_seeders": value})
+            assert [t.id for t in result] == [1, 2], f"min_seeders={value!r}"
+
+    def test_seeders_accepts_string(self):
+        """前端输入框传回来的是字符串。"""
+        items = [_t(id=1, seeders=1), _t(id=2, seeders=10)]
+        assert [t.id for t in filter_torrents(items, {"min_seeders": "5"})] == [2]
+
     def test_keywords(self):
         items = [_t(id=1, title="A leak"), _t(id=2, title="B normal")]
         assert [t.id for t in filter_torrents(items, {"include_keywords": "leak"})] == [1]

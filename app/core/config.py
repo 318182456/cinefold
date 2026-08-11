@@ -51,6 +51,9 @@ DEFAULT_FILTER = {
     "exclude_keywords": "",
     "min_size": "",
     "max_size": "",
+    # 做种数区间，0 表示不限
+    "min_seeders": "",
+    "max_seeders": "",
 }
 
 DEFAULT_SORT = "free,chinese,uc,!uc,site,seeders,!uhd,uhd"
