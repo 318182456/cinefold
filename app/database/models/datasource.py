@@ -31,6 +31,10 @@ class DataSource(DBBase):
     # 直连必被拦的站点置 True，省掉一次必然 403 的直连
     bypass_first: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
+    # 软删除标记。内置源删掉后不能真删行，否则 sync_builtin_sources()
+    # 下次启动就把它补回来了；置 True 让 sync 跳过，也留出恢复的余地
+    deleted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
     # --- 连通性测试结果，仅供页面展示 ---
     # 空表示还没测过；"ok" / "fail" / "blocked"
     status: Mapped[str | None] = mapped_column(String(16), nullable=True)
@@ -50,6 +54,7 @@ class DataSource(DBBase):
             # cookie 只回传是否已配置，不外泄内容
             "has_cookie": bool(self.cookie),
             "bypass_first": self.bypass_first,
+            "deleted": self.deleted,
             "status": self.status or "",
             "status_message": self.status_message or "",
             "checked_time": self.checked_time.strftime("%Y-%m-%d %H:%M:%S")

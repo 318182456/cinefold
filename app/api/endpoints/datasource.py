@@ -23,10 +23,26 @@ class SourceRequest(BaseModel):
     bypass_first: bool | None = None
 
 
+class SourceCreateRequest(BaseModel):
+    key: str
+    name: str = ""
+    host: str = ""
+    enabled: bool = True
+    interval: float = 0.0
+    priority: int = 100
+    cookie: str = ""
+    bypass_first: bool = False
+
+
 @router.get("/datasources")
 def list_datasources(current_user: str = Depends(get_current_user)):
-    """数据源列表。带上是否已接入解析，未接入的只能做连通性测试。"""
-    from app.modules.ladysite.sources import SOURCE_MAP, sync_builtin_sources
+    """数据源列表。带上是否已接入解析，未接入的只能做连通性测试。
+
+    已软删除的不在列表里，另外单列 removable_builtins 供页面做「恢复」。
+    """
+    from app.modules.ladysite.sources import (
+        SOURCE_MAP, is_builtin, is_protected, sync_builtin_sources,
+    )
 
     # 新增内置源后老库也能补上
     sync_builtin_sources()
@@ -35,13 +51,116 @@ def list_datasources(current_user: str = Depends(get_current_user)):
         rows = session.scalars(
             select(DataSource).order_by(DataSource.priority, DataSource.key)
         ).all()
-        items = []
+        items, removed = [], []
         for row in rows:
+            if row.deleted:
+                # 只有内置源值得提供恢复入口，自定义源删了就是删了
+                if is_builtin(row.key):
+                    removed.append({"key": row.key, "name": row.name})
+                continue
             item = row.to_dict()
             item["has_parser"] = bool(SOURCE_MAP.get(row.key, {}).get("parser"))
+            item["builtin"] = is_builtin(row.key)
+            item["protected"] = is_protected(row.key)
             items.append(item)
 
-    return ResponseEntity.ok({"items": items})
+    return ResponseEntity.ok({"items": items, "removed": removed})
+
+
+@router.post("/datasources")
+def create_datasource(
+    body: SourceCreateRequest, current_user: str = Depends(get_current_user)
+):
+    """新增自定义数据源。
+
+    没有解析器，只能做连通性测试 —— 解析器要在代码里实现，加不进来。
+    """
+    key = (body.key or "").strip().lower()
+    if not key:
+        return ResponseEntity.fail("标识不能为空", code=400)
+    if not key.replace("_", "").replace("-", "").isalnum():
+        return ResponseEntity.fail("标识只能用字母、数字、下划线和连字符", code=400)
+
+    host = (body.host or "").strip().rstrip("/")
+    if not host:
+        return ResponseEntity.fail("地址不能为空", code=400)
+
+    with session_scope() as session:
+        row = session.scalar(select(DataSource).where(DataSource.key == key))
+        if row is not None:
+            # 撞上已软删除的行就地复用，否则 unique 约束会直接报错
+            if not row.deleted:
+                return ResponseEntity.fail(f"标识 {key} 已存在", code=409)
+            row.deleted = False
+            row.name = body.name.strip() or key
+            row.host = host
+            row.enabled = body.enabled
+            row.interval = body.interval
+            row.priority = body.priority
+            row.cookie = body.cookie or None
+            row.bypass_first = body.bypass_first
+            row.status = None
+            row.status_message = None
+            row.checked_time = None
+            return ResponseEntity.ok(message="已添加")
+
+        session.add(DataSource(
+            key=key,
+            name=body.name.strip() or key,
+            host=host,
+            enabled=body.enabled,
+            interval=body.interval,
+            priority=body.priority,
+            cookie=body.cookie or None,
+            bypass_first=body.bypass_first,
+        ))
+
+    return ResponseEntity.ok(message="已添加")
+
+
+@router.delete("/datasources/{key}")
+def delete_datasource(key: str, current_user: str = Depends(get_current_user)):
+    """删除数据源。核心源受保护，只能停用不能删。
+
+    内置源走软删除，避免 sync_builtin_sources() 下次启动把它补回来；
+    自定义源直接删行，留着没有恢复价值。
+    """
+    from app.modules.ladysite.sources import is_builtin, is_protected
+
+    if is_protected(key):
+        return ResponseEntity.fail(
+            f"{key} 是核心数据源，不可删除；如需停用请关闭开关", code=403
+        )
+
+    with session_scope() as session:
+        row = session.scalar(select(DataSource).where(DataSource.key == key))
+        if row is None or row.deleted:
+            return ResponseEntity.fail(f"未知数据源 {key}", code=404)
+
+        if is_builtin(key):
+            row.deleted = True
+            row.enabled = False
+        else:
+            session.delete(row)
+
+    from app.modules.ladysite.base import SiteClient
+    SiteClient.reset_throttle(key)
+
+    return ResponseEntity.ok(message="已删除")
+
+
+@router.post("/datasources/{key}/restore")
+def restore_datasource(key: str, current_user: str = Depends(get_current_user)):
+    """恢复被删除的内置源，配置一并重置为默认值。"""
+    from app.modules.ladysite.sources import restore_builtin_source
+
+    if not restore_builtin_source(key):
+        return ResponseEntity.fail(f"{key} 不是内置数据源，无法恢复", code=404)
+
+    from app.modules.ladysite.base import SiteClient
+    SiteClient.reset_throttle(key)
+
+    return ResponseEntity.ok(message="已恢复")
 
 
 @router.put("/datasources/{key}")
@@ -55,7 +174,7 @@ def update_datasource(
 
     with session_scope() as session:
         row = session.scalar(select(DataSource).where(DataSource.key == key))
-        if row is None:
+        if row is None or row.deleted:
             return ResponseEntity.fail(f"未知数据源 {key}", code=404)
 
         for field, value in updates.items():
@@ -79,7 +198,7 @@ def check_datasource(key: str, current_user: str = Depends(get_current_user)):
 
 @router.post("/datasources/check")
 def check_all_datasources(current_user: str = Depends(get_current_user)):
-    """测全部已启用的数据源。并发跑，否则 21 个站串行要等很久。"""
+    """测全部已启用的数据源。并发跑，否则几十个站串行要等很久。"""
     from concurrent.futures import ThreadPoolExecutor
 
     from app.modules.ladysite.sources import check_source
@@ -87,7 +206,9 @@ def check_all_datasources(current_user: str = Depends(get_current_user)):
     with session_scope() as session:
         keys = [
             row.key for row in session.scalars(
-                select(DataSource).where(DataSource.enabled.is_(True))
+                select(DataSource).where(
+                    DataSource.enabled.is_(True), DataSource.deleted.is_(False)
+                )
             ).all()
         ]
 

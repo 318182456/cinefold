@@ -17,6 +17,7 @@ const routes = [
       { path: 'logs', name: 'Logs', component: () => import('@/views/Logs.vue'), meta: { title: '日志' } },
       { path: 'datasource', name: 'DataSource', component: () => import('@/views/DataSource.vue'), meta: { title: '数据源' } },
       { path: 'medialink', name: 'MediaLink', component: () => import('@/views/MediaLink.vue'), meta: { title: '硬链接' } },
+      { path: 'watchdir', name: 'WatchDir', component: () => import('@/views/WatchDir.vue'), meta: { title: '监控目录' } },
       { path: 'config', name: 'Config', component: () => import('@/views/Config.vue'), meta: { title: '设置' } },
       { path: 'migrate', name: 'Migrate', component: () => import('@/views/Migrate.vue'), meta: { title: '数据迁移' } },
       { path: 'profile', name: 'Profile', component: () => import('@/views/Profile.vue'), meta: { title: '账户' } },

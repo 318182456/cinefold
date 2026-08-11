@@ -54,6 +54,8 @@ def update_database() -> None:
         ("actor", "limit_date", "VARCHAR(32)"),
         ("history", "save_path", "TEXT"),
         ("user", "token", "TEXT"),
+        # FALSE 而非 0：PostgreSQL 的 boolean 列不接受整数字面量
+        ("datasource", "deleted", "BOOLEAN NOT NULL DEFAULT FALSE"),
     ]
     for table, column, column_type in migrations:
         check_and_create_column(engine, table, column, column_type)
@@ -67,6 +69,8 @@ def update_database() -> None:
         # 今日发布与多处排序
         ("code", "release_date"),
         ("actor", "update_time"),
+        # 监控目录对账时按规则捞扣留记录
+        ("pending_delete", "watch_id"),
     ]
     for table, column in indexes:
         check_and_create_index(engine, table, column)

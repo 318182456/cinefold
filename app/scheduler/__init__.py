@@ -182,6 +182,44 @@ def pt_wait() -> int:
     return services.sync_download_status()
 
 
+def sync_watch_dirs() -> int:
+    """监控目录全量对账。
+
+    watchdog 已经在实时响应了，这个任务是兜底：inotify 事件在 Docker 绑定
+    挂载、NFS/SMB 上会丢，容器重启期间的变化也没人看见。只有周期性全量
+    对账能把状态收敛回正确。
+
+    返回处理的规则数。
+    """
+    from app.services.watchdir import backfill_torrents, sync_all
+
+    results = sync_all()
+    if not results:
+        return 0
+
+    linked = sum(len(r.linked) for r in results)
+    unlinked = sum(len(r.unlinked) for r in results)
+    moved = sum(len(r.moved) for r in results)
+    held = sum(len(r.held) for r in results)
+    reverse = sum(len(r.reverse_deleted) for r in results)
+    if linked or unlinked or moved or reverse:
+        logger.info(
+            f"[任务] 监控目录对账 —— 新建 {linked}，删除 {unlinked}，"
+            f"移动 {moved}，扣留 {held}，反向清理 {reverse}"
+        )
+
+    # 建链接时可能还查不到种子（下载未完成、完成后才移入、事后做种），
+    # 每轮补一次。种子信息只有趁它还在下载器里才拿得到
+    try:
+        added = backfill_torrents()
+        if added:
+            logger.info(f"[任务] 补登记 {added} 个种子")
+    except Exception as exc:
+        logger.warning(f"[任务] 补登记种子异常: {exc}")
+
+    return len(results)
+
+
 def cache_photos() -> int:
     """图片本地化。未开启时跳过。"""
     settings = get_settings()
@@ -261,6 +299,8 @@ INTERVAL_JOBS: dict[str, dict] = {
     "pt_wait": {"func": pt_wait, "name": "同步下载状态", "minutes": 5},
     "translate_titles": {"func": translate_titles, "name": "翻译标题", "minutes": 30},
     "cache_photos": {"func": cache_photos, "name": "缓存封面", "minutes": 20},
+    # watchdog 实时监听的兜底，间隔可以放宽 —— 正常情况下事件已经处理完了
+    "sync_watch_dirs": {"func": sync_watch_dirs, "name": "监控目录对账", "minutes": 30},
 }
 
 

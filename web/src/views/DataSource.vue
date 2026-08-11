@@ -1,18 +1,23 @@
 <script setup>
 import { computed, onMounted, ref } from 'vue'
 import {
-  checkAllDataSources, checkDataSource, listDataSources, updateDataSource,
+  checkAllDataSources, checkDataSource, createDataSource, deleteDataSource,
+  listDataSources, restoreDataSource, updateDataSource,
 } from '@/api'
 import { useToast } from '@/composables/useToast'
 import LoadingBlock from '@/components/LoadingBlock.vue'
 
 const toast = useToast()
 const items = ref([])
+const removed = ref([])
 const loading = ref(false)
 const checking = ref('')
 const checkingAll = ref(false)
 const editing = ref(null)
 const draft = ref({})
+const creating = ref(false)
+const newSource = ref({})
+const removingKey = ref('')
 
 const STATUS = {
   ok: { dot: 'bg-emerald-500', text: '正常' },
@@ -30,10 +35,63 @@ async function load() {
   try {
     const data = await listDataSources()
     items.value = data.items || []
+    removed.value = data.removed || []
   } catch (err) {
     toast.error(err.message)
   } finally {
     loading.value = false
+  }
+}
+
+function openCreate() {
+  newSource.value = {
+    key: '', name: '', host: '', interval: 0, priority: 100, bypass_first: false,
+  }
+  creating.value = true
+}
+
+async function create() {
+  const payload = { ...newSource.value }
+  payload.interval = Number(payload.interval) || 0
+  payload.priority = Number(payload.priority) || 100
+
+  try {
+    await createDataSource(payload)
+    toast.success('已添加')
+    creating.value = false
+    await load()
+  } catch (err) {
+    toast.error(err.message)
+  }
+}
+
+async function remove(item) {
+  const tip = item.builtin
+    ? `删除内置源「${item.name}」？之后可在页面底部恢复。`
+    : `删除自定义源「${item.name}」？此操作不可恢复。`
+  // eslint-disable-next-line no-alert
+  if (!window.confirm(tip)) return
+
+  removingKey.value = item.key
+  try {
+    await deleteDataSource(item.key)
+    toast.success(`已删除 ${item.name}`)
+    editing.value = null
+    await load()
+  } catch (err) {
+    toast.error(err.message)
+  } finally {
+    removingKey.value = ''
+  }
+}
+
+async function restore(entry) {
+  try {
+    await restoreDataSource(entry.key)
+    toast.success(`已恢复 ${entry.name}`)
+    await load()
+  } catch (err) {
+    toast.error(err.message)
   }
 }
 
@@ -82,6 +140,10 @@ async function checkAll() {
   }
 }
 
+const editingItem = computed(
+  () => items.value.find((i) => i.key === editing.value) || null,
+)
+
 function open(item) {
   editing.value = item.key
   draft.value = {
@@ -118,8 +180,11 @@ onMounted(load)
   <div class="space-y-4">
     <div class="flex flex-wrap items-center gap-2">
       <p class="text-xs text-gray-500">点击卡片可改地址、请求间隔与 Cookie</p>
+      <button class="btn-ghost ml-auto px-3 py-1.5 text-xs" @click="openCreate">
+        添加数据源
+      </button>
       <button
-        class="btn-ghost ml-auto px-3 py-1.5 text-xs"
+        class="btn-ghost px-3 py-1.5 text-xs"
         :disabled="checkingAll"
         @click="checkAll"
       >
@@ -143,6 +208,13 @@ onMounted(load)
             <div class="flex items-center gap-2">
               <span class="h-2 w-2 shrink-0 rounded-full" :class="STATUS[item.status].dot" />
               <span class="truncate text-sm font-medium text-gray-200">{{ item.name }}</span>
+              <span
+                v-if="item.protected"
+                class="badge shrink-0 bg-sky-950 text-sky-300"
+                title="核心数据源，不可删除"
+              >
+                核心
+              </span>
               <button
                 class="ml-auto shrink-0"
                 :title="item.enabled ? '已启用' : '已停用'"
@@ -179,6 +251,14 @@ onMounted(load)
               >
                 {{ checking === item.key ? '测试中' : '测试' }}
               </button>
+              <button
+                v-if="!item.protected"
+                class="btn-ghost px-2 py-0.5 text-[11px] text-red-400 hover:bg-red-950"
+                :disabled="removingKey === item.key"
+                @click.stop="remove(item)"
+              >
+                删除
+              </button>
             </div>
 
             <p v-if="item.status_message" class="text-[11px] text-gray-600">
@@ -203,12 +283,26 @@ onMounted(load)
             <div class="flex items-center gap-2">
               <span class="h-2 w-2 shrink-0 rounded-full" :class="STATUS[item.status].dot" />
               <span class="truncate text-sm text-gray-300">{{ item.name }}</span>
+              <span
+                v-if="!item.builtin"
+                class="badge shrink-0 bg-gray-800 text-gray-400"
+              >
+                自定义
+              </span>
               <button
                 class="btn-ghost ml-auto shrink-0 px-2 py-0.5 text-[11px]"
                 :disabled="checking === item.key"
                 @click.stop="check(item)"
               >
                 {{ checking === item.key ? '测试中' : '测试' }}
+              </button>
+              <button
+                v-if="!item.protected"
+                class="btn-ghost shrink-0 px-2 py-0.5 text-[11px] text-red-400 hover:bg-red-950"
+                :disabled="removingKey === item.key"
+                @click.stop="remove(item)"
+              >
+                删除
               </button>
             </div>
             <p class="truncate text-[11px] text-gray-500">{{ item.host }}</p>
@@ -219,6 +313,21 @@ onMounted(load)
               {{ item.status_message }}
             </p>
           </div>
+        </div>
+      </div>
+
+      <!-- 已删除的内置源，随时可以找回来 -->
+      <div v-if="removed.length" class="space-y-2 border-t border-gray-800 pt-4">
+        <p class="text-xs text-gray-500">已删除的内置源（恢复会重置为默认配置）</p>
+        <div class="flex flex-wrap gap-2">
+          <button
+            v-for="entry in removed"
+            :key="entry.key"
+            class="btn-ghost px-3 py-1 text-xs text-gray-400"
+            @click="restore(entry)"
+          >
+            {{ entry.name }} <span class="text-gray-600">· 恢复</span>
+          </button>
         </div>
       </div>
     </template>
@@ -263,9 +372,77 @@ onMounted(load)
           <span class="text-sm text-gray-400">直接走反爬绕过服务</span>
         </label>
 
-        <div class="flex justify-end gap-2 pt-1">
-          <button class="btn-ghost px-3 py-1.5 text-xs" @click="editing = null">取消</button>
+        <div class="flex items-center gap-2 pt-1">
+          <button
+            v-if="editingItem && !editingItem.protected"
+            class="btn-ghost px-3 py-1.5 text-xs text-red-400 hover:bg-red-950"
+            :disabled="removingKey === editing"
+            @click="remove(editingItem)"
+          >
+            删除
+          </button>
+          <span v-else-if="editingItem" class="text-[11px] text-gray-600">
+            核心数据源不可删除
+          </span>
+          <button class="btn-ghost ml-auto px-3 py-1.5 text-xs" @click="editing = null">
+            取消
+          </button>
           <button class="btn-primary px-3 py-1.5 text-xs" @click="save">保存</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 新增自定义源 -->
+    <div
+      v-if="creating"
+      class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+      @click.self="creating = false"
+    >
+      <div class="card w-full max-w-md space-y-3">
+        <p class="text-sm font-medium text-gray-200">添加数据源</p>
+        <p class="text-[11px] text-gray-600">
+          自定义源没有解析器，只能做连通性测试，不参与抓取
+        </p>
+
+        <div class="grid gap-3 sm:grid-cols-2">
+          <div>
+            <label class="label">标识</label>
+            <input v-model="newSource.key" class="input" placeholder="如 mysite" />
+          </div>
+          <div>
+            <label class="label">显示名</label>
+            <input v-model="newSource.name" class="input" placeholder="留空则用标识" />
+          </div>
+        </div>
+
+        <div>
+          <label class="label">地址</label>
+          <input v-model="newSource.host" class="input" placeholder="https://example.com" />
+        </div>
+
+        <div class="grid gap-3 sm:grid-cols-2">
+          <div>
+            <label class="label">请求间隔（秒）</label>
+            <input v-model="newSource.interval" class="input" placeholder="0 表示用默认" />
+          </div>
+          <div>
+            <label class="label">优先级</label>
+            <input v-model="newSource.priority" class="input" placeholder="越小越优先" />
+          </div>
+        </div>
+
+        <label class="flex items-center gap-2">
+          <input
+            v-model="newSource.bypass_first"
+            type="checkbox"
+            class="h-4 w-4 accent-emerald-500"
+          />
+          <span class="text-sm text-gray-400">直接走反爬绕过服务</span>
+        </label>
+
+        <div class="flex justify-end gap-2 pt-1">
+          <button class="btn-ghost px-3 py-1.5 text-xs" @click="creating = false">取消</button>
+          <button class="btn-primary px-3 py-1.5 text-xs" @click="create">添加</button>
         </div>
       </div>
     </div>
