@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import threading
 from datetime import datetime, timedelta
 
 from loguru import logger
@@ -546,6 +547,8 @@ def _update_save_path(torrent_hash: str, save_path: str) -> None:
 # ======================================================================
 # 并发翻译的线程数。翻译接口按请求计费/限流，不宜开太大
 TRANSLATE_WORKERS = 4
+# 连续这么多条翻译不出来就认定服务不可用，本轮不再继续
+TRANSLATE_FAILURE_LIMIT = 5
 
 
 def translate_title(title: str) -> str:
@@ -570,19 +573,35 @@ def translate_codes(limit: int = 50) -> int:
         return 0
 
     from concurrent.futures import ThreadPoolExecutor
+    from itertools import count as _count
+
+    # 翻译服务挂掉时每条都要撞一次超时，连续失败到阈值就本轮收工
+    failures = _count()
+    give_up = threading.Event()
 
     def run(item: tuple[str, str]) -> tuple[str, str]:
         code, title = item
+        if give_up.is_set():
+            return code, ""
         try:
-            return code, translate_title(title)
+            translated = translate_title(title)
         except Exception as exc:
             logger.debug(f"[{code}] 翻译失败: {exc}")
-            return code, ""
+            translated = ""
+
+        if translated:
+            return code, translated
+        if next(failures) >= TRANSLATE_FAILURE_LIMIT:
+            give_up.set()
+        return code, ""
 
     # 翻译接口单次 1~5 秒，串行 50 条要好几分钟
     workers = min(TRANSLATE_WORKERS, len(pending))
     with ThreadPoolExecutor(max_workers=workers) as pool:
         results = [(c, t) for c, t in pool.map(run, pending) if t]
+
+    if give_up.is_set():
+        logger.warning("翻译连续失败，本轮提前结束，请检查翻译服务是否可用")
 
     if not results:
         return 0

@@ -59,6 +59,10 @@ def save_config(body: ConfigRequest, current_user: str = Depends(get_current_use
     from app.modules.ptsite.rousi import Rousi
     Rousi.reset_token_cache()
 
+    # 域名或 Cookie 改了就该立刻重试，不必等熔断冷却
+    from app.modules.ptsite.nexus import NexusSite
+    NexusSite.reset_breakers()
+
     return ResponseEntity.ok(message=f"已更新 {len(updates)} 项配置")
 
 

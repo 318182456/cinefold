@@ -803,6 +803,108 @@ class TestActorSubscribeScope:
             assert row.limit_date == datetime.now().strftime("%Y-%m-%d")
 
 
+class TestNexusBreaker:
+    """站点不可用时熔断，别拿两万个订阅逐个去撞配额。"""
+
+    def _site(self, html):
+        import httpx
+
+        from app.modules.ptsite.nexus import NexusSite
+
+        class _Fake(NexusSite):
+            name = "TESTPT"
+            host = "https://example.test"
+
+            def __init__(self):
+                super().__init__(cookie="c")
+
+        calls = []
+
+        def fake_get(self, url, **kwargs):
+            calls.append(url)
+            return httpx.Response(200, text=html, request=httpx.Request("GET", url))
+
+        return _Fake, fake_get, calls
+
+    def test_trips_after_repeated_failures(self, monkeypatch):
+        import httpx
+
+        from app.modules.ptsite.nexus import FAILURE_THRESHOLD, NexusSite
+
+        NexusSite.reset_breakers()
+        Site, fake_get, calls = self._site("<html>短跳转页</html>")
+        monkeypatch.setattr(httpx.Client, "get", fake_get)
+
+        for _ in range(FAILURE_THRESHOLD + 5):
+            Site().search("ABC-123")
+
+        # 达到阈值后不再发请求
+        assert len(calls) == FAILURE_THRESHOLD
+        NexusSite.reset_breakers()
+
+    def test_rate_limit_page_trips(self, monkeypatch):
+        import httpx
+
+        from app.modules.ptsite.nexus import FAILURE_THRESHOLD, NexusSite
+
+        NexusSite.reset_breakers()
+        Site, fake_get, calls = self._site(
+            "您的账号今日访问次数已达上限，请明天再试!" + "x" * 9000
+        )
+        monkeypatch.setattr(httpx.Client, "get", fake_get)
+
+        for _ in range(FAILURE_THRESHOLD + 3):
+            Site().search("ABC-123")
+
+        assert len(calls) == FAILURE_THRESHOLD
+        NexusSite.reset_breakers()
+
+    def test_reset_allows_retry(self, monkeypatch):
+        import httpx
+
+        from app.modules.ptsite.nexus import FAILURE_THRESHOLD, NexusSite
+
+        NexusSite.reset_breakers()
+        Site, fake_get, calls = self._site("<html>短</html>")
+        monkeypatch.setattr(httpx.Client, "get", fake_get)
+
+        for _ in range(FAILURE_THRESHOLD + 2):
+            Site().search("ABC-123")
+        before = len(calls)
+
+        # 改了配置就该立刻重试
+        NexusSite.reset_breakers()
+        Site().search("ABC-123")
+        assert len(calls) == before + 1
+        NexusSite.reset_breakers()
+
+    def test_success_resets_counter(self, monkeypatch):
+        """偶发失败不该累积成熔断。"""
+        import httpx
+
+        from app.modules.ptsite.nexus import NexusSite
+
+        NexusSite.reset_breakers()
+        good = "<table class='torrents'>" + "x" * 9000 + "details.php</table>"
+        pages = ["<html>短</html>", good] * 6
+        calls = []
+
+        def fake_get(self, url, **kwargs):
+            html = pages[len(calls)]
+            calls.append(url)
+            return httpx.Response(200, text=html, request=httpx.Request("GET", url))
+
+        Site, _, _ = self._site("")
+        monkeypatch.setattr(httpx.Client, "get", fake_get)
+
+        for _ in range(len(pages)):
+            Site().search("ABC-123")
+
+        # 失败与成功交替，计数被成功清零，始终不熔断
+        assert len(calls) == len(pages)
+        NexusSite.reset_breakers()
+
+
 class TestRousiTokenCache:
     """token 缓存在类上，避免每次搜索都重新登录。"""
 

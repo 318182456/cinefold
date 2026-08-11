@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import os
 import re
+import threading
+import time
 from urllib.parse import urljoin
 
 import httpx
@@ -21,12 +23,21 @@ from app.utils.filters import has_chinese, has_uc, has_uhd
 # free 的标识在不同站点分别用图片 alt、span class 或背景色表示
 FREE_MARKERS = ("free", "免费", "pro_free")
 
+# 站点连续这么多次返回不可用（换域名、Cookie 失效、触发限流）就熔断
+FAILURE_THRESHOLD = 5
+# 熔断后多久再试一次
+COOLDOWN_SECONDS = 1800
+
 
 class NexusSite:
     """子类需要覆盖 name / host / cookie。"""
     name = "Nexus"
     host = ""
     search_path = "/torrents.php"
+
+    # 熔断状态按站点名共享：每次搜索都新建实例，存实例上等于没有
+    _breakers: dict[str, list] = {}
+    _breaker_lock = threading.Lock()
 
     def __init__(self, cookie: str = "", host: str = ""):
         settings = get_settings()
@@ -41,6 +52,48 @@ class NexusSite:
     def enabled(self) -> bool:
         return bool(self.cookie and self.host)
 
+    # ------------------------------------------------------------------
+    def _breaker(self) -> list:
+        """本站点的熔断状态 [连续失败数, 熔断到期时间]。"""
+        with NexusSite._breaker_lock:
+            state = NexusSite._breakers.get(self.name)
+            if state is None:
+                state = [0, 0.0]
+                NexusSite._breakers[self.name] = state
+            return state
+
+    def _is_tripped(self) -> bool:
+        state = self._breaker()
+        if state[1] and time.time() < state[1]:
+            return True
+        if state[1]:
+            # 冷却结束，放一次进去探路
+            state[0], state[1] = 0, 0.0
+            logger.info(f"[{self.name}] 熔断冷却结束，重新尝试")
+        return False
+
+    def _record_failure(self, reason: str) -> None:
+        state = self._breaker()
+        state[0] += 1
+        if state[0] >= FAILURE_THRESHOLD and not state[1]:
+            state[1] = time.time() + COOLDOWN_SECONDS
+            logger.warning(
+                f"[{self.name}] 连续 {state[0]} 次{reason}，"
+                f"暂停 {COOLDOWN_SECONDS // 60} 分钟。两万个订阅逐个重试只会"
+                f"把站点的日访问配额打满"
+            )
+
+    def _record_success(self) -> None:
+        state = self._breaker()
+        if state[0]:
+            state[0], state[1] = 0, 0.0
+
+    @classmethod
+    def reset_breakers(cls) -> None:
+        """配置变更后清掉熔断状态，改了域名或 Cookie 立即重试。"""
+        with cls._breaker_lock:
+            cls._breakers.clear()
+
     def _headers(self) -> dict:
         return {
             "Cookie": self.cookie,
@@ -54,6 +107,10 @@ class NexusSite:
     # ------------------------------------------------------------------
     def search(self, keyword: str) -> list[Torrent]:
         if not self.enabled:
+            return []
+
+        # 站点已知不可用时直接跳过，不然每个订阅都会去撞一次
+        if self._is_tripped():
             return []
 
         try:
@@ -74,11 +131,19 @@ class NexusSite:
                 html = response.text
         except Exception as exc:
             logger.warning(f"[{self.name}] 搜索请求失败: {exc}")
+            self._record_failure("请求失败")
+            return []
+
+        # 站点限流后每个请求都返回这个，继续打只会让配额恢复得更慢
+        if "访问次数已达上限" in html or "已达上限" in html[:2000]:
+            logger.warning(f"[{self.name}] 已触发站点访问频率限制")
+            self._record_failure("触发站点限流")
             return []
 
         # Cookie 失效时会被重定向到登录页
         if "takelogin.php" in html or "登录" in html[:500]:
             logger.warning(f"[{self.name}] Cookie 可能已失效")
+            self._record_failure("Cookie 失效")
             return []
 
         # 站点换域名后原地址只剩 JS 跳转页，页面很小且无种子表
@@ -87,8 +152,10 @@ class NexusSite:
                 f"[{self.name}] {self.host} 返回的不是种子列表页，"
                 f"站点可能已更换域名，请更新配置"
             )
+            self._record_failure("返回非种子列表页")
             return []
 
+        self._record_success()
         return self._parse(html, keyword)
 
     def _parse(self, html: str, code: str) -> list[Torrent]:
