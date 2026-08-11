@@ -5,7 +5,7 @@
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from loguru import logger
 from sqlalchemy import func, or_, select
@@ -355,6 +355,12 @@ def download_codes_async(codes: list[str], notify_result: bool = True) -> None:
     run_in_background(_task)
 
 
+# 演员没设起始日期时，只回溯这么多天，避免把全部历史作品拉进订阅
+ACTOR_FALLBACK_DAYS = 30
+# 单个演员单轮最多新增多少订阅，防止一次刷爆订阅列表
+ACTOR_SUBSCRIBE_LIMIT = 50
+
+
 def run_run_actor() -> int:
     """演员订阅：把已订阅演员的新作品加入订阅队列。"""
     with session_scope() as session:
@@ -373,16 +379,25 @@ def run_run_actor() -> int:
 
 
 def _subscribe_actor_new_works(actor_name: str, limit_date: str | None) -> int:
-    """把某演员在 limit_date 之后的作品标记为已订阅。"""
+    """把某演员在 limit_date 之后的作品标记为已订阅。
+
+    limit_date 为空时只看最近 ACTOR_FALLBACK_DAYS 天的新作。老数据里
+    这一列可能没值，不设兜底就会把该演员的全部历史作品一次性订阅掉。
+    """
+    if not limit_date:
+        limit_date = (
+            datetime.now() - timedelta(days=ACTOR_FALLBACK_DAYS)
+        ).strftime("%Y-%m-%d")
+        logger.debug(f"[{actor_name}] 未设起始日期，只订阅 {limit_date} 之后的新作")
+
     with session_scope() as session:
         query = select(Code).where(
             Code.casts.like(f"%{actor_name}%"),
             Code.status == CodeStatus.NONE,
+            Code.release_date >= limit_date,
         )
-        if limit_date:
-            query = query.where(Code.release_date >= limit_date)
 
-        rows = session.scalars(query).all()
+        rows = session.scalars(query.limit(ACTOR_SUBSCRIBE_LIMIT)).all()
 
         # 这里是批量改状态，不走 subscribe_code，过滤要自己判一次
         exclude_vr = bool((get_settings().default_filter or {}).get("exclude_vr"))
@@ -453,12 +468,18 @@ def cancel_subscribe(code: str) -> bool:
 
 
 def subscribe_actor(name: str, limit_date: str = "") -> bool:
+    """订阅演员。不指定起始日期时从今天算起。
+
+    留空等于把该演员的全部历史作品都订阅了——库里番号上万时
+    一个热门演员就能刷出几百条，几乎不会是用户想要的。
+    """
+    default_date = datetime.now().strftime("%Y-%m-%d")
     with session_scope() as session:
         row = session.get(Actor, name)
         if row is None:
-            session.add(Actor(name=name, limit_date=limit_date or None))
+            session.add(Actor(name=name, limit_date=limit_date or default_date))
         else:
-            row.limit_date = limit_date or row.limit_date
+            row.limit_date = limit_date or row.limit_date or default_date
     send_subscribe_actor_message(name)
     return True
 

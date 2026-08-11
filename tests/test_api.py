@@ -722,6 +722,87 @@ class TestVrCodeFilter:
         assert services.download_torrent("SSR-030") is False
 
 
+class TestActorSubscribeScope:
+    """演员订阅不能把全部历史作品一次性拉进来。"""
+
+    def _seed(self, entries):
+        from app.database.base import DBBase
+        from app.database.models import Code
+        from app.database.session import engine, session_scope
+
+        DBBase.metadata.create_all(engine)
+        with session_scope() as session:
+            for code, release in entries:
+                session.merge(Code(code=code, casts="测试演员", release_date=release))
+
+    def test_no_limit_date_only_takes_recent(self, monkeypatch):
+        from datetime import datetime, timedelta
+
+        from app import services
+        from app.database.models import Code, CodeStatus
+        from app.database.session import session_scope
+
+        recent = (datetime.now() - timedelta(days=3)).strftime("%Y-%m-%d")
+        self._seed([("OLD-001", "2015-01-01"), ("NEW-001", recent)])
+        monkeypatch.setattr(
+            services.get_settings(), "default_filter", {}, raising=False
+        )
+
+        services._subscribe_actor_new_works("测试演员", None)
+
+        with session_scope() as session:
+            assert session.get(Code, "OLD-001").status == CodeStatus.NONE
+            assert session.get(Code, "NEW-001").status == CodeStatus.SUBSCRIBED
+
+    def test_explicit_limit_date_is_respected(self, monkeypatch):
+        from app import services
+        from app.database.models import Code, CodeStatus
+        from app.database.session import session_scope
+
+        self._seed([("A-100", "2020-01-01"), ("A-200", "2024-06-01")])
+        monkeypatch.setattr(
+            services.get_settings(), "default_filter", {}, raising=False
+        )
+
+        services._subscribe_actor_new_works("测试演员", "2023-01-01")
+
+        with session_scope() as session:
+            assert session.get(Code, "A-100").status == CodeStatus.NONE
+            assert session.get(Code, "A-200").status == CodeStatus.SUBSCRIBED
+
+    def test_batch_is_capped(self, monkeypatch):
+        """单轮新增有上限，不会一次刷爆。"""
+        from app import services
+        monkeypatch.setattr(services, "ACTOR_SUBSCRIBE_LIMIT", 5)
+        monkeypatch.setattr(
+            services.get_settings(), "default_filter", {}, raising=False
+        )
+
+        self._seed([(f"CAP-{i:03d}", "2024-06-01") for i in range(20)])
+        added = services._subscribe_actor_new_works("测试演员", "2023-01-01")
+        assert added == 5
+
+    def test_subscribe_actor_defaults_to_today(self):
+        """新订阅演员时默认从今天算起，不回溯历史。"""
+        from datetime import datetime
+
+        from app import services
+        from app.database.base import DBBase
+        from app.database.models import Actor
+        from app.database.session import engine, session_scope
+
+        DBBase.metadata.create_all(engine)
+        with session_scope() as session:
+            existing = session.get(Actor, "新演员")
+            if existing is not None:
+                session.delete(existing)
+
+        services.subscribe_actor("新演员")
+        with session_scope() as session:
+            row = session.get(Actor, "新演员")
+            assert row.limit_date == datetime.now().strftime("%Y-%m-%d")
+
+
 class TestRousiTokenCache:
     """token 缓存在类上，避免每次搜索都重新登录。"""
 
