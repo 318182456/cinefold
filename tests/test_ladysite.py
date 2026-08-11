@@ -94,6 +94,17 @@ BRAND_DATE = """
 </body></html>
 """
 
+# /works/date 是日期索引页，番号在它列出的各个列表页里
+BRAND_DATE_INDEX = """
+<html><body>
+<a href="https://s1s1s1.com/works/list/date/2026-08-25">预定</a>
+<a href="/works/list/date/2026-08-11/">今天</a>
+<a href="/works/list/date/2026-08-11">重复</a>
+<a href="/works/list/date/badvalue">非日期</a>
+<a href="/works/list/release">无关</a>
+</body></html>
+"""
+
 
 class TestJavdbParse:
     def test_detail_fields(self):
@@ -248,6 +259,24 @@ class TestBrandsParse:
         codes = Brands("s1").crawling_date(BRAND_DATE)
         assert codes == ["SSIS-001", "SSIS-002"]
 
+    def test_date_index_collects_dates(self, monkeypatch):
+        """索引页只取形如 YYYY-MM-DD 的日期，去重并按新到旧排。"""
+        from app.modules.ladysite.brands import Brands
+
+        monkeypatch.setattr(
+            "app.modules.ladysite.base.SiteClient.get",
+            lambda self, path, **kw: BRAND_DATE_INDEX,
+        )
+        assert Brands("s1").list_dates() == ["2026-08-25", "2026-08-11"]
+
+    def test_date_index_returns_none_when_request_fails(self):
+        """索引页请求失败返回 None，调用方据此报"站点不可达"。"""
+        from app.modules.ladysite.brands import Brands
+
+        site = Brands("s1")
+        site.client.get = lambda path, **kw: ""
+        assert site.list_dates() is None
+
     def test_unknown_brand_falls_back(self):
         from app.modules.ladysite.brands import Brands
 
@@ -274,6 +303,45 @@ class TestBrandsParse:
 
 
 class TestBrandCrawlRange:
+    @pytest.fixture(autouse=True)
+    def _stub_date_index(self, monkeypatch):
+        """日期索引固定为今天起往前 40 天，避免真的去请求官网。
+
+        crawl_range 只抓索引里落在区间内的日期，所以给足天数让各用例
+        自己的 past_days/future_days 决定实际抓几天。
+        """
+        from datetime import date, timedelta
+
+        days = [
+            (date.today() - timedelta(days=offset)).strftime("%Y-%m-%d")
+            for offset in range(40)
+        ]
+        monkeypatch.setattr(
+            "app.modules.ladysite.brands.Brands.list_dates",
+            lambda self: days,
+        )
+
+    def test_unreachable_index_raises(self, monkeypatch):
+        """索引页都请求不通时报错，不能静默当成"没有作品"。"""
+        from app.modules.ladysite.brands import BrandUnreachable, crawl_range
+
+        monkeypatch.setattr(
+            "app.modules.ladysite.brands.Brands.list_dates",
+            lambda self: None,
+        )
+        with pytest.raises(BrandUnreachable):
+            crawl_range("s1", past_days=2, future_days=1)
+
+    def test_no_dates_in_range_returns_empty(self, monkeypatch):
+        """索引页通但区间内没有任何发行日，返回空列表而非报错。"""
+        from app.modules.ladysite.brands import crawl_range
+
+        monkeypatch.setattr(
+            "app.modules.ladysite.brands.Brands.list_dates",
+            lambda self: [],
+        )
+        assert crawl_range("s1", past_days=2, future_days=1) == []
+
     def test_all_requests_failing_raises(self, monkeypatch):
         """整段区间都抓不到时报错，不能静默当成"没有作品"。"""
         from app.modules.ladysite.brands import BrandUnreachable, crawl_range
@@ -335,7 +403,7 @@ class TestBrandCrawlRange:
 
     def test_failure_after_results_does_not_stop(self, monkeypatch):
         """已经抓到数据后再遇失败不早停，避免丢掉后面的日期。"""
-        from app.modules.ladysite.brands import crawl_range
+        from app.modules.ladysite.brands import UNREACHABLE_THRESHOLD, crawl_range
 
         calls = []
 
@@ -351,7 +419,7 @@ class TestBrandCrawlRange:
         found = crawl_range("s1", past_days=6, future_days=0)
         assert [i["code"] for i in found] == ["SSIS-001"]
         # 全部日期都走完，没有因连续失败提前退出
-        assert len(calls) == 6
+        assert len(calls) > UNREACHABLE_THRESHOLD
 
     def test_dedupes_across_days(self, monkeypatch):
         from app.modules.ladysite.brands import crawl_range

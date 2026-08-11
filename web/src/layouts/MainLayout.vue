@@ -67,7 +67,7 @@ onMounted(async () => {
 </script>
 
 <template>
-  <div class="min-h-screen lg:flex">
+  <div class="h-screen overflow-hidden lg:flex">
     <!-- 移动端遮罩 -->
     <div
       v-if="menuOpen"
@@ -129,7 +129,7 @@ onMounted(async () => {
 
     <!-- 主区 -->
     <div class="flex min-w-0 flex-1 flex-col">
-      <header class="sticky top-0 z-20 flex h-14 items-center gap-3 border-b border-gray-800 bg-gray-950/90 px-4 backdrop-blur lg:px-6">
+      <header class="z-20 flex h-14 shrink-0 items-center gap-3 border-b border-gray-800 bg-gray-950/90 px-4 backdrop-blur lg:px-6">
         <button class="rounded-lg p-1.5 text-gray-400 hover:bg-gray-800 lg:hidden" @click="menuOpen = true">
           <svg class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
             <path stroke-linecap="round" d="M4 6h16M4 12h16M4 18h16" />
@@ -138,7 +138,7 @@ onMounted(async () => {
         <h1 class="text-sm font-medium text-gray-300">{{ route.meta.title || '' }}</h1>
       </header>
 
-      <main class="flex-1 p-4 lg:p-6">
+      <main class="min-h-0 flex-1 overflow-y-auto p-4 lg:p-6">
         <RouterView v-slot="{ Component }">
           <Transition
             enter-active-class="transition duration-150"

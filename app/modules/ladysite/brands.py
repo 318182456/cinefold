@@ -55,6 +55,32 @@ class Brands:
         host = BRANDS.get(self.brand, BRANDS["s1"])
         self.client = SiteClient(host, interval=1.5)
 
+    def list_dates(self) -> list[str] | None:
+        """取官网挂出的全部发行日期。
+
+        /works/date 只是索引页，列出形如 /works/list/date/2026-08-11 的链接，
+        番号在那些列表页里。官网只挂确实有作品的日期，据此就不用拿一整段
+        日期区间去逐个撞超时。
+
+        返回 None 表示请求失败，空列表表示页面上一个日期都没有。
+        """
+        html = self.client.get("/works/date")
+        if not html:
+            return None
+
+        try:
+            doc = PyQuery(html)
+            days = []
+            for link in doc("a[href*='/works/list/date/']").items():
+                day = (link.attr("href") or "").rstrip("/").split("/")[-1]
+                # 只认 YYYY-MM-DD，避免把分页或锚点当成日期
+                if len(day) == 10 and day[4] == "-" and day[7] == "-":
+                    days.append(day)
+            return sorted(dict.fromkeys(days), reverse=True)
+        except Exception as exc:
+            logger.debug(f"[{self.brand}] 解析日期索引失败: {exc}")
+            return []
+
     def get_date_rank(self, target: str = "") -> list[str] | None:
         """按发行日期取新片番号。target 为空时取今天。
 
@@ -62,7 +88,7 @@ class Brands:
         调用方要能区分，否则站点不可达会被当成"没有作品"。
         """
         day = target or date.today().strftime("%Y-%m-%d")
-        html = self.client.get("/works/date", params={"date": day})
+        html = self.client.get(f"/works/list/date/{day}")
         if not html:
             return None
         return self.crawling_date(html)
@@ -71,7 +97,7 @@ class Brands:
         try:
             doc = PyQuery(html)
             codes = []
-            # 列表项链接形如 /works/detail/SSIS001/
+            # 列表项链接形如 /works/detail/SSIS001
             for link in doc("a[href*='/works/detail/']").items():
                 href = link.attr("href") or ""
                 raw = href.rstrip("/").split("/")[-1]
@@ -131,16 +157,24 @@ def crawl_recent(brand: str, days: int = 3) -> list[str]:
 def crawl_range(brand: str, past_days: int = 3, future_days: int = 0) -> list[dict]:
     """按日期区间抓番号，返回 [{code, date}]。
 
-    厂牌官网的 /works/date 页对未来日期同样有数据，用它就能看到预定发布的作品。
+    官网的日期索引里也挂未来日期，用它就能看到预定发布的作品。
     """
-    # 从最远的未来排到最早的过去，让即将发布的排在前面
-    offsets = list(range(future_days, 0, -1)) + [0] + [-d for d in range(1, past_days)]
-    days = [
-        (date.today() + timedelta(days=offset)).strftime("%Y-%m-%d")
-        for offset in offsets
-    ]
-
     site = Brands(brand)
+
+    today = date.today()
+    low = (today - timedelta(days=max(past_days, 0))).strftime("%Y-%m-%d")
+    high = (today + timedelta(days=max(future_days, 0))).strftime("%Y-%m-%d")
+
+    # 官网只挂出确实有作品的日期，用索引页筛出区间内的那几天，
+    # 比拿整段日期逐个撞超时快得多
+    listed = site.list_dates()
+    if listed is None:
+        raise BrandUnreachable(f"{brand} 官网日期索引页请求失败，可能需要配置代理")
+
+    days = [day for day in listed if low <= day <= high]
+    if not days:
+        return []
+
     out: list[dict] = []
     seen: set[str] = set()
     failed = 0

@@ -82,7 +82,8 @@ export const getRecommend = (limit = 15) => http.get('/codes/recommend', { param
 export const translateTitles = () => http.post('/codes/translate')
 
 // ---------------------------------------------------------------- 榜单
-export const getRank = (rankType = '') => http.get('/rank', { params: { rank_type: rankType } })
+export const getRank = (rankType = '', limit = 120) =>
+  http.get('/rank', { params: { rank_type: rankType, limit } })
 export const subscribeRank = () => http.post('/rank/subscribe')
 export const getHot = () => http.get('/hot')
 export const getBrands = () => http.get('/brands')
