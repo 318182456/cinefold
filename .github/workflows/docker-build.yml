@@ -53,9 +53,8 @@ jobs:
             echo "VERSION 未变更（$VALUE），跳过 latest"
           fi
 
-      - name: 设置 QEMU
-        uses: docker/setup-qemu-action@v3
-
+      # 只构建 amd64，不需要 QEMU 跨架构模拟。要加回 arm64 时，
+      # 把 docker/setup-qemu-action@v3 重新插回这里
       - name: 设置 Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -90,6 +89,10 @@ jobs:
 
       - name: 生成镜像标签
         id: meta
+        # 不打 sha tag：每个 tag 都是一次 registry 写入，日常提交逐次累积容易
+        # 触发 GHCR 次级速率限制，而 sha-xxxxxxx 这类 tag 平时根本不会去拉。
+        # 需要定位某次提交的镜像时，看 VERSION tag 或构建日志即可。
+        # 注：tags 是多行字符串，里面不能写 # 注释，会被当成 tag 定义
         uses: docker/metadata-action@v5
         with:
           images: |
@@ -100,10 +103,13 @@ jobs:
             type=raw,value=${{ steps.version.outputs.value }},enable={{is_default_branch}}
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            # sha tag 只在发版时打：每个 tag 都是一次 registry 写入，日常提交
-            # 逐次累积容易触发 GHCR 次级速率限制，而这些 tag 平时用不上
-            type=sha,format=short,enable=${{ steps.version.outputs.released == 'true' }}
 
+      # 只出 linux/amd64。多架构下每个平台都要单独写一份 manifest（外加
+      # attestation），registry 写入次数翻倍，更容易撞上 GHCR 的次级速率限制；
+      # arm64 在 runner 上还得靠 QEMU 模拟编译，慢得多。
+      # ARM 设备（树莓派、ARM 版 NAS）需要镜像时，把 platforms 改回
+      # linux/amd64,linux/arm64 并把 setup-qemu-action 加回去。
+      #
       # GHCR 的次级速率限制会把推送打回 403，正文里写的是 secondary rate limit。
       # 镜像层此时通常已经推完，只差写 tag，等一会儿重试就能过去 —— 所以失败
       # 不直接判死，退避后再试两次。构建缓存还在，重试几乎只花推送的时间。
@@ -113,7 +119,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
@@ -133,7 +139,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
@@ -152,7 +158,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
