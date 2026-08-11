@@ -133,24 +133,51 @@ def pop_state(state: str) -> dict:
 
 
 # ----------------------------------------------------------------------
+def _post_token(client: httpx.Client, config: dict, form: dict, basic: bool) -> httpx.Response:
+    """按指定的客户端认证方式请求 token 端点。"""
+    settings = get_settings()
+    data = dict(form)
+    auth = None
+    if basic:
+        # client_secret_basic：凭据放在 Authorization 头，body 里不再重复 secret
+        auth = (settings.oidc_client_id, settings.oidc_client_secret)
+    else:
+        data["client_id"] = settings.oidc_client_id
+        data["client_secret"] = settings.oidc_client_secret
+    return client.post(
+        config["token_endpoint"],
+        data=data,
+        auth=auth,
+        headers={"Accept": "application/json"},
+    )
+
+
 def exchange_code(code: str, redirect_uri: str) -> dict:
     """用授权码换 token。"""
     settings = get_settings()
     config = discover()
 
+    form = {
+        "grant_type": "authorization_code",
+        "code": code,
+        "redirect_uri": redirect_uri,
+    }
+
+    # 提供商声明支持哪几种客户端认证方式。多数实现默认只认 basic，
+    # 声明里没写就按规范的默认值 client_secret_basic 处理。
+    methods = config.get("token_endpoint_auth_methods_supported") or ["client_secret_basic"]
+    prefer_basic = "client_secret_post" not in methods
+
     try:
         with httpx.Client(timeout=20, proxy=settings.proxy or None) as client:
-            response = client.post(
-                config["token_endpoint"],
-                data={
-                    "grant_type": "authorization_code",
-                    "code": code,
-                    "redirect_uri": redirect_uri,
-                    "client_id": settings.oidc_client_id,
-                    "client_secret": settings.oidc_client_secret,
-                },
-                headers={"Accept": "application/json"},
-            )
+            response = _post_token(client, config, form, basic=prefer_basic)
+            # 认证方式判断错了会得到 401/invalid_client，换另一种再试一次。
+            # 授权码是一次性的，但被拒的请求不会消耗它。
+            if response.status_code in (400, 401) and "invalid_client" in response.text:
+                logger.warning(
+                    f"OIDC 客户端认证被拒（{'basic' if prefer_basic else 'post'}），改用另一种方式重试"
+                )
+                response = _post_token(client, config, form, basic=not prefer_basic)
     except Exception as exc:
         raise OIDCError(f"换取 token 失败: {exc}") from exc
 

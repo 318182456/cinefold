@@ -79,6 +79,139 @@ class TestOidcState:
             oidc.pop_state("old")
 
 
+class TestOidcTokenExchange:
+    """客户端认证方式。选错会被提供商以 invalid_client 拒掉。"""
+
+    INVALID_CLIENT = (
+        '{"error":"invalid_client","error_description":'
+        '"Client authentication failed."}'
+    )
+
+    @pytest.fixture
+    def capture(self, settings, monkeypatch):
+        """替换掉 discovery 与 httpx，记录每次 token 请求怎么带的凭据。"""
+        import httpx
+
+        from app.modules.auth import oidc
+
+        monkeypatch.setattr(settings, "oidc_client_id", "cid", raising=False)
+        monkeypatch.setattr(settings, "oidc_client_secret", "sec", raising=False)
+        monkeypatch.setattr(settings, "proxy", "", raising=False)
+
+        calls: list[dict] = []
+        state = {"methods": None, "responses": []}
+
+        def fake_discover():
+            config = {
+                "authorization_endpoint": "https://auth.test/authorize",
+                "token_endpoint": "https://auth.test/token",
+            }
+            if state["methods"] is not None:
+                config["token_endpoint_auth_methods_supported"] = state["methods"]
+            return config
+
+        monkeypatch.setattr(oidc, "discover", fake_discover)
+
+        class FakeClient:
+            def __init__(self, **kwargs):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def post(self, url, data=None, auth=None, headers=None):
+                calls.append({"data": dict(data or {}), "auth": auth})
+                status, text = state["responses"][len(calls) - 1]
+                return httpx.Response(
+                    status, text=text, request=httpx.Request("POST", url)
+                )
+
+        monkeypatch.setattr(httpx, "Client", FakeClient)
+        return calls, state
+
+    def test_prefers_basic_when_post_unsupported(self, capture):
+        """提供商只声明 basic，就该走 Authorization 头。"""
+        from app.modules.auth import oidc
+
+        calls, state = capture
+        state["methods"] = ["client_secret_basic"]
+        state["responses"] = [(200, '{"access_token":"tok"}')]
+
+        assert oidc.exchange_code("code", "https://app.test/cb")["access_token"] == "tok"
+        assert len(calls) == 1
+        assert calls[0]["auth"] == ("cid", "sec")
+        # 用了 basic 就不该再把 secret 塞进 body
+        assert "client_secret" not in calls[0]["data"]
+
+    def test_uses_post_when_declared(self, capture):
+        from app.modules.auth import oidc
+
+        calls, state = capture
+        state["methods"] = ["client_secret_post"]
+        state["responses"] = [(200, '{"id_token":"jwt"}')]
+
+        oidc.exchange_code("code", "https://app.test/cb")
+        assert calls[0]["auth"] is None
+        assert calls[0]["data"]["client_secret"] == "sec"
+
+    def test_defaults_to_basic_without_declaration(self, capture):
+        """discovery 里没声明时按规范默认 client_secret_basic。"""
+        from app.modules.auth import oidc
+
+        calls, state = capture
+        state["methods"] = None
+        state["responses"] = [(200, '{"access_token":"tok"}')]
+
+        oidc.exchange_code("code", "https://app.test/cb")
+        assert calls[0]["auth"] == ("cid", "sec")
+
+    def test_retries_with_other_method_on_invalid_client(self, capture):
+        """声明与实际不符时，换另一种方式重试一次。"""
+        from app.modules.auth import oidc
+
+        calls, state = capture
+        state["methods"] = ["client_secret_post"]
+        state["responses"] = [
+            (401, self.INVALID_CLIENT),
+            (200, '{"access_token":"tok"}'),
+        ]
+
+        assert oidc.exchange_code("code", "https://app.test/cb")["access_token"] == "tok"
+        assert len(calls) == 2
+        assert calls[0]["auth"] is None
+        assert calls[1]["auth"] == ("cid", "sec")
+
+    def test_gives_up_after_both_methods_fail(self, capture):
+        """两种都被拒就报错，不再重试。"""
+        from app.modules.auth import oidc
+
+        calls, state = capture
+        state["methods"] = ["client_secret_basic"]
+        state["responses"] = [
+            (401, self.INVALID_CLIENT),
+            (401, self.INVALID_CLIENT),
+        ]
+
+        with pytest.raises(oidc.OIDCError, match="401"):
+            oidc.exchange_code("code", "https://app.test/cb")
+        assert len(calls) == 2
+
+    def test_other_errors_not_retried(self, capture):
+        """invalid_grant 是授权码本身的问题，重试只会再失败一次。"""
+        from app.modules.auth import oidc
+
+        calls, state = capture
+        state["methods"] = ["client_secret_basic"]
+        state["responses"] = [(400, '{"error":"invalid_grant"}')]
+
+        with pytest.raises(oidc.OIDCError):
+            oidc.exchange_code("code", "https://app.test/cb")
+        assert len(calls) == 1
+
+
 class TestOidcUsername:
     def test_bind_username_wins(self, settings, monkeypatch):
         from app.modules.auth import oidc

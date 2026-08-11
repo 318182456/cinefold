@@ -696,16 +696,16 @@ onMounted(async () => {
                 当前浏览器或环境不支持 Passkey，需要 HTTPS
               </p>
 
-              <p v-else-if="authOrigin" class="text-[11px] text-gray-600">
-                当前生效的 RP ID：
-                <code class="text-gray-400">{{ authOrigin.rp_id || '—' }}</code>
-                ，校验 origin：
-                <code :class="originMismatch ? 'text-amber-400' : 'text-gray-400'">
-                  {{ authOrigin.origin }}
-                </code>
-              </p>
-
               <template v-else>
+                <p v-if="authOrigin" class="text-[11px] text-gray-600">
+                  当前生效的 RP ID：
+                  <code class="text-gray-400">{{ authOrigin.rp_id || '—' }}</code>
+                  ，校验 origin：
+                  <code :class="originMismatch ? 'text-amber-400' : 'text-gray-400'">
+                    {{ authOrigin.origin }}
+                  </code>
+                </p>
+
                 <div class="flex flex-wrap items-center gap-2">
                   <input
                     v-model="passkeyLabel"
