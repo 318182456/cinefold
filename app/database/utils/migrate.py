@@ -96,6 +96,24 @@ CONVERTERS: dict[str, dict[str, Any]] = {
 
 DATETIME_COLUMNS = {"create_time", "update_time"}
 
+# 表级行过滤：只搬满足条件的行。
+#
+# actor 表在老版本里是演员资料缓存（抓番号时顺手存下的演员名和头像），
+# 新版把同一张表重新定义成了订阅表。整表搬过来，几百条资料记录会全部
+# 变成"已订阅"，演员订阅任务每轮都会拿它们去刷新番号。
+# 真正的订阅一定带 limit_date（subscribe_actor 为空时会填当天），
+# 靠这一列就能把两种语义分开。
+ROW_FILTERS: dict[str, Any] = {
+    "actor": lambda row: bool(str(row.get("limit_date") or "").strip()),
+}
+
+# 老库没有这些列时，说明整张表都是旧语义的数据，一行都不该搬。
+# actor.limit_date 是新版才加的列（见 database/utils/setup.py 的字段迁移），
+# 老库缺这一列，就无从区分资料缓存和真实订阅。
+REQUIRED_COLUMNS: dict[str, set[str]] = {
+    "actor": {"limit_date"},
+}
+
 # 老库允许为空、新库声明了 NOT NULL 的列，补个占位值免得整行被约束丢掉。
 # history 里确实存在 code 为空但 save_path 有值的行，属于有效的下载记录。
 NOT_NULL_FALLBACK: dict[str, dict[str, Any]] = {
@@ -209,12 +227,27 @@ def _peek_tables(path: Path) -> dict[str, int]:
     counts: dict[str, int] = {}
     try:
         engine = create_engine(f"sqlite:///{path}", connect_args={"timeout": 5})
-        names = set(inspect(engine).get_table_names())
+        inspector = inspect(engine)
+        names = set(inspector.get_table_names())
         with engine.connect() as conn:
             for model in TABLES:
                 table = model.__tablename__
                 if table not in names:
                     continue
+
+                # 预览的数字要和实际会搬的行数一致，否则界面显示几百行、
+                # 真正搬过去只有几行，看起来像是迁移出了问题
+                if table in ROW_FILTERS:
+                    source_columns = {c["name"] for c in inspector.get_columns(table)}
+                    if REQUIRED_COLUMNS.get(table, set()) - source_columns:
+                        counts[table] = 0
+                        continue
+                    columns = [
+                        c.name for c in model.__table__.columns if c.name in source_columns
+                    ]
+                    counts[table] = _count_source_kept(engine, model, columns)
+                    continue
+
                 counts[table] = conn.execute(
                     select(func.count()).select_from(model.__table__)
                 ).scalar_one()
@@ -269,11 +302,15 @@ def _iter_batches(
     """
     table = model.__tablename__
     stmt = select(*[model.__table__.c[col] for col in columns])
+    keep = ROW_FILTERS.get(table)
 
     with source.connect() as conn:
         result = conn.execution_options(yield_per=BATCH_SIZE).execute(stmt)
         for chunk in result.partitions(BATCH_SIZE):
-            yield [_row_to_dict(row, columns, table) for row in chunk]
+            rows = [_row_to_dict(row, columns, table) for row in chunk]
+            if keep is not None:
+                rows = [row for row in rows if keep(row)]
+            yield rows
 
 
 def migrate(source_name: str, target_url: str = "", dry_run: bool = False) -> dict:
@@ -372,10 +409,22 @@ def _run(source_engine: Engine, target_url: str, result: MigrateResult) -> None:
                 item.error = "没有可迁移的列"
                 continue
 
+            # 缺了判据列就没法区分新旧语义，整表跳过好过搬进一堆脏数据
+            missing = REQUIRED_COLUMNS.get(table, set()) - source_columns
+            if missing:
+                item.error = f"源表缺少 {'、'.join(sorted(missing))} 列，跳过"
+                logger.info(f"[迁移] {table}: {item.error}")
+                continue
+
             with source_engine.connect() as conn:
                 item.source_rows = conn.execute(
                     select(func.count()).select_from(model.__table__)
                 ).scalar_one()
+
+            # 带行过滤的表，源行数按过滤后口径统计，否则 skipped 会把
+            # 主动过滤掉的行也算成"不满足约束"，日志读起来像是出了问题
+            if table in ROW_FILTERS:
+                item.source_rows = _count_source_kept(source_engine, model, columns)
 
             if result.dry_run:
                 logger.info(f"[迁移试算] {table}: {item.source_rows} 行")
@@ -402,6 +451,13 @@ def _run(source_engine: Engine, target_url: str, result: MigrateResult) -> None:
     finally:
         if target_engine is not None:
             target_engine.dispose()
+
+
+def _count_source_kept(
+    source_engine: Engine, model: type[DBBase], columns: list[str]
+) -> int:
+    """源库里通过行过滤的行数。复用取数逻辑，保证和实际搬运口径一致。"""
+    return sum(len(batch) for batch in _iter_batches(source_engine, model, columns))
 
 
 def _count_rows(make_session: Any, model: type[DBBase]) -> int:
