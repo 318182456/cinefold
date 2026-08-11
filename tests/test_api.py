@@ -803,6 +803,91 @@ class TestActorSubscribeScope:
             assert row.limit_date == datetime.now().strftime("%Y-%m-%d")
 
 
+class TestBtAutoDownload:
+    """BT 源可以只参与搜索，不进自动选种。"""
+
+    def _torrents(self):
+        from app.schemas.torrent import Torrent
+        return [
+            Torrent(id=1, site="BT", title="t1", seeders=100),
+            Torrent(id=2, site="MTeam", title="t2", seeders=10),
+        ]
+
+    def test_bt_skipped_when_disabled(self, monkeypatch):
+        from app import services
+
+        monkeypatch.setattr(services, "search_torrents", lambda code: self._torrents())
+        monkeypatch.setattr(
+            services.get_settings(), "bt_auto_download", False, raising=False
+        )
+        assert services.find_torrent("ABC-123").site == "MTeam"
+
+    def test_bt_used_when_enabled(self, monkeypatch):
+        from app import services
+
+        monkeypatch.setattr(services, "search_torrents", lambda code: self._torrents())
+        monkeypatch.setattr(
+            services.get_settings(), "bt_auto_download", True, raising=False
+        )
+        assert services.find_torrent("ABC-123").site == "BT"
+
+    def test_none_when_only_bt_and_disabled(self, monkeypatch):
+        from app import services
+        from app.schemas.torrent import Torrent
+
+        monkeypatch.setattr(
+            services, "search_torrents",
+            lambda code: [Torrent(id=1, site="BT", title="t")],
+        )
+        monkeypatch.setattr(
+            services.get_settings(), "bt_auto_download", False, raising=False
+        )
+        assert services.find_torrent("ABC-123") is None
+
+
+class TestDetailRace:
+    """番号情报多站并发，谁先出结果用谁。"""
+
+    def test_returns_first_success(self, monkeypatch):
+        import time
+
+        from app.modules import ladysite
+
+        def fake_fetch(site_name, code):
+            if site_name == "javbus":
+                time.sleep(0.5)          # 慢的那个
+                return {"code": code, "title": "from bus"}
+            return {"code": code, "title": "from db"}
+
+        monkeypatch.setattr(ladysite, "_fetch_detail", fake_fetch)
+        monkeypatch.setattr(ladysite, "_enabled_sites", lambda: ("javbus", "javdb"))
+
+        start = time.perf_counter()
+        detail = ladysite.get_code_detail("ABC-123")
+        elapsed = time.perf_counter() - start
+
+        # 快的先返回，不必等慢的那个
+        assert detail["title"] == "from db"
+        assert elapsed < 0.4
+
+    def test_falls_back_when_first_empty(self, monkeypatch):
+        from app.modules import ladysite
+
+        def fake_fetch(site_name, code):
+            return {"code": code, "title": "ok"} if site_name == "javdb" else {}
+
+        monkeypatch.setattr(ladysite, "_fetch_detail", fake_fetch)
+        monkeypatch.setattr(ladysite, "_enabled_sites", lambda: ("javbus", "javdb"))
+        assert ladysite.get_code_detail("ABC-123")["title"] == "ok"
+
+    def test_all_empty_returns_empty(self, monkeypatch):
+        from app.modules import ladysite
+
+        monkeypatch.setattr(ladysite, "_fetch_detail", lambda s, c: {})
+        monkeypatch.setattr(ladysite, "_enabled_sites", lambda: ("javbus", "javdb"))
+        assert ladysite.get_code_detail("ABC-123") == {}
+
+
 class TestBulkCancel:
     """批量取消订阅——只动已订阅的，别碰下载中/已入库。"""
 

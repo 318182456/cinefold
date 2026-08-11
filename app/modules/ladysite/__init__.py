@@ -39,21 +39,54 @@ def _enabled_sites() -> tuple[str, ...]:
 # 详情
 # ----------------------------------------------------------------------
 def get_code_detail(code: str) -> dict:
-    """抓取番号详情，返回可直接写库的字典。"""
+    """抓取番号详情，返回可直接写库的字典。
+
+    多个站点并发抓，谁先给出结果就用谁。串行 fallback 时前一个站点
+    卡住或超时，后面的要干等——两站不同域名，节流互不影响，没必要排队。
+    """
     if not code:
         return {}
 
-    for site_name in _enabled_sites():
-        site = _get_site(site_name)
-        if site is None:
-            continue
-        try:
-            info = site.crawler_original(code)
-            if info and info.title:
-                logger.debug(f"[{code}] 从 {site_name} 获取到详情")
-                return info.to_dict()
-        except Exception as exc:
-            logger.debug(f"[{code}] {site_name} 抓取失败: {exc}")
+    sites = _enabled_sites()
+    if len(sites) == 1:
+        return _fetch_detail(sites[0], code)
+
+    from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+
+    pool = ThreadPoolExecutor(max_workers=len(sites))
+    try:
+        futures = {pool.submit(_fetch_detail, name, code): name for name in sites}
+        pending = set(futures)
+        while pending:
+            done, pending = wait(pending, return_when=FIRST_COMPLETED)
+            for future in done:
+                try:
+                    detail = future.result()
+                except Exception as exc:
+                    logger.debug(f"[{code}] {futures[future]} 抓取异常: {exc}")
+                    continue
+                if detail:
+                    return detail
+    finally:
+        # 已经拿到结果就不等剩下的站点
+        pool.shutdown(wait=False, cancel_futures=True)
+    return {}
+
+
+def _fetch_detail(site_name: str, code: str) -> dict:
+    """单站抓详情，失败返回空字典。"""
+    site = _get_site(site_name)
+    if site is None:
+        return {}
+    try:
+        info = site.crawler_original(code)
+    except Exception as exc:
+        logger.debug(f"[{code}] {site_name} 抓取失败: {exc}")
+        return {}
+
+    if info and info.title:
+        logger.debug(f"[{code}] 从 {site_name} 获取到详情")
+        return info.to_dict()
     return {}
 
 
@@ -64,17 +97,41 @@ def search_code(keyword: str) -> list[dict]:
 
 
 def get_actor_photo(name: str) -> str:
-    for site_name in _enabled_sites():
-        site = _get_site(site_name)
-        if site is None or not hasattr(site, "search_actor"):
-            continue
-        try:
-            actor = site.search_actor(name)
-            if actor and actor.photo:
-                return actor.photo
-        except Exception as exc:
-            logger.debug(f"[{name}] {site_name} 查演员失败: {exc}")
+    """查演员头像。同 get_code_detail，多站并发取最快的那个。"""
+    sites = _enabled_sites()
+    if len(sites) == 1:
+        return _fetch_actor_photo(sites[0], name)
+
+    from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+
+    pool = ThreadPoolExecutor(max_workers=len(sites))
+    try:
+        futures = {pool.submit(_fetch_actor_photo, s, name): s for s in sites}
+        pending = set(futures)
+        while pending:
+            done, pending = wait(pending, return_when=FIRST_COMPLETED)
+            for future in done:
+                try:
+                    photo = future.result()
+                except Exception:
+                    continue
+                if photo:
+                    return photo
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
     return ""
+
+
+def _fetch_actor_photo(site_name: str, name: str) -> str:
+    site = _get_site(site_name)
+    if site is None or not hasattr(site, "search_actor"):
+        return ""
+    try:
+        actor = site.search_actor(name)
+    except Exception as exc:
+        logger.debug(f"[{name}] {site_name} 查演员失败: {exc}")
+        return ""
+    return actor.photo if actor and actor.photo else ""
 
 
 # ----------------------------------------------------------------------

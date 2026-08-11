@@ -217,6 +217,9 @@ class Settings:
     bt_json_data: str = ""
     bt_header: str = ""
     bt_method: str = "get"
+    # 关掉后 BT 源仍参与搜索、结果可见，但自动下载不会选它的种子。
+    # 适合来源不稳定、只想手动挑的场景
+    bt_auto_download: bool = True
 
     # --- 数据库 ---
     # 留空则使用 DATA_DIR 下的 SQLite 文件；填了就连 PostgreSQL 等外部库
@@ -379,6 +382,7 @@ def load_settings() -> Settings:
         bt_json_data=_env("BT_JSON_DATA"),
         bt_header=_env("BT_HEADER"),
         bt_method=_env("BT_METHOD", "get").strip("'\""),
+        bt_auto_download=_env_bool("BT_AUTO_DOWNLOAD", True),
 
         database_url=_env("DATABASE_URL"),
         db_pool_size=_env_int("DB_POOL_SIZE", 5),

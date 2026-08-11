@@ -28,6 +28,9 @@ from app.utils.filters import filter_torrents, has_vr, sort_torrents
 # 过滤排序仍每次现算，改了过滤条件不必等缓存过期。
 TORRENT_CACHE_TTL = 1800
 
+# 与 app.modules.bt.bt.BT.name 一致，用于按站点过滤
+BT_SITE_NAME = "BT"
+
 
 def search_torrents(
     code: str, use_filter: bool = True, refresh: bool = False
@@ -98,8 +101,14 @@ def build_site_priority() -> list[str]:
 
 
 def find_torrent(code: str) -> Torrent | None:
-    """取排序后最优的一个种子。"""
+    """取排序后最优的一个种子。自动下载专用。
+
+    关掉 BT_AUTO_DOWNLOAD 时跳过 BT 源——它仍参与搜索、结果在页面上
+    可见可手动下载，只是不进自动选种。
+    """
     results = search_torrents(code)
+    if not get_settings().bt_auto_download:
+        results = [t for t in results if t.site != BT_SITE_NAME]
     return results[0] if results else None
 
 

@@ -122,3 +122,5 @@ export const getMigrateProgress = () => http.get('/migrate/progress')
 export const testMigrateTarget = (payload) => http.post('/migrate/test', payload)
 export const startMigrate = (payload) => http.post('/migrate/start', payload)
 export const getImageCacheStats = () => http.get('/image-cache/stats')
+export const bulkCancelSubscribe = (payload) =>
+  http.post('/codes/cancel/bulk', payload)
