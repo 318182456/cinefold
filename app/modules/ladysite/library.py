@@ -17,6 +17,12 @@ class Library:
     name = "javlibrary"
 
     def __init__(self, host: str = ""):
+        if not host:
+            client = SiteClient.from_source(self.name)
+            if client is not None:
+                self.client = client
+                return
+
         # JavLibrary 直连稳定 403，配了 bypass 就直接走
         self.client = SiteClient(host or HOST, interval=2.0, bypass_first=True)
 

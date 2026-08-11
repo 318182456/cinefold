@@ -186,15 +186,12 @@ onMounted(load)
 
       <template v-else-if="shown.length">
         <div class="grid gap-3 lg:grid-cols-2 2xl:grid-cols-3">
-          <div v-for="item in paged" :key="item.code" class="relative">
-            <span
-              v-if="item.upcoming"
-              class="badge absolute right-2 top-2 z-10 bg-violet-900 text-violet-200"
-            >
-              预定 {{ item.release_date }}
-            </span>
-            <CodeCard :item="item" @changed="select(active)" />
-          </div>
+          <CodeCard
+            v-for="item in paged"
+            :key="item.code"
+            :item="item"
+            @changed="select(active)"
+          />
         </div>
 
         <div v-if="pages > 1" class="flex items-center justify-center gap-3 pt-2">

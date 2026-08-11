@@ -105,7 +105,9 @@ async function download() {
       </p>
 
       <div class="mt-auto flex flex-wrap items-center gap-x-3 gap-y-1 pt-2 text-[11px] text-gray-500">
-        <span v-if="item.release_date">{{ item.release_date }}</span>
+        <span v-if="item.release_date" :class="item.upcoming ? 'text-violet-300' : ''">
+          <span v-if="item.upcoming" class="mr-1">预定</span>{{ item.release_date }}
+        </span>
         <span v-if="item.star">★ {{ item.star }}</span>
         <span v-for="cast in casts" :key="cast" class="truncate">{{ cast }}</span>
       </div>

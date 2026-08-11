@@ -1,6 +1,7 @@
 <script setup>
 import { computed } from 'vue'
 import TagInput from '@/components/TagInput.vue'
+import SortRuleInput from '@/components/SortRuleInput.vue'
 
 const props = defineProps({
   field: { type: Object, required: true },
@@ -50,6 +51,8 @@ const value = computed({
       class="input font-mono text-xs"
       rows="3"
     />
+
+    <SortRuleInput v-else-if="field.t === 'sort'" v-model="value" />
 
     <TagInput
       v-else-if="field.t === 'tags'"

@@ -53,6 +53,42 @@ def sub_rank() -> int:
     return count
 
 
+def sub_brands() -> int:
+    """厂牌订阅任务。BRAND_SUBSCRIBE 为空时不执行。
+
+    与"同步厂牌"分开：那个只把番号收进库供浏览，这个才会订阅并进下载流程。
+    """
+    from app import services
+    from app.modules.ladysite.brands import BRANDS, crawl_recent
+
+    settings = get_settings()
+    setting = (settings.brand_subscribe or "").strip().lower()
+    if not setting:
+        logger.debug("[任务] BRAND_SUBSCRIBE 为空，跳过厂牌订阅")
+        return 0
+
+    if setting == "all":
+        brands = list(BRANDS)
+    else:
+        brands = [b.strip() for b in setting.split(",") if b.strip() in BRANDS]
+
+    # 只订阅已发布的，预定发布的还没有资源可找
+    days = max(settings.brand_subscribe_days, 1)
+
+    count = 0
+    for brand in brands:
+        try:
+            codes = crawl_recent(brand, days=days)
+        except Exception as exc:
+            # 单个厂牌不通不该影响其余厂牌
+            logger.warning(f"[任务] 厂牌 {brand} 抓取失败: {exc}")
+            continue
+        count += sum(1 for code in codes if services.subscribe_code(code))
+
+    logger.info(f"[任务] 厂牌订阅新增 {count} 个")
+    return count
+
+
 def sync_hot() -> int:
     """同步热门榜单。"""
     return _run_ladysite_task("sync_hot", "同步热门")
@@ -211,6 +247,7 @@ JOBS: dict[str, dict] = {
     "run_codes_task": {"func": run_codes_task, "name": "订阅下载", "cron_key": "download_schedule_time"},
     "run_actors": {"func": run_actors, "name": "演员订阅", "cron_key": "actor_schedule_time"},
     "sub_rank": {"func": sub_rank, "name": "榜单订阅", "cron_key": "rank_schedule_time"},
+    "sub_brands": {"func": sub_brands, "name": "厂牌订阅", "cron_key": "brand_schedule_time"},
     "sync_hot": {"func": sync_hot, "name": "同步热门", "cron_key": "sync_hot_time"},
     "sync_brands": {"func": sync_brands, "name": "同步厂牌", "cron_key": "sync_brands_time"},
     "sync_actors": {"func": sync_actors, "name": "同步演员", "cron_key": "sync_actors_time"},
@@ -256,8 +293,8 @@ def _build_jobstores() -> dict:
         kwargs = dict(client.connection_pool.connection_kwargs)
         kwargs.pop("decode_responses", None)
         store = RedisJobStore(
-            jobs_key="byte-muse:jobs",
-            run_times_key="byte-muse:job_run_times",
+            jobs_key="cinefold:jobs",
+            run_times_key="cinefold:job_run_times",
             **kwargs,
         )
         logger.info("APScheduler 任务状态持久化到 Redis")

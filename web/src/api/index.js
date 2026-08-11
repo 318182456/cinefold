@@ -81,6 +81,12 @@ export const getReleaseToday = () => http.get('/codes/release_today')
 export const getRecommend = (limit = 15) => http.get('/codes/recommend', { params: { limit } })
 export const translateTitles = () => http.post('/codes/translate')
 
+// ---------------------------------------------------------------- 数据源
+export const listDataSources = () => http.get('/datasources')
+export const updateDataSource = (key, payload) => http.put(`/datasources/${key}`, payload)
+export const checkDataSource = (key) => http.post(`/datasources/${key}/check`)
+export const checkAllDataSources = () => http.post('/datasources/check')
+
 // ---------------------------------------------------------------- 榜单
 export const getRank = (rankType = '', limit = 120) =>
   http.get('/rank', { params: { rank_type: rankType, limit } })

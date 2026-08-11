@@ -108,7 +108,7 @@ def start_registration(username: str, origin: str) -> str:
 
     options = generate_registration_options(
         rp_id=rp_id,
-        rp_name=settings.webauthn_rp_name or "byte-muse",
+        rp_name=settings.webauthn_rp_name or "cinefold",
         user_name=username,
         user_display_name=username,
         # 已注册的排除掉，同一把钥匙不必重复注册

@@ -1,10 +1,10 @@
 services:
-  byte-muse:
+  cinefold:
     # 用 GitHub Actions 构建好的镜像时，注释掉 build 换成下面的 image
-    # image: ghcr.io/318182456/byte-muse:latest
+    # image: ghcr.io/318182456/cinefold:latest
     build: .
-    image: byte-muse:local
-    container_name: byte-muse
+    image: cinefold:local
+    container_name: cinefold
     restart: unless-stopped
     ports:
       - "3750:3750"
@@ -17,7 +17,7 @@ services:
       # 默认用 /data 下的 SQLite，无需下面两个服务。
       # 启用 postgres / redis 时取消对应注释，并加上 --profile：
       #   docker compose --profile postgres --profile redis up -d
-      # DATABASE_URL: postgresql://byte_muse:byte_muse@postgres:5432/byte_muse
+      # DATABASE_URL: postgresql://cinefold:cinefold@postgres:5432/cinefold
       # REDIS_URL: redis://redis:6379/0
       # REDIS_JOB_STORE: "True"
     healthcheck:
@@ -29,17 +29,18 @@ services:
   postgres:
     profiles: ["postgres"]
     image: postgres:17-alpine
-    container_name: byte-muse-postgres
+    container_name: cinefold-postgres
     restart: unless-stopped
+    # POSTGRES_* 只在初始化空卷时生效，改这几项不会影响已有的库
     environment:
-      POSTGRES_USER: byte_muse
-      POSTGRES_PASSWORD: byte_muse
-      POSTGRES_DB: byte_muse
+      POSTGRES_USER: cinefold
+      POSTGRES_PASSWORD: cinefold
+      POSTGRES_DB: cinefold
       TZ: Asia/Shanghai
     volumes:
       - ./data/postgres:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U byte_muse -d byte_muse"]
+      test: ["CMD-SHELL", "pg_isready -U cinefold -d cinefold"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -47,7 +48,7 @@ services:
   redis:
     profiles: ["redis"]
     image: redis:7-alpine
-    container_name: byte-muse-redis
+    container_name: cinefold-redis
     restart: unless-stopped
     # 缓存与任务状态都可重建，用 AOF 保证重启后不丢即可
     command: ["redis-server", "--appendonly", "yes"]

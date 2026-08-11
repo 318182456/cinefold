@@ -1,7 +1,6 @@
-# byte-muse 重建规格书
+# cinefold 规格书
 
-> 本文档由原 Docker 镜像 `envyafish/byte-muse:1.27.4` 的符号表、前端产物与配置文件逆向整理而成。
-> 原项目业务代码经 Cython 编译，源码不可还原；本规格为重写依据。
+> 本文档记录项目的架构、数据模型与接口约定，作为实现依据。
 
 ## 1. 项目定位
 
@@ -122,7 +121,6 @@ id (autoincrement) / namespace / key / content / create_time
 ### PT 站点 `modules/ptsite/`
 统一接口：`search` / `download_seed`，部分有 `check_status` / `convert_torrent`
 - `mteam`（API Key）· `rousi` · `ptt` · `nicept`（Cookie）
-- 原项目还有 `fsm`，本重写版未包含
 - 公共工具：`search_pt` / `crawling` / `convert_to_mb` / `extract_torrent_size` / `download_seed_by_url`
 
 ### 媒体服务器 `modules/mediaserver/`
@@ -195,15 +193,12 @@ free: bool           # 免费
 download_url: str    # 磁链或种子地址
 ```
 
-## 10. 与原项目的差异
+## 10. 未实现的配置项
 
-本重写版**不包含**以下原项目特性：
+以下配置项保留占位以兼容既有 `.env`，但不生效：
 
-- **License 校验** — 原版启动时请求 `bytemuselincese.zeabur.app` 验证授权码，重写版移除
-- **Cloudflare 绕过** — `BYPASS_URL` / `FLARE_SOLVERR_URL` / `crawler_*_bypass` 系列，不实现
-- **BT 防吸血** — `ENABLE_BT_ANTI_LEECH`，不实现
-
-配置项保留占位以兼容旧 `.env`，但不生效。
+- `FLARE_SOLVERR_URL` / `crawler_*_bypass` 系列 —— 反爬绕过统一走 `BYPASS_URL`
+- `ENABLE_BT_ANTI_LEECH` —— BT 防吸血
 
 ## 11. 技术栈
 

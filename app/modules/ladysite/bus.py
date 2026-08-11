@@ -19,6 +19,13 @@ class Bus:
     name = "javbus"
 
     def __init__(self, host: str = "", cookie: str = ""):
+        # 没有显式指定时按数据源配置走，页面上改地址、CD、cookie 都能生效
+        if not host and not cookie:
+            client = SiteClient.from_source(self.name)
+            if client is not None:
+                self.client = client
+                return
+
         self.client = SiteClient(
             host or HOST,
             cookie or os.getenv("JAVBUS_COOKIE", ""),

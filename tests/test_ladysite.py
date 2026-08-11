@@ -252,6 +252,246 @@ class TestLibraryParse:
         assert html_to_rank(JAVLIB_RANK) == ["SSIS-100", "ABP-985"]
 
 
+MISSAV_DETAIL = """
+<html><head>
+<meta property="og:image" content="https://fourhoi.com/ssis-001/cover-n.jpg">
+</head><body>
+<h1>SSIS-001 女友不在的三天 葵司</h1>
+<div class="space-y-2">
+  <div class="text-secondary"><span>发行日期:</span>
+    <time datetime="2021-02-18T11:00:54+08:00">2021-02-18</time></div>
+  <div class="text-secondary"><span>番号:</span><span>SSIS-001</span></div>
+  <div class="text-secondary"><span>女优:</span>
+    <a href="/a">葵司 (葵つかさ)</a>, <a href="/b">乙白沙也加</a></div>
+  <div class="text-secondary"><span>类型:</span>
+    <a href="/c">中文字幕</a>, <a href="/d">美乳</a></div>
+  <div class="text-secondary"><span>发行商:</span><span>S1</span></div>
+</div>
+</body></html>
+"""
+
+# 番号不存在时站点返回 200，标题是提示语、封面是站点 logo
+MISSAV_NOT_FOUND = """
+<html><head>
+<meta property="og:image" content="https://missav.ws/missav/logo-square.png">
+</head><body><h1>找不到页面</h1></body></html>
+"""
+
+
+class TestMissavParse:
+    def test_detail_fields(self):
+        from app.modules.ladysite.missav import html_to_code
+
+        info = html_to_code(MISSAV_DETAIL, "SSIS-001")
+        assert info is not None
+        assert info.code == "SSIS-001"
+        assert info.release_date == "2021-02-18"
+        assert info.publisher == "S1"
+        assert "葵司 (葵つかさ)" in info.casts
+        assert "中文字幕" in info.genres
+        assert info.banner.endswith("cover-n.jpg")
+
+    def test_title_strips_leading_code(self):
+        """h1 以番号开头，应剥离后只留标题。"""
+        from app.modules.ladysite.missav import html_to_code
+
+        info = html_to_code(MISSAV_DETAIL, "SSIS-001")
+        assert info.title == "女友不在的三天 葵司"
+
+    def test_not_found_page_returns_none(self):
+        """占位页没有发行日期，不能当详情写进库。"""
+        from app.modules.ladysite.missav import html_to_code
+
+        assert html_to_code(MISSAV_NOT_FOUND, "NOSUCH-999") is None
+
+
+JAV321_DETAIL = """
+<html><body>
+<div class="panel panel-info">
+  <div class="panel-heading"><h3>作品タイトル <small>ssis-001 葵つかさ</small></h3></div>
+  <div class="panel-body"><div class="row"><div class="col-md-9">
+    <b>出演者</b>: <a href="/star/1">葵つかさ</a> &nbsp; <a href="/star/2">乙白さやか</a> &nbsp; <br>
+    <b>メーカー</b>: <a href="/company/x/1">エスワン ナンバーワンスタイル</a><br>
+    <b>品番</b>: ssis-001<br>
+    <b>配信開始日</b>: 2021-02-19<br>
+    <b>収録時間</b>: 147 minutes<br>
+    <b>平均評価</b>: 4.5<br>
+  </div></div></div>
+</div>
+<img src="http://pics.dmm.co.jp/digital/video/ssis00001/ssis00001ps.jpg">
+<img src="http://pics.dmm.co.jp/digital/video/ssis00001/ssis00001jp-1.jpg">
+<img src="http://pics.dmm.co.jp/digital/video/ssis00001/ssis00001jp-2.jpg">
+<video><source src="https://example.com/preview.mp4" type="video/mp4"></video>
+</body></html>
+"""
+
+
+class TestJav321Parse:
+    def test_detail_fields(self):
+        from app.modules.ladysite.jav321 import html_to_code
+
+        info = html_to_code(JAV321_DETAIL, "SSIS-001")
+        assert info is not None
+        assert info.code == "SSIS-001"
+        assert info.release_date == "2021-02-19"
+        assert info.duration == "147 minutes"
+        assert info.producer == "エスワン ナンバーワンスタイル"
+        assert info.casts == "葵つかさ,乙白さやか"
+        assert info.star == 4.5
+
+    def test_title_drops_small_tag(self):
+        """h3 里的 <small> 是番号与演员的重复信息，不该进标题。"""
+        from app.modules.ladysite.jav321 import html_to_code
+
+        info = html_to_code(JAV321_DETAIL, "SSIS-001")
+        assert info.title == "作品タイトル"
+
+    def test_cover_upgraded_and_stills_collected(self):
+        from app.modules.ladysite.jav321 import html_to_code
+
+        info = html_to_code(JAV321_DETAIL, "SSIS-001")
+        # ps 是缩略图，应换成大图 pl
+        assert info.banner.endswith("ssis00001pl.jpg")
+        assert info.still_photo.count(",") == 1
+        assert info.preview_url == "https://example.com/preview.mp4"
+
+    @pytest.mark.parametrize("code,expected", [
+        ("SSIS-001", "/video/ssis00001"),
+        ("JUR-786", "/video/jur00786"),
+        ("MIDE-777", "/video/mide00777"),
+        ("NODASH", ""),
+    ])
+    def test_detail_path(self, code, expected):
+        from app.modules.ladysite.jav321 import _detail_path
+        assert _detail_path(code) == expected
+
+
+AVBASE_DETAIL = """
+<html><body>
+<script id="__NEXT_DATA__" type="application/json">
+{"props":{"pageProps":{"work":{
+  "work_id":"SSIS-001",
+  "title":"作品タイトル",
+  "min_date":"Thu Feb 18 2021 09:00:00 GMT+0900 (Japan Standard Time)",
+  "casts":[{"actor":{"name":"葵つかさ"}},{"actor":{"name":"乙白さやか"}}],
+  "genres":[{"name":"美少女"},{"name":"ドラマ"}],
+  "products":[{
+    "maker":{"name":"エスワン ナンバーワンスタイル"},
+    "label":{"name":"S1 NO.1 STYLE"},
+    "series":null,
+    "image_url":"https://img/ssis00001pl.jpg",
+    "thumbnail_url":"https://img/ssis00001ps.jpg",
+    "sample_image_urls":[{"s":"https://img/s1.jpg","l":"https://img/l1.jpg"},
+                         {"s":"https://img/s2.jpg","l":"https://img/l2.jpg"}]
+  }]
+}}}}
+</script>
+</body></html>
+"""
+
+# 番号不存在时 pageProps 里只有 statusCode
+AVBASE_NOT_FOUND = """
+<html><body>
+<script id="__NEXT_DATA__" type="application/json">
+{"props":{"pageProps":{"statusCode":404}}}
+</script>
+</body></html>
+"""
+
+
+class TestAvbaseParse:
+    def test_detail_fields(self):
+        from app.modules.ladysite.avbase import html_to_code
+
+        info = html_to_code(AVBASE_DETAIL, "SSIS-001")
+        assert info is not None
+        assert info.code == "SSIS-001"
+        assert info.title == "作品タイトル"
+        assert info.release_date == "2021-02-18"
+        assert info.producer == "エスワン ナンバーワンスタイル"
+        assert info.publisher == "S1 NO.1 STYLE"
+        assert info.casts == "葵つかさ,乙白さやか"
+        assert "美少女" in info.genres
+
+    def test_prefers_large_still_images(self):
+        """剧照是 {s: 小图, l: 大图}，应取大图。"""
+        from app.modules.ladysite.avbase import html_to_code
+
+        info = html_to_code(AVBASE_DETAIL, "SSIS-001")
+        assert info.still_photo == "https://img/l1.jpg,https://img/l2.jpg"
+        assert info.banner == "https://img/ssis00001pl.jpg"
+
+    def test_missing_work_returns_none(self):
+        """avbase 收录范围有限，没有的番号要返回 None 交给下一个源。"""
+        from app.modules.ladysite.avbase import html_to_code
+
+        assert html_to_code(AVBASE_NOT_FOUND, "JUR-786") is None
+
+    def test_no_next_data_returns_none(self):
+        from app.modules.ladysite.avbase import html_to_code
+
+        assert html_to_code("<html><body>nothing</body></html>", "SSIS-001") is None
+
+    @pytest.mark.parametrize("raw,expected", [
+        ("Thu Feb 18 2021 09:00:00 GMT+0900 (Japan Standard Time)", "2021-02-18"),
+        ("Mon Dec 01 2025 00:00:00 GMT+0900", "2025-12-01"),
+        ("", ""),
+        ("garbage", ""),
+    ])
+    def test_js_date(self, raw, expected):
+        from app.modules.ladysite.avbase import _js_date
+        assert _js_date(raw) == expected
+
+
+FREEJAVBT_DETAIL = """
+<html><body>
+<h1>SSIS-001 作品标题 免费AV在线看</h1>
+<div class="single-video-info">
+  <div class="single-video-meta code d-flex"><span>番号:&nbsp;</span>
+    <a href="/zh/code/SSIS">SSIS</a><span>-001</span></div>
+  <div class="single-video-meta d-flex"><span>日期:&nbsp;</span><span>2021-02-19</span></div>
+  <div class="single-video-meta d-flex"><span>时长:&nbsp;</span><span>150分钟</span></div>
+  <div class="single-video-meta director d-flex"><span>导演:&nbsp;</span>
+    <a href="/d/1">苺原</a></div>
+  <div class="single-video-meta d-flex"><span>类别:&nbsp;</span>
+    <a href="/g/1">戏剧</a><a href="/g/2">多P</a></div>
+  <div class="single-video-meta d-flex"><span>女优:&nbsp;</span>
+    <a href="/a/1">葵司</a></div>
+</div>
+</body></html>
+"""
+
+
+class TestFreejavbtParse:
+    def test_detail_fields(self):
+        from app.modules.ladysite.freejavbt import html_to_code
+
+        info = html_to_code(FREEJAVBT_DETAIL, "SSIS-001")
+        assert info is not None
+        assert info.release_date == "2021-02-19"
+        assert info.duration == "150分钟"
+        assert "戏剧" in info.genres
+        assert info.casts == "葵司"
+
+    def test_title_strips_code_and_promo_suffix(self):
+        from app.modules.ladysite.freejavbt import html_to_code
+
+        info = html_to_code(FREEJAVBT_DETAIL, "SSIS-001")
+        assert info.title == "作品标题"
+
+    def test_director_not_mapped_to_producer(self):
+        """导演不是片商，映射过去会把导演名当片商写库。"""
+        from app.modules.ladysite.freejavbt import html_to_code
+
+        info = html_to_code(FREEJAVBT_DETAIL, "SSIS-001")
+        assert info.producer == ""
+
+    def test_empty_meta_returns_none(self):
+        from app.modules.ladysite.freejavbt import html_to_code
+
+        assert html_to_code("<html><body><h1>X</h1></body></html>", "NOSUCH-999") is None
+
+
 class TestBrandsParse:
     def test_date_page_dedupes_and_normalizes(self):
         from app.modules.ladysite.brands import Brands

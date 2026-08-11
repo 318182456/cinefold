@@ -17,7 +17,7 @@ from app.core.version import APP_VERSION
 
 REGISTRY = "https://ghcr.io"
 # 与 docker-compose.yml 里的镜像保持一致
-IMAGE = "318182456/byte-muse"
+IMAGE = "318182456/cinefold"
 
 # 只认 x.y.z，忽略 latest 与 sha-xxxx 这类标签
 SEMVER_RE = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)$")

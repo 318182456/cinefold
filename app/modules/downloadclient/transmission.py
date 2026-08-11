@@ -134,6 +134,38 @@ class TransmissionClient:
             logger.error(f"查询 Transmission 任务状态失败: {exc}")
             return []
 
+    def delete_torrent(
+        self, hashes: Sequence[str], delete_files: bool = False
+    ) -> list[str]:
+        """删除任务。返回实际提交删除的 hash 列表。语义同 qBittorrent 版。"""
+        if not hashes:
+            return []
+        if not self._ensure_client():
+            return []
+
+        wanted = [h for h in hashes if h]
+        try:
+            # 传入不存在的 id，transmission-rpc 会直接抛异常，先过滤一遍
+            existing = {
+                t.hashString.lower() for t in self.client.get_torrents(ids=list(wanted))
+            }
+            hit = [h for h in wanted if h.lower() in existing]
+            missing = [h for h in wanted if h.lower() not in existing]
+            if missing:
+                logger.info(f"Transmission 中已无这些种子，跳过: {', '.join(missing)}")
+            if not hit:
+                return []
+
+            self.client.remove_torrent(ids=hit, delete_data=delete_files)
+            logger.info(
+                f"已从 Transmission 删除 {len(hit)} 个种子"
+                f"（delete_files={delete_files}）: {', '.join(hit)}"
+            )
+            return hit
+        except Exception as exc:
+            logger.error(f"删除 Transmission 种子失败: {exc}")
+            return []
+
     def test_connection(self) -> tuple[bool, str]:
         if not self.login_transmission():
             return False, "连接失败，请检查地址与账号密码"

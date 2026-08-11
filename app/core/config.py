@@ -32,7 +32,7 @@ SENSITIVE_KEYS = {
     "mteam_api_key", "wechat_corp_secret", "wechat_token",
     "wechat_encoding_aes_key", "telegram_bot_token", "secret_key",
     "cloudnas_password", "baidu_api_key", "google_api_key", "openai_api_key",
-    "github_token", "oidc_client_secret",
+    "github_token", "oidc_client_secret", "medialink_webhook_token",
     # 连接串里通常内嵌账号密码
     "database_url", "redis_url",
 }
@@ -108,6 +108,14 @@ class Settings:
     jellyfin_url: str = ""
     jellyfin_api_key: str = ""
     jellyfin_user: str = ""
+
+    # --- 媒体联动 ---
+    # 媒体库根目录，刮削产物（硬链接）所在。按 inode 反查源文件时的扫描范围
+    medialink_library_path: str = ""
+    # 媒体服务器删除影片时，同步删除种子与源文件。关闭时只记录不动手
+    medialink_delete_enabled: bool = False
+    # webhook 校验密钥。请求需带 X-Cinefold-Token，留空则不校验
+    medialink_webhook_token: str = ""
 
     # --- 下载器 ---
     qbittorrent_url: str = ""
@@ -187,6 +195,7 @@ class Settings:
     fill_empty_image_time: str = "30 */12 * * *"
     sync_news: str = "45 */5 * * *"
     rank_schedule_time: str = "0 20 * * *"
+    brand_schedule_time: str = "30 20 * * *"
     actor_schedule_time: str = "0 21 * * *"
     download_schedule_time: str = "0 22 * * *"
     # 榜单缓存 30 分钟过期，预热间隔必须比它短，否则用户还是会撞上冷缓存
@@ -195,7 +204,12 @@ class Settings:
     # --- 榜单订阅 ---
     rank_page: int = 0
     rank_type: str = ""
+    # 同步哪些厂牌的新片。只把番号收进库，不订阅也不下载
     brand_type: str = ""
+    # 自动订阅哪些厂牌的新片，会进入下载流程。与 brand_type 独立
+    brand_subscribe: str = ""
+    # 只订阅最近几天的，避免首次配置时把整段历史都订上
+    brand_subscribe_days: int = 3
     main_site: str = "ALL"
 
     # --- 图片 ---
@@ -262,7 +276,7 @@ class Settings:
     # --- Passkey (WebAuthn) ---
     # Relying Party ID，必须是站点域名（不带端口与协议）。留空则从请求推断
     webauthn_rp_id: str = ""
-    webauthn_rp_name: str = "byte-muse"
+    webauthn_rp_name: str = "cinefold"
 
     # --- 其他 ---
     javdb_host: str = "https://javdb.com"
@@ -293,7 +307,7 @@ def copy_env() -> None:
     """
     if ENV_FILE.exists():
         return
-    if not os.getenv("BYTE_MUSE_DISABLE_FALLBACK_ENV") and any(
+    if not os.getenv("CINEFOLD_DISABLE_FALLBACK_ENV") and any(
         f.exists() for f in FALLBACK_ENV_FILES
     ):
         return
@@ -306,7 +320,7 @@ def load_settings() -> Settings:
     copy_env()
     if ENV_FILE.exists():
         load_dotenv(ENV_FILE, override=True)
-    elif not os.getenv("BYTE_MUSE_DISABLE_FALLBACK_ENV"):
+    elif not os.getenv("CINEFOLD_DISABLE_FALLBACK_ENV"):
         # 正式配置不存在时，回退到项目根目录的 app.env / .env
         for candidate in FALLBACK_ENV_FILES:
             if candidate.exists():
@@ -321,6 +335,10 @@ def load_settings() -> Settings:
         jellyfin_url=_env("JELLYFIN_URL"),
         jellyfin_api_key=_env("JELLYFIN_API_KEY"),
         jellyfin_user=_env("JELLYFIN_USER"),
+
+        medialink_library_path=_env("MEDIALINK_LIBRARY_PATH"),
+        medialink_delete_enabled=_env_bool("MEDIALINK_DELETE_ENABLED", False),
+        medialink_webhook_token=_env("MEDIALINK_WEBHOOK_TOKEN"),
 
         qbittorrent_url=_env("QBITTORRENT_URL"),
         qbittorrent_username=_env("QBITTORRENT_USERNAME"),
@@ -383,6 +401,7 @@ def load_settings() -> Settings:
         fill_empty_image_time=_env("FILL_EMPTY_IMAGE_TIME", "30 */12 * * *").strip("'\""),
         sync_news=_env("SYNC_NEWS", "45 */5 * * *").strip("'\""),
         rank_schedule_time=_env("RANK_SCHEDULE_TIME", "0 20 * * *").strip("'\""),
+        brand_schedule_time=_env("BRAND_SCHEDULE_TIME", "30 20 * * *").strip("'\""),
         actor_schedule_time=_env("ACTOR_SCHEDULE_TIME", "0 21 * * *").strip("'\""),
         download_schedule_time=_env("DOWNLOAD_SCHEDULE_TIME", "0 22 * * *").strip("'\""),
         warm_cache_time=_env("WARM_CACHE_TIME", "*/25 * * * *").strip("'\""),
@@ -390,6 +409,8 @@ def load_settings() -> Settings:
         rank_page=_env_int("RANK_PAGE", 0),
         rank_type=_env("RANK_TYPE"),
         brand_type=_env("BRAND_TYPE"),
+        brand_subscribe=_env("BRAND_SUBSCRIBE"),
+        brand_subscribe_days=_env_int("BRAND_SUBSCRIBE_DAYS", 3),
         main_site=_env("MAIN_SITE", "ALL"),
 
         image_mode=_env("IMAGE_MODE", "BLUR"),
@@ -435,7 +456,7 @@ def load_settings() -> Settings:
         oidc_bind_username=_env("OIDC_BIND_USERNAME"),
 
         webauthn_rp_id=_env("WEBAUTHN_RP_ID"),
-        webauthn_rp_name=_env("WEBAUTHN_RP_NAME", "byte-muse"),
+        webauthn_rp_name=_env("WEBAUTHN_RP_NAME", "cinefold"),
 
         javdb_host=_env("JAVDB_HOST", "https://javdb.com"),
         secret_key=_env("SECRET_KEY"),

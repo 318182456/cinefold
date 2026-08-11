@@ -75,7 +75,7 @@ def download_seed_by_url(
     if not url:
         return None
 
-    request_headers = {"User-Agent": "Mozilla/5.0 byte-muse"}
+    request_headers = {"User-Agent": "Mozilla/5.0 cinefold"}
     if cookie:
         request_headers["Cookie"] = cookie
     request_headers.update(headers or {})

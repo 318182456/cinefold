@@ -15,10 +15,10 @@ from app.utils.log import setup_loguru_logger
 API_PREFIX = "/api/v1"
 
 
-def init_byte_muse() -> None:
+def init_cinefold() -> None:
     """启动初始化：日志 → 配置 → 数据库 → 调度器。"""
     setup_loguru_logger()
-    logger.info("byte-muse 启动中")
+    logger.info("cinefold 启动中")
 
     get_settings()
 
@@ -31,12 +31,12 @@ def init_byte_muse() -> None:
     from app.modules.notify.tgpolling import start_polling
     start_polling()
 
-    logger.info("byte-muse 启动完成")
+    logger.info("cinefold 启动完成")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    init_byte_muse()
+    init_cinefold()
     yield
     from app.api.endpoints.picproxy import close_client
     await close_client()
@@ -44,12 +44,12 @@ async def lifespan(app: FastAPI):
     stop_polling()
     from app.scheduler import stop_scheduler
     stop_scheduler()
-    logger.info("byte-muse 已停止")
+    logger.info("cinefold 已停止")
 
 
 def create_app() -> FastAPI:
     app = FastAPI(
-        title="byte-muse",
+        title="cinefold",
         version=APP_VERSION,
         lifespan=lifespan,
         docs_url="/api/docs",
@@ -65,10 +65,14 @@ def create_app() -> FastAPI:
     )
 
     from app.api.endpoints import (
-        actors, admin, auth, config, message, migrate, picproxy, subscribe,
+        actors, admin, auth, config, datasource, message, migrate, picproxy, subscribe,
+        webhook,
     )
 
-    for module in (admin, auth, config, subscribe, actors, picproxy, message, migrate):
+    for module in (
+        admin, auth, config, subscribe, actors, picproxy, message, migrate, datasource,
+        webhook,
+    ):
         app.include_router(module.router, prefix=API_PREFIX)
 
     @app.exception_handler(Exception)

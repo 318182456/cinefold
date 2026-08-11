@@ -17,7 +17,7 @@ env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
   # Docker Hub 镜像名，未配置 DOCKERHUB_USERNAME 时自动跳过推送
-  DOCKERHUB_IMAGE: ${{ vars.DOCKERHUB_IMAGE || 'byte-muse' }}
+  DOCKERHUB_IMAGE: ${{ vars.DOCKERHUB_IMAGE || 'cinefold' }}
 
 jobs:
   build:

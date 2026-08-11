@@ -35,7 +35,7 @@ class MTeam:
         # 声明成 application/json 会让服务端按空 JSON 解析并报参数错误。
         return {
             "x-api-key": self.api_key,
-            "User-Agent": "Mozilla/5.0 byte-muse",
+            "User-Agent": "Mozilla/5.0 cinefold",
             "Accept": "application/json",
         }
 

@@ -7,7 +7,7 @@ import os
 import tempfile
 from pathlib import Path
 
-_TMP = Path(tempfile.mkdtemp(prefix="bytemuse-tests-"))
+_TMP = Path(tempfile.mkdtemp(prefix="cinefold-tests-"))
 
 os.environ["DATA_DIR"] = str(_TMP / "data")
 os.environ["CONFIG_DIR"] = str(_TMP / "config")
@@ -15,7 +15,7 @@ os.environ["LOG_DIR"] = str(_TMP / "logs")
 os.environ["ENVIRONMENT"] = "test"
 
 # 指向空目录，屏蔽项目根目录下的 app.env
-os.environ["BYTE_MUSE_DISABLE_FALLBACK_ENV"] = "1"
+os.environ["CINEFOLD_DISABLE_FALLBACK_ENV"] = "1"
 
 for path in (_TMP / "data", _TMP / "config", _TMP / "logs"):
     path.mkdir(parents=True, exist_ok=True)

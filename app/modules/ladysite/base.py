@@ -111,6 +111,39 @@ class SiteClient:
         # 已知常年过盾的站点置 True，省掉一次必然 403 的直连
         self.bypass_first = bypass_first
 
+    @classmethod
+    def from_source(cls, key: str) -> "SiteClient | None":
+        """按数据源配置建客户端。源不存在或被停用时返回 None。
+
+        地址、节流、cookie 都从库里读，页面上改完立刻生效。
+        """
+        from app.modules.ladysite.sources import get_source
+
+        source = get_source(key)
+        if source is None or not source.get("enabled", True):
+            return None
+        if not source.get("host"):
+            return None
+
+        return cls(
+            source["host"],
+            cookie=source.get("cookie", ""),
+            interval=source.get("interval") or MIN_INTERVAL_SECONDS,
+            bypass_first=source.get("bypass_first", False),
+        )
+
+    @classmethod
+    def reset_throttle(cls, key: str = "") -> None:
+        """清节流状态。改了地址或间隔后调用，避免沿用旧 host 的计时。"""
+        with cls._state_lock:
+            if not key:
+                cls._throttle_state.clear()
+                return
+            from app.modules.ladysite.sources import get_source
+            source = get_source(key)
+            host = (source or {}).get("host", "").rstrip("/")
+            cls._throttle_state.pop(host, None)
+
     def _state(self) -> list:
         """取本 host 的节流状态 [lock, last_request]。"""
         with SiteClient._state_lock:

@@ -15,7 +15,37 @@ from app.database.base import DBBase
 
 DATA_DIR = Path(os.getenv("DATA_DIR", "/data"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
-DB_PATH = DATA_DIR / "byte-muse.db"
+DEFAULT_DB_PATH = DATA_DIR / "cinefold.db"
+# 早期版本的库名。从旧数据目录升级上来时要接着用，不能当成空库
+LEGACY_DB_PATH = DATA_DIR / "byte-muse.db"
+
+
+def _resolve_sqlite_path() -> Path:
+    """确定 SQLite 文件路径，必要时把旧库接过来。
+
+    只在新库不存在、旧库存在时改名。SQLite 的 -wal / -shm 是同名派生文件，
+    必须一起搬，否则未落盘的事务会丢。改名失败则继续用旧库 —— 建个空库
+    让用户以为数据全丢了，比多一行失败日志糟糕得多。
+    """
+    if DEFAULT_DB_PATH.exists() or not LEGACY_DB_PATH.exists():
+        return DEFAULT_DB_PATH
+
+    try:
+        LEGACY_DB_PATH.rename(DEFAULT_DB_PATH)
+        for suffix in ("-wal", "-shm"):
+            sidecar = LEGACY_DB_PATH.with_name(LEGACY_DB_PATH.name + suffix)
+            if sidecar.exists():
+                sidecar.rename(DEFAULT_DB_PATH.with_name(DEFAULT_DB_PATH.name + suffix))
+    except OSError as exc:
+        # 日志系统此时还没初始化，只能先 print
+        print(f"[cinefold] 旧数据库改名失败，继续使用 {LEGACY_DB_PATH.name}: {exc}")
+        return LEGACY_DB_PATH
+
+    print(f"[cinefold] 已将 {LEGACY_DB_PATH.name} 迁移为 {DEFAULT_DB_PATH.name}")
+    return DEFAULT_DB_PATH
+
+
+DB_PATH = _resolve_sqlite_path()
 
 SQLITE_URL = f"sqlite:///{DB_PATH}"
 

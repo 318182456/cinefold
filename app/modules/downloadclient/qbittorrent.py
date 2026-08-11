@@ -212,6 +212,47 @@ class QBitTorrentClient:
             logger.error(f"查询 qBittorrent 任务状态失败: {exc}")
             return []
 
+    def delete_torrent(
+        self, hashes: Sequence[str], delete_files: bool = False
+    ) -> list[str]:
+        """删除任务。返回实际提交删除的 hash 列表。
+
+        delete_files 默认关闭：转种场景下同一文件被多个种子共用，交给下载器
+        删文件容易在某个种子的保存路径不一致时误删或漏删，文件统一由调用方删。
+        """
+        if not hashes:
+            return []
+        if not self._ensure_client():
+            return []
+
+        wanted = [h for h in hashes if h]
+        try:
+            # qb 对不存在的 hash 静默忽略，先查一次才能报准删了哪些
+            existing = {
+                t.hash.lower()
+                for t in self.client.torrents_info(torrent_hashes=list(wanted))
+            }
+            hit = [h for h in wanted if h.lower() in existing]
+            missing = [h for h in wanted if h.lower() not in existing]
+            if missing:
+                logger.info(
+                    f"qBittorrent 中已无这些种子，跳过: {', '.join(missing)}"
+                )
+            if not hit:
+                return []
+
+            self.client.torrents_delete(
+                torrent_hashes=hit, delete_files=delete_files
+            )
+            logger.info(
+                f"已从 qBittorrent 删除 {len(hit)} 个种子"
+                f"（delete_files={delete_files}）: {', '.join(hit)}"
+            )
+            return hit
+        except Exception as exc:
+            logger.error(f"删除 qBittorrent 种子失败: {exc}")
+            return []
+
     def test_connection(self) -> tuple[bool, str]:
         """供配置页「测试连接」使用。"""
         if not self.login_qb():

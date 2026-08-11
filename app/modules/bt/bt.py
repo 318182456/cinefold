@@ -52,7 +52,7 @@ class BT:
         return bool(self.url)
 
     def _headers(self) -> dict:
-        base = {"User-Agent": "Mozilla/5.0 byte-muse"}
+        base = {"User-Agent": "Mozilla/5.0 cinefold"}
         if not self.raw_headers:
             return base
         try:

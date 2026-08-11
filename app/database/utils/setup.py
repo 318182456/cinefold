@@ -37,6 +37,10 @@ def setup_database() -> None:
     update_database()
     insert_first_user()
 
+    # 内置数据源登记，已存在的不覆盖
+    from app.modules.ladysite.sources import sync_builtin_sources
+    sync_builtin_sources()
+
 
 def update_database() -> None:
     """字段级迁移。旧版本升级上来时补齐新增列。"""

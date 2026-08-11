@@ -44,6 +44,65 @@ const originMismatch = computed(
   () => !!authOrigin.value?.origin && authOrigin.value.origin !== browserOrigin,
 )
 
+// 媒体联动的两个 webhook 地址。外部工具要填的就是这个，直接拼给用户复制
+const medialinkBase = computed(
+  () => (form.external_domain || browserOrigin || '').replace(/\/+$/, ''),
+)
+const medialinkHooks = computed(() => [
+  {
+    key: 'scrape',
+    title: '刮削完成回调',
+    url: `${medialinkBase.value}/api/v1/webhook/scrape`,
+    hint: '填到刮削工具（MDCng 等）的 webhook。触发事件选「刮削成功」',
+  },
+  {
+    key: 'emby',
+    title: '删除联动回调',
+    url: `${medialinkBase.value}/api/v1/webhook/emby`,
+    hint: 'Emby / Jellyfin 的 Webhook 插件，事件选 item.remove',
+  },
+])
+
+// MDCng 的 Body 模板。反斜杠不转义也能解析，无需用户处理
+const SCRAPE_BODY_TEMPLATE =
+  '{"event":"{{ event }}","number":"{{ number }}",'
+  + '"source_path":"{{ source_path }}"}'
+
+function copyText(text, label) {
+  if (!text) return
+  navigator.clipboard?.writeText(text)
+    .then(() => toast.success(`已复制${label}`))
+    .catch(() => toast.error('复制失败，请手动选择'))
+}
+
+// 刚生成、尚未保存的密钥明文。
+// 密钥是敏感字段，保存后接口只回传掩码，用户再也看不到原值，
+// 而它必须被填进 MDCng 与 Emby，所以在这里留一份明文供当场复制。
+const freshWebhookToken = ref('')
+
+function generateWebhookToken() {
+  // 这串可能要手抄进别的系统，去掉易混淆的 0 O 1 l I，共 57 个字符
+  const alphabet = 'abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789'
+  // 直接对字节取模会偏向字母表前几个字符（256 不是 57 的整数倍），改用拒绝采样
+  const limit = Math.floor(256 / alphabet.length) * alphabet.length
+  const chars = []
+
+  while (chars.length < 32) {
+    const bytes = new Uint8Array(32)
+    crypto.getRandomValues(bytes)
+    for (const byte of bytes) {
+      if (byte >= limit) continue
+      chars.push(alphabet[byte % alphabet.length])
+      if (chars.length === 32) break
+    }
+  }
+
+  const token = chars.join('')
+  form.medialink_webhook_token = token
+  freshWebhookToken.value = token
+  toast.success('已生成密钥，保存后生效')
+}
+
 // 字段类型 t: text(默认) / password / bool / select / textarea / tags / size
 // 每个分组按用途拆成若干 section，每个 section 一张卡片
 const GROUPS = [
@@ -107,6 +166,19 @@ const GROUPS = [
         fields: [
           { k: 'enable_auto_complete', label: '跳过已入库资源', t: 'bool',
             hint: '订阅前先查媒体库，已有的不再下载' },
+        ],
+      },
+      {
+        title: '媒体联动',
+        hint: '刮削工具建立硬链接后登记关联，媒体服务器删除影片时同步清理种子与文件',
+        panel: 'medialink',
+        fields: [
+          { k: 'medialink_library_path', label: '媒体库根目录', ph: '/media/JAV',
+            hint: '刮削产物所在目录。必须与下载目录在同一挂载卷，否则建不出硬链接' },
+          { k: 'medialink_webhook_token', label: 'Webhook 密钥', t: 'password',
+            hint: '外部调用需带此密钥。留空则不校验，强烈建议设置' },
+          { k: 'medialink_delete_enabled', label: '启用联动删除', t: 'bool',
+            hint: '删除不可逆。建议先用下方演练确认反查结果无误再开启' },
         ],
       },
     ],
@@ -260,8 +332,7 @@ const GROUPS = [
         fields: [
           { k: 'primary_site', label: 'PT 主站', t: 'select',
             hint: '多站都有结果时优先选它，需排序规则里含 site' },
-          { k: 'default_sort', label: '排序规则',
-            hint: '逗号分隔，靠前的优先级高，! 前缀表示降权' },
+          { k: 'default_sort', label: '排序规则', t: 'sort' },
         ],
       },
       {
@@ -288,25 +359,33 @@ const GROUPS = [
           { k: 'download_schedule_time', label: '订阅下载' },
           { k: 'actor_schedule_time', label: '演员订阅' },
           { k: 'rank_schedule_time', label: '榜单订阅' },
+          { k: 'brand_schedule_time', label: '厂牌订阅' },
         ],
       },
       {
         title: '数据同步',
+        hint: '只把番号收进库供浏览，不会订阅或下载',
         fields: [
           { k: 'sync_hot_time', label: '同步热门' },
           { k: 'sync_brands_time', label: '同步厂牌' },
           { k: 'sync_actors_time', label: '同步演员' },
           { k: 'sync_news', label: '同步新片' },
           { k: 'fill_empty_image_time', label: '补全缺图' },
+          { k: 'brand_type', label: '同步哪些厂牌',
+            hint: '留空则不同步；all 或逗号分隔，如 s1,moodyz' },
         ],
       },
       {
         title: '订阅范围',
+        hint: '这里配置的会自动订阅并进入下载流程',
         fields: [
           { k: 'rank_page', label: '榜单订阅页数', hint: '0 表示不自动订阅' },
           { k: 'rank_type', label: '榜单类型', t: 'select',
             options: ['', 'daily', 'weekly', 'monthly'] },
-          { k: 'brand_type', label: '厂牌订阅', hint: 'all 或逗号分隔，如 s1,moodyz' },
+          { k: 'brand_subscribe', label: '订阅哪些厂牌',
+            hint: '留空则不订阅；all 或逗号分隔，如 s1,moodyz' },
+          { k: 'brand_subscribe_days', label: '厂牌订阅天数',
+            hint: '只订阅最近几天新发布的' },
         ],
       },
     ],
@@ -349,7 +428,7 @@ const GROUPS = [
         fields: [
           { k: 'webauthn_rp_id', label: 'RP ID', ph: '留空则自动推断',
             hint: '站点域名，不含端口与协议，如 example.com' },
-          { k: 'webauthn_rp_name', label: '显示名称', ph: 'byte-muse' },
+          { k: 'webauthn_rp_name', label: '显示名称', ph: 'cinefold' },
         ],
         panel: 'passkey',
       },
@@ -435,6 +514,8 @@ async function save() {
     })
     await saveConfig(payload)
     toast.success('配置已保存')
+    // 已落库，明文不再需要留在页面上
+    if (payload.medialink_webhook_token) freshWebhookToken.value = ''
     await configStore.load(true)
     if (activeGroup.value === 'notify') await loadTgReceive()
   } catch (err) {
@@ -622,6 +703,110 @@ onMounted(async () => {
               :options="field.k === 'primary_site' ? ptSiteOptions : null"
             />
           </div>
+
+          <!-- 媒体联动：webhook 地址与接入说明 -->
+          <template v-if="section.panel === 'medialink'">
+            <!-- 删除不可逆，把风险和演练方式摆在最显眼处 -->
+            <div
+              v-if="form.medialink_delete_enabled"
+              class="space-y-1 rounded border border-amber-900/60 bg-amber-950/30 p-2.5"
+            >
+              <p class="text-xs text-amber-400">联动删除已启用</p>
+              <p class="text-[11px] text-gray-500">
+                收到删除事件会直接删除种子与磁盘文件，不可恢复。接入新的媒体服务器
+                前，建议先带 <code class="text-emerald-400">?dry_run=1</code>
+                调用一次，确认反查结果无误
+              </p>
+            </div>
+
+            <div
+              v-if="!form.medialink_library_path"
+              class="space-y-1 rounded border border-gray-800 bg-gray-900/40 p-2.5"
+            >
+              <p class="text-[11px] text-gray-500">
+                未填媒体库根目录时无法按 inode 反查硬链接，刮削回调只会记录失败
+              </p>
+            </div>
+
+            <div class="space-y-3 border-t border-gray-800 pt-3">
+              <div class="space-y-1">
+                <div class="flex items-center justify-between gap-2">
+                  <p class="text-xs font-medium text-gray-400">Webhook 密钥</p>
+                  <button
+                    class="btn-ghost shrink-0 px-2 py-1 text-[11px]"
+                    @click="generateWebhookToken"
+                  >
+                    生成随机密钥
+                  </button>
+                </div>
+
+                <!-- 保存后接口只回传掩码，明文仅此一次可见 -->
+                <div v-if="freshWebhookToken" class="space-y-1">
+                  <div class="flex items-center gap-2">
+                    <code class="min-w-0 flex-1 overflow-x-auto whitespace-nowrap rounded bg-gray-900 px-2 py-1.5 font-mono text-[11px] text-emerald-400">
+                      {{ freshWebhookToken }}
+                    </code>
+                    <button
+                      class="btn-ghost shrink-0 px-2 py-1 text-[11px]"
+                      @click="copyText(freshWebhookToken, '密钥')"
+                    >
+                      复制
+                    </button>
+                  </div>
+                  <p class="text-[11px] text-amber-400">
+                    尚未保存。请先复制留存 —— 保存后只显示掩码，无法再查看明文
+                  </p>
+                </div>
+                <p v-else class="text-[11px] text-gray-600">
+                  已保存的密钥只显示掩码。忘记了就重新生成一个，并同步更新
+                  刮削工具与媒体服务器的配置
+                </p>
+              </div>
+
+              <div v-for="hook in medialinkHooks" :key="hook.key" class="space-y-1 border-t border-gray-800 pt-3">
+                <p class="text-xs font-medium text-gray-400">{{ hook.title }}</p>
+                <div class="flex items-center gap-2">
+                  <code class="min-w-0 flex-1 truncate rounded bg-gray-900 px-2 py-1.5 font-mono text-[11px] text-emerald-400">
+                    {{ hook.url }}
+                  </code>
+                  <button
+                    class="btn-ghost shrink-0 px-2 py-1 text-[11px]"
+                    @click="copyText(hook.url, '回调地址')"
+                  >
+                    复制
+                  </button>
+                </div>
+                <p class="text-[11px] text-gray-600">{{ hook.hint }}</p>
+              </div>
+
+              <div class="space-y-1 border-t border-gray-800 pt-3">
+                <p class="text-xs font-medium text-gray-400">刮削工具 Body 模板</p>
+                <div class="flex items-center gap-2">
+                  <code class="min-w-0 flex-1 overflow-x-auto whitespace-nowrap rounded bg-gray-900 px-2 py-1.5 font-mono text-[11px] text-gray-300">
+                    {{ SCRAPE_BODY_TEMPLATE }}
+                  </code>
+                  <button
+                    class="btn-ghost shrink-0 px-2 py-1 text-[11px]"
+                    @click="copyText(SCRAPE_BODY_TEMPLATE, 'Body 模板')"
+                  >
+                    复制
+                  </button>
+                </div>
+                <p class="text-[11px] text-gray-600">
+                  Windows 路径的反斜杠无需手动转义，接收端会自动处理
+                </p>
+              </div>
+
+              <p
+                v-if="form.medialink_webhook_token"
+                class="text-[11px] text-gray-600"
+              >
+                调用时需附带请求头
+                <code class="text-emerald-400">X-Cinefold-Token</code>
+                ，值为上方配置的密钥
+              </p>
+            </div>
+          </template>
 
           <!-- OIDC 回调地址与连接测试 -->
           <template v-if="section.panel === 'oidc'">

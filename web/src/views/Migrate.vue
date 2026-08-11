@@ -407,7 +407,7 @@ onUnmounted(stopPolling)
             v-model="form.target_url"
             class="input font-mono text-xs"
             :disabled="running"
-            placeholder="postgresql://byte_muse:byte_muse@postgres:5432/byte_muse"
+            placeholder="postgresql://cinefold:cinefold@postgres:5432/cinefold"
           />
           <p class="mt-1 text-[11px] text-gray-600">
             留空则使用当前配置的 DATABASE_URL；目标库不存在的表会自动创建

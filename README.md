@@ -1,8 +1,7 @@
-# byte-muse
+# cinefold
 
-影片资源自动化订阅下载器。抓取番号 → 按规则过滤 → 推送下载器 → 校验入库 → 消息通知。
-
-原项目源码丢失，本仓库依据 `envyafish/byte-muse:1.27.4` 镜像的模块结构重写。
+影片资源自动化订阅下载器。抓取番号 → 按规则过滤 → 推送下载器 → 校验入库 → 消息通知，
+并支持与媒体库联动清理。
 
 ---
 
@@ -24,7 +23,7 @@
 ### Docker Compose（推荐）
 
 ```bash
-git clone <repo> byte-muse && cd byte-muse
+git clone <repo> cinefold && cd cinefold
 
 # 前端产物需先构建，或直接使用仓库中已有的 web/dist
 cd web && npm install && npm run build && cd ..
@@ -243,15 +242,11 @@ tests/          测试
 
 ---
 
-## 与原项目的差异
+## 已知限制
 
-本重写版**不包含**以下原版特性：
-
-- **License 校验** —— 原版启动时向 `bytemuselincese.zeabur.app` 验证授权码，已移除
-- **JavDB App 私有接口** —— 原版通过 `apidd.czssdgz.com` 调用需签名的 JSON 接口，本项目只解析公开 HTML 页面
+- **JavDB** 只解析公开 HTML 页面，不走需要签名的 App 接口
 - **BT 防吸血** —— `ENABLE_BT_ANTI_LEECH` 保留配置位但不生效
-
-`BYPASS_URL` 的调用已实现，但绕过服务本身需要你自行部署。
+- **`BYPASS_URL`** 的调用已实现，但绕过服务本身需要你自行部署
 
 ---
 
@@ -271,4 +266,4 @@ qBittorrent 5.x 改了登录协议（响应体 `Ok.` → 204 空响应，Cookie 
 
 **忘记密码**
 
-删除 `${DATA_DIR}/byte-muse.db` 中 `user` 表的记录后重启，会重新生成账号并打印到日志。
+删除 `${DATA_DIR}/cinefold.db` 中 `user` 表的记录后重启，会重新生成账号并打印到日志。

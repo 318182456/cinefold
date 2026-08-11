@@ -18,7 +18,7 @@ defineProps({
     fill="none"
     xmlns="http://www.w3.org/2000/svg"
     role="img"
-    aria-label="byte-muse"
+    aria-label="cinefold"
   >
     <rect width="32" height="32" rx="8" class="fill-brand" />
 

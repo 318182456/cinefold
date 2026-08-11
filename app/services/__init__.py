@@ -1094,7 +1094,7 @@ def dashboard_stats() -> dict:
 
 
 def _cache_key(namespace: str, key: str) -> str:
-    return f"byte-muse:{namespace}:{key}"
+    return f"cinefold:{namespace}:{key}"
 
 
 def get_rank_cache(namespace: str, key: str, ttl: int = 0) -> str | None:

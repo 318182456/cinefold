@@ -11,7 +11,9 @@ from app.modules.ladysite.base import ActorInfo, CodeInfo
 
 # 详情抓取的优先顺序。
 # javbus 无 Cloudflare 防护、成功率更高，排在前面；javdb 作为补充。
-DETAIL_SITES = ("javbus", "javdb")
+# jav321 详情页 URL 可推算、直连可用，不必过盾，因此排在 missav 之前；
+# missav 自带中文标题，但依赖过盾服务，放最后。
+DETAIL_SITES = ("javbus", "javdb", "jav321", "avbase", "missav")
 
 
 def _get_site(name: str):
@@ -24,15 +26,41 @@ def _get_site(name: str):
     if name == "javlibrary":
         from app.modules.ladysite.library import Library
         return Library()
+    if name == "missav":
+        from app.modules.ladysite.missav import MissAv
+        return MissAv()
+    if name == "jav321":
+        from app.modules.ladysite.jav321 import Jav321
+        return Jav321()
+    if name == "avbase":
+        from app.modules.ladysite.avbase import Avbase
+        return Avbase()
+    if name == "freejavbt":
+        from app.modules.ladysite.freejavbt import FreeJavBt
+        return FreeJavBt()
     return None
 
 
 def _enabled_sites() -> tuple[str, ...]:
-    """MAIN_SITE 为 ALL 时用全部站点，否则只用指定的。"""
+    """MAIN_SITE 为 ALL 时用全部站点，否则只用指定的。
+
+    数据源页面上停用的站会被排除；全停时退回 DETAIL_SITES，
+    免得配置失手把抓取彻底关死。
+    """
     main = (get_settings().main_site or "ALL").strip().lower()
     if main in ("", "all"):
-        return DETAIL_SITES
-    return tuple(s for s in DETAIL_SITES if s == main) or DETAIL_SITES
+        sites = DETAIL_SITES
+    else:
+        sites = tuple(s for s in DETAIL_SITES if s == main) or DETAIL_SITES
+
+    try:
+        from app.modules.ladysite.sources import enabled_parser_sources
+        allowed = {item["key"] for item in enabled_parser_sources()}
+    except Exception as exc:
+        logger.debug(f"读取数据源开关失败，按全部启用处理: {exc}")
+        return sites
+
+    return tuple(s for s in sites if s in allowed) or sites
 
 
 # ----------------------------------------------------------------------

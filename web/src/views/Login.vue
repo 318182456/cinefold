@@ -97,7 +97,7 @@ onMounted(async () => {
     <div class="w-full max-w-sm">
       <div class="mb-8 flex flex-col items-center gap-3">
         <AppLogo :size="48" />
-        <h1 class="text-xl font-semibold tracking-tight">byte-muse</h1>
+        <h1 class="text-xl font-semibold tracking-tight">cinefold</h1>
       </div>
 
       <form class="card space-y-4" @submit.prevent="submit">
@@ -143,7 +143,7 @@ onMounted(async () => {
       </form>
 
       <p class="mt-4 text-center text-xs text-gray-600">
-        忘记密码？删除数据目录下的 byte-muse.db 中 user 表记录后重启，会重新生成账号
+        忘记密码？删除数据目录下的 cinefold.db 中 user 表记录后重启，会重新生成账号
       </p>
     </div>
   </div>

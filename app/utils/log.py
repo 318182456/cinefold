@@ -11,7 +11,7 @@ from pathlib import Path
 from loguru import logger
 
 LOG_DIR = Path(os.getenv("LOG_DIR", "/data/logs"))
-LOG_FILE = LOG_DIR / "byte-muse.log"
+LOG_FILE = LOG_DIR / "cinefold.log"
 
 CONSOLE_FORMAT = (
     "<green>{time:YYYY-MM-DD HH:mm:ss}</green> | "

@@ -15,6 +15,7 @@ const routes = [
       { path: 'actors', name: 'Actors', component: () => import('@/views/Actors.vue'), meta: { title: '演员' } },
       { path: 'task', name: 'Task', component: () => import('@/views/Task.vue'), meta: { title: '任务' } },
       { path: 'logs', name: 'Logs', component: () => import('@/views/Logs.vue'), meta: { title: '日志' } },
+      { path: 'datasource', name: 'DataSource', component: () => import('@/views/DataSource.vue'), meta: { title: '数据源' } },
       { path: 'config', name: 'Config', component: () => import('@/views/Config.vue'), meta: { title: '设置' } },
       { path: 'migrate', name: 'Migrate', component: () => import('@/views/Migrate.vue'), meta: { title: '数据迁移' } },
       { path: 'profile', name: 'Profile', component: () => import('@/views/Profile.vue'), meta: { title: '账户' } },

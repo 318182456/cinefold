@@ -32,7 +32,7 @@ class Thunder:
     def get_device_id(self) -> str:
         """设备 ID 由访问地址推导，保持稳定即可。"""
         if not self.device_id:
-            seed = (self.url or "byte-muse").encode()
+            seed = (self.url or "cinefold").encode()
             self.device_id = hashlib.md5(seed).hexdigest()
         return self.device_id
 
@@ -47,7 +47,7 @@ class Thunder:
             "x-device-id": self.get_device_id(),
             "x-captcha-token": self.captcha_token,
             "content-type": "application/json",
-            "User-Agent": "Mozilla/5.0 byte-muse",
+            "User-Agent": "Mozilla/5.0 cinefold",
         }
 
     @staticmethod
@@ -103,6 +103,14 @@ class Thunder:
     def add_torrent(self, content: bytes, code: str = "", save_path: str = "") -> str | None:
         logger.warning("迅雷不支持直接上传种子文件，请改用磁力链接")
         return None
+
+    def delete_torrent(
+        self, hashes: Sequence[str], delete_files: bool = False
+    ) -> list[str]:
+        """迅雷是网盘离线下载，没有本地做种的概念，不参与联动删除。"""
+        if hashes:
+            logger.info("迅雷不支持删除种子，已跳过")
+        return []
 
     def monitor_torrent(self, hashes: Sequence[str] | None = None) -> list[dict]:
         if not self.authorization:
