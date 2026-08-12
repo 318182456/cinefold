@@ -69,6 +69,20 @@ def web_current() -> Path:
     return update_root() / "web" / "current"
 
 
+def web_version() -> str:
+    """已装前端 overlay 的版本号，没装过返回空。
+
+    前后端分开发包后这个值必须单独记：只更新前端的那些版本不会动后端
+    overlay，APP_VERSION 停在原地，光看它会把同一次前端更新反复判成待更新。
+
+    版本号写在 overlay 目录内的 VERSION 里。前端包本身不带这个文件
+    （里面是 Vite 产物），由安装流程写入 —— 放目录里而不是另起一个文件，
+    是为了让 _replace_dir 的整体替换把它一起换掉，不会出现目录换了、
+    版本号还是旧的这种错位。
+    """
+    return read_version(web_current())
+
+
 def read_version(root: Path) -> str:
     try:
         return (root / _VERSION_FILE).read_text(encoding="utf-8").strip()

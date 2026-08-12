@@ -1,16 +1,24 @@
 """热更新：下载 zip、校验、安装、重启。
 
-产物来自 GitHub Releases，每个版本挂三个文件：
+产物来自 GitHub Releases：
 
     backend-<version>.zip    app/ + main.py + VERSION + requirements.txt
     frontend-<version>.zip   web/dist 的内容
-    manifest.json            两个包的 sha256 与体积
+    manifest.json            本版实际发出的包的 sha256 与体积
+
+前后端分开发包，一次更新可能只有其中一个 —— 只改后端时前端产物字节完全
+相同，发出来只是让每台机器白下载一份。按 manifest 装：缺的那一侧保持不动，
+继续用已装的版本。
+
+因此两侧版本可以不一致，"已装版本"要按落后的那侧算（见 _installed_version），
+否则只更新前端的版本会被 APP_VERSION 判成已装而永远补不上。
 
 安装落到 ${DATA_DIR}/updates/ 而不是覆盖 /app：那里是挂载卷，重建容器
 不会丢；镜像反超时 overlay 会被自动判废（见 app.core.overlay）。
 
 后端重启靠进程自杀 —— supervisord 配了 autorestart=true，退出即被拉起，
-新进程启动时 overlay 已经就位。前端不需要重启，nginx 每次请求都读磁盘。
+新进程启动时 overlay 已经就位。只换前端时不重启：nginx 每次请求都读磁盘，
+文件换掉即生效，重启只是白中断一次服务。
 """
 from __future__ import annotations
 
@@ -265,12 +273,34 @@ def _write_cache(payload: dict) -> None:
         logger.debug(f"写入版本缓存失败: {exc}")
 
 
+def _installed_version() -> str:
+    """当前实际装到哪一版了，取前后端里较旧的那个。
+
+    前后端分开发包后，两侧版本可能不一致：只发了后端包的版本装完，前端还是
+    上一版。此时"已装版本"必须按落后的那侧算，否则那个只更新前端的版本会被
+    判成已装，永远补不上。
+
+    前端从没装过 overlay（一直用镜像自带的）时不参与比较 —— 那种情况下
+    前端跟着镜像走，与热更新无关。
+    """
+    backend = APP_VERSION
+    web = overlay.web_version()
+    if not web:
+        return backend
+
+    backend_parsed = overlay.parse_version(backend)
+    web_parsed = overlay.parse_version(web)
+    if not backend_parsed or not web_parsed:
+        return backend
+    return backend if backend_parsed <= web_parsed else web
+
+
 def check_update(use_cache: bool = True) -> dict:
     """对比当前版本与最新 release。
 
     返回 {current, latest, has_update, checked, can_upgrade, notes, error}。
     checked 为 False 表示这次没查到（网络不通、限流等），前端不显示红点，
-    error 里是具体原因。can_upgrade 额外要求两个 zip 都挂上去了 ——
+    error 里是具体原因。can_upgrade 要求至少挂了一个 zip ——
     只发了镜像没发 zip 的版本能提示但不能一键装。
     """
     release = _read_cache() if use_cache else {}
@@ -293,12 +323,15 @@ def check_update(use_cache: bool = True) -> dict:
         "error": "" if latest else _last_error,
     }
 
-    current_parsed = overlay.parse_version(APP_VERSION)
+    current_parsed = overlay.parse_version(_installed_version())
     latest_parsed = overlay.parse_version(latest)
     if current_parsed and latest_parsed and latest_parsed > current_parsed:
         result["has_update"] = True
+        # 前后端分开发包，一次更新可能只带其中一个 —— 有任意一个就能装。
+        # 缺的那一侧沿用已装的版本（nginx 对前端是 overlay→镜像的回落，
+        # 后端 overlay 不动就还是原来那份）
         result["can_upgrade"] = bool(
-            assets.get(f"backend-{latest}.zip") and assets.get(f"frontend-{latest}.zip")
+            assets.get(f"backend-{latest}.zip") or assets.get(f"frontend-{latest}.zip")
         )
     return result
 
@@ -507,40 +540,64 @@ def _do_upgrade(target: str, assets: dict) -> None:
     backend_dir = workspace / "backend"
     frontend_dir = workspace / "web"
 
+    # 前后端分开发包：这一版只改了一侧时，另一侧的包不存在，跳过它即可。
+    # 没被更新的那一侧继续用已装的版本
+    has_backend = bool(assets.get(f"backend-{target}.zip"))
+    has_frontend = bool(assets.get(f"frontend-{target}.zip"))
+
     try:
+        if not (has_backend or has_frontend):
+            raise RuntimeError(f"{target} 没有可安装的更新包")
+
         with _client() as client:
             manifest = _fetch_manifest(client, assets, target)
 
             _set_state("download", f"开始下载 {target}", 5, target=target)
-            _download(client, assets[f"backend-{target}.zip"], backend_zip, "后端包", 5, 30)
-            _download(client, assets[f"frontend-{target}.zip"], frontend_zip, "前端包", 35, 25)
+            if has_backend:
+                _download(client, assets[f"backend-{target}.zip"], backend_zip, "后端包", 5, 30)
+            if has_frontend:
+                _download(client, assets[f"frontend-{target}.zip"], frontend_zip, "前端包", 35, 25)
 
         _set_state("verify", "校验安装包…", 62)
-        _verify(backend_zip, (manifest.get(f"backend-{target}.zip") or {}).get("sha256", ""), "后端包")
-        _verify(frontend_zip, (manifest.get(f"frontend-{target}.zip") or {}).get("sha256", ""), "前端包")
+        if has_backend:
+            _verify(backend_zip, (manifest.get(f"backend-{target}.zip") or {}).get("sha256", ""), "后端包")
+        if has_frontend:
+            _verify(frontend_zip, (manifest.get(f"frontend-{target}.zip") or {}).get("sha256", ""), "前端包")
 
         _set_state("install", "解压安装包…", 66)
-        _safe_extract(backend_zip, backend_dir)
-        _safe_extract(frontend_zip, frontend_dir)
+        if has_backend:
+            _safe_extract(backend_zip, backend_dir)
+            # 包里必须有这两样，否则装上去就是个坏 overlay
+            if not (backend_dir / "app").is_dir():
+                raise RuntimeError("后端包结构异常：缺少 app 目录")
+            unpacked = overlay.read_version(backend_dir)
+            if unpacked != target:
+                raise RuntimeError(f"后端包版本不符：期望 {target}，实际 {unpacked or '空'}")
 
-        # 包里必须有这两样，否则装上去就是个坏 overlay
-        if not (backend_dir / "app").is_dir():
-            raise RuntimeError("后端包结构异常：缺少 app 目录")
-        unpacked = overlay.read_version(backend_dir)
-        if unpacked != target:
-            raise RuntimeError(f"后端包版本不符：期望 {target}，实际 {unpacked or '空'}")
-        if not any(frontend_dir.glob("index.html")):
-            raise RuntimeError("前端包结构异常：缺少 index.html")
+            _install_deps(backend_dir)
+            _smoke_test(backend_dir)
 
-        _install_deps(backend_dir)
-        _smoke_test(backend_dir)
+        if has_frontend:
+            _safe_extract(frontend_zip, frontend_dir)
+            if not any(frontend_dir.glob("index.html")):
+                raise RuntimeError("前端包结构异常：缺少 index.html")
+            # 前端包里没有 VERSION（都是 Vite 产物），这里补上 ——
+            # 只更新前端的版本不会动 APP_VERSION，靠它才能判断装到哪一版了
+            (frontend_dir / "VERSION").write_text(target, encoding="utf-8")
 
-        # 两个包都验过了才动生效目录，尽量缩短前后端版本不一致的窗口
+        # 全部验过了才动生效目录，尽量缩短前后端版本不一致的窗口
         _set_state("install", "写入新版本…", 88)
-        _replace_dir(backend_dir, overlay.backend_current(), overlay.backend_backup())
-        _replace_dir(frontend_dir, overlay.web_current(), None)
+        if has_backend:
+            _replace_dir(backend_dir, overlay.backend_current(), overlay.backend_backup())
+        if has_frontend:
+            _replace_dir(frontend_dir, overlay.web_current(), None)
 
-        _set_state("restart", f"{target} 已就位，正在重启…", 95)
+        if has_backend:
+            _set_state("restart", f"{target} 已就位，正在重启…", 95)
+        else:
+            # 只换了前端：nginx 直接读 overlay 目录，文件一换即生效，
+            # 后端代码没动，重启纯属白中断一次服务
+            _set_state("install", f"{target} 前端已就位，刷新页面即可", 95)
     except Exception as exc:
         logger.exception("升级失败")
         with _state_lock:
@@ -552,6 +609,11 @@ def _do_upgrade(target: str, assets: dict) -> None:
 
     shutil.rmtree(workspace, ignore_errors=True)
     _set_state("done", f"已更新到 {target}", 100)
+
+    if not has_backend:
+        with _state_lock:
+            _state.running = False
+        return
 
     # 留点时间让前端把"重启中"这一帧拿到，再自杀等 supervisord 拉起
     threading.Timer(2.0, _restart_process).start()
@@ -592,20 +654,21 @@ def start_upgrade(target: str = "") -> tuple[bool, str]:
     if target and target != latest:
         return False, f"只能升级到最新版 {latest}"
 
-    current_parsed = overlay.parse_version(APP_VERSION)
+    # 与 check_update 用同一个判据：只更新了前端的版本，APP_VERSION 没变，
+    # 按它比会误判成"已是最新"而拒装
+    installed = _installed_version()
+    current_parsed = overlay.parse_version(installed)
     latest_parsed = overlay.parse_version(latest)
     if not latest_parsed:
         return False, "最新版本号格式异常"
     if current_parsed and latest_parsed <= current_parsed:
-        return False, f"当前已是 {APP_VERSION}，无需更新"
+        return False, f"当前已是 {installed}，无需更新"
 
+    # 前后端分开发包，一次更新可能只带其中一个。有任意一个就能装 ——
+    # 两个都没有才是真没得更新
     assets = release.get("assets") or {}
-    missing = [
-        name for name in (f"backend-{latest}.zip", f"frontend-{latest}.zip")
-        if not assets.get(name)
-    ]
-    if missing:
-        return False, f"该版本未提供更新包（缺 {', '.join(missing)}），请用 docker compose pull"
+    if not (assets.get(f"backend-{latest}.zip") or assets.get(f"frontend-{latest}.zip")):
+        return False, "该版本未提供更新包，请用 docker compose pull"
 
     with _state_lock:
         _state.running = True
@@ -661,6 +724,10 @@ def upgrade_info() -> dict:
         "image_version": overlay.image_version(),
         "overlay_version": overlay.read_version(current) if current.exists() else "",
         "backup_version": overlay.read_version(backup) if backup.exists() else "",
+        # 前后端分开发包，两者可能不同版。前端没装过 overlay 时为空，
+        # 那种情况下前端跟着镜像走
+        "web_version": overlay.web_version(),
+        "installed_version": _installed_version(),
         "can_rollback": current.exists(),
         "update_dir": str(overlay.update_root()),
     }

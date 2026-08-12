@@ -164,12 +164,14 @@ class TestUpdateCheck:
         assert not p("0.0.8") > p("0.0.8-2")
 
     @staticmethod
-    def _release(version, with_assets=True):
+    def _release(version, with_assets=True, sides=("backend", "frontend")):
+        """造一个 release。sides 控制挂了哪几个包 —— 前后端分开发布后，
+        一次更新可能只有其中一个。"""
         assets = {}
         if with_assets:
             assets = {
-                f"backend-{version}.zip": f"https://x/backend-{version}.zip",
-                f"frontend-{version}.zip": f"https://x/frontend-{version}.zip",
+                f"{side}-{version}.zip": f"https://x/{side}-{version}.zip"
+                for side in sides
             }
         return {"version": version, "assets": assets, "notes": "", "published_at": ""}
 
@@ -375,6 +377,141 @@ class TestUpdateCheck:
         started, message = upgrade.start_upgrade()
         assert started is False
         assert "未提供更新包" in message
+
+
+class TestSplitPackages:
+    """前后端分开发包。只改一侧时另一侧不发包，装的时候要跳过它。
+
+    这里的关键是"已装版本"按落后的那侧算 —— 否则只更新前端的版本会被
+    APP_VERSION 判成已装，永远补不上。
+    """
+
+    @staticmethod
+    def _release(version, sides):
+        return {
+            "version": version,
+            "assets": {
+                f"{side}-{version}.zip": f"https://x/{side}-{version}.zip"
+                for side in sides
+            },
+            "notes": "",
+            "published_at": "",
+        }
+
+    @staticmethod
+    def _web_at(monkeypatch, version):
+        """伪造已装前端 overlay 的版本。"""
+        from app.services import upgrade
+        monkeypatch.setattr(upgrade.overlay, "web_version", lambda: version)
+
+    def test_backend_only_release_can_upgrade(self, monkeypatch):
+        """只发后端包也能装 —— 前端沿用已装的那份。"""
+        from app.services import upgrade
+
+        monkeypatch.setattr(upgrade, "APP_VERSION", "2.0.3")
+        self._web_at(monkeypatch, "")
+        monkeypatch.setattr(
+            upgrade, "fetch_latest_release",
+            lambda: self._release("2.0.4", ("backend",)),
+        )
+        result = upgrade.check_update(use_cache=False)
+        assert result["has_update"] is True
+        assert result["can_upgrade"] is True
+
+    def test_frontend_only_release_can_upgrade(self, monkeypatch):
+        """只发前端包也能装 —— 后端代码不动。"""
+        from app.services import upgrade
+
+        monkeypatch.setattr(upgrade, "APP_VERSION", "2.0.3")
+        self._web_at(monkeypatch, "")
+        monkeypatch.setattr(
+            upgrade, "fetch_latest_release",
+            lambda: self._release("2.0.4", ("frontend",)),
+        )
+        result = upgrade.check_update(use_cache=False)
+        assert result["has_update"] is True
+        assert result["can_upgrade"] is True
+
+    def test_installed_version_follows_the_older_side(self, monkeypatch):
+        """后端 2.0.4、前端还在 2.0.3 时，已装版本算 2.0.3。"""
+        from app.services import upgrade
+
+        monkeypatch.setattr(upgrade, "APP_VERSION", "2.0.4")
+        self._web_at(monkeypatch, "2.0.3")
+        assert upgrade._installed_version() == "2.0.3"
+
+    def test_frontend_update_still_pending_after_backend_only(self, monkeypatch):
+        """只装了后端包之后，那一版的前端更新仍要提示。
+
+        这是分开发包最容易错的地方：后端 VERSION 已经是 2.0.4，光看
+        APP_VERSION 会认为装完了，前端却还停在 2.0.3。
+        """
+        from app.services import upgrade
+
+        monkeypatch.setattr(upgrade, "APP_VERSION", "2.0.4")
+        self._web_at(monkeypatch, "2.0.3")
+        monkeypatch.setattr(
+            upgrade, "fetch_latest_release",
+            lambda: self._release("2.0.4", ("frontend",)),
+        )
+        result = upgrade.check_update(use_cache=False)
+        assert result["has_update"] is True
+        assert result["can_upgrade"] is True
+
+    def test_no_update_when_both_sides_current(self, monkeypatch):
+        """两侧都到位了才算装完。"""
+        from app.services import upgrade
+
+        monkeypatch.setattr(upgrade, "APP_VERSION", "2.0.4")
+        self._web_at(monkeypatch, "2.0.4")
+        monkeypatch.setattr(
+            upgrade, "fetch_latest_release",
+            lambda: self._release("2.0.4", ("backend", "frontend")),
+        )
+        assert upgrade.check_update(use_cache=False)["has_update"] is False
+
+    def test_never_installed_frontend_does_not_hold_back(self, monkeypatch):
+        """从没热更新过前端时，前端跟着镜像走，不参与版本比较。
+
+        否则空的 web_version 会被当成落后，永远提示有更新。
+        """
+        from app.services import upgrade
+
+        monkeypatch.setattr(upgrade, "APP_VERSION", "2.0.4")
+        self._web_at(monkeypatch, "")
+        assert upgrade._installed_version() == "2.0.4"
+        monkeypatch.setattr(
+            upgrade, "fetch_latest_release",
+            lambda: self._release("2.0.4", ("backend", "frontend")),
+        )
+        assert upgrade.check_update(use_cache=False)["has_update"] is False
+
+    def test_unparseable_web_version_is_ignored(self, monkeypatch):
+        """前端 VERSION 被写坏时退回只看后端，而不是卡住更新。"""
+        from app.services import upgrade
+
+        monkeypatch.setattr(upgrade, "APP_VERSION", "2.0.4")
+        self._web_at(monkeypatch, "garbage")
+        assert upgrade._installed_version() == "2.0.4"
+
+    def test_upgrade_starts_for_frontend_only_release(self, monkeypatch):
+        """后端已是最新、只差前端时，点安装不能被"无需更新"拦下。"""
+        from app.services import upgrade
+
+        monkeypatch.setattr(upgrade, "APP_VERSION", "2.0.4")
+        self._web_at(monkeypatch, "2.0.3")
+        monkeypatch.setattr(
+            upgrade, "fetch_latest_release",
+            lambda: self._release("2.0.4", ("frontend",)),
+        )
+        started = {}
+        monkeypatch.setattr(
+            upgrade.threading, "Thread",
+            lambda **kw: type("T", (), {"start": lambda s: started.setdefault("go", kw)})(),
+        )
+        ok, message = upgrade.start_upgrade()
+        assert ok is True, message
+        assert started.get("go", {}).get("args", ("", {}))[0] == "2.0.4"
 
 
 class TestGithubProxy:

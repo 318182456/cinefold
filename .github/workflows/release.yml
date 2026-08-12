@@ -30,6 +30,9 @@ jobs:
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
+        with:
+          # 要跟上一个发布 tag 比对哪边变了，得有完整历史
+          fetch-depth: 0
 
       - name: 确定版本号
         id: version
@@ -83,7 +86,51 @@ jobs:
           git push origin "v${VERSION}"
           echo "已创建 tag v${VERSION}"
 
+      # 前后端不是每次都一起变。只改后端时前端包字节完全相同，发出来
+      # 只是让每台机器白下载一份 —— 所以按需打包，各自独立。
+      #
+      # 比对基准是上一个发布 tag。取不到（首个版本、tag 被删）时两边都打，
+      # 宁可多发一个包也不能漏发导致装不上
+      - name: 判断哪边有变更
+        id: changed
+        env:
+          VERSION: ${{ steps.version.outputs.value }}
+        run: |
+          set -euo pipefail
+
+          PREV=$(git tag -l 'v*' --sort=-v:refname \
+            | grep -vFx "v${VERSION}" | head -n1 || true)
+
+          if [ -z "$PREV" ]; then
+            echo "没有可比对的上一个 tag，两边都打包"
+            echo "backend=true" >> "$GITHUB_OUTPUT"
+            echo "frontend=true" >> "$GITHUB_OUTPUT"
+            echo "base=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "与 $PREV 比对"
+          echo "base=$PREV" >> "$GITHUB_OUTPUT"
+
+          # VERSION 与 requirements.txt 算后端 —— 前者是版本号本身，
+          # 后者变了必须重装依赖，两者都只能靠后端包送达
+          if git diff --quiet "$PREV" HEAD -- app main.py VERSION requirements.txt; then
+            echo "backend=false" >> "$GITHUB_OUTPUT"
+            echo "后端无变更，跳过后端包"
+          else
+            echo "backend=true" >> "$GITHUB_OUTPUT"
+            echo "后端有变更"
+          fi
+
+          if git diff --quiet "$PREV" HEAD -- web; then
+            echo "frontend=false" >> "$GITHUB_OUTPUT"
+            echo "前端无变更，跳过前端包"
+          else
+            echo "frontend=true" >> "$GITHUB_OUTPUT"
+            echo "前端有变更"
+          fi
+
       - name: 安装 Node
+        if: steps.changed.outputs.frontend == 'true'
         uses: actions/setup-node@v4
         with:
           node-version: '20'
@@ -91,6 +138,7 @@ jobs:
           cache-dependency-path: web/package-lock.json
 
       - name: 构建前端
+        if: steps.changed.outputs.frontend == 'true'
         run: |
           cd web
           npm ci
@@ -100,57 +148,75 @@ jobs:
         id: pack
         env:
           VERSION: ${{ steps.version.outputs.value }}
+          PACK_BACKEND: ${{ steps.changed.outputs.backend }}
+          PACK_FRONTEND: ${{ steps.changed.outputs.frontend }}
         run: |
           set -euo pipefail
           mkdir -p dist
 
-          # --- 后端 ---
-          # 程序解压后按 <root>/app、<root>/VERSION 找文件，所以 zip 里
-          # 就是这个平铺结构，不带顶层目录
-          BACKEND="dist/backend-${VERSION}.zip"
-          zip -qr "$BACKEND" \
-            app main.py VERSION requirements.txt \
-            -x '*__pycache__*' '*.pyc' '*.pyo' '*/.pytest_cache/*'
+          # manifest 里只登记这一版真发出去的包。程序按 manifest 决定
+          # 装哪些，缺哪个就沿用已装的那份
+          ENTRIES=""
 
-          # --- 前端 ---
-          # web/dist 的内容直接铺到 zip 根，nginx 的 root 指向解压目录
-          FRONTEND="dist/frontend-${VERSION}.zip"
-          (cd web/dist && zip -qr "../../$FRONTEND" .)
+          if [ "$PACK_BACKEND" = "true" ]; then
+            # 程序解压后按 <root>/app、<root>/VERSION 找文件，所以 zip 里
+            # 就是这个平铺结构，不带顶层目录
+            BACKEND="dist/backend-${VERSION}.zip"
+            zip -qr "$BACKEND" \
+              app main.py VERSION requirements.txt \
+              -x '*__pycache__*' '*.pyc' '*.pyo' '*/.pytest_cache/*'
+
+            BACKEND_SHA=$(sha256sum "$BACKEND" | cut -d' ' -f1)
+            ENTRIES="${ENTRIES}    \"backend-${VERSION}.zip\": {\"sha256\": \"${BACKEND_SHA}\", \"size\": $(stat -c%s "$BACKEND")}"
+            echo "已打后端包，sha256 ${BACKEND_SHA}"
+          fi
+
+          if [ "$PACK_FRONTEND" = "true" ]; then
+            # web/dist 的内容直接铺到 zip 根，nginx 的 root 指向解压目录
+            FRONTEND="dist/frontend-${VERSION}.zip"
+            (cd web/dist && zip -qr "../../$FRONTEND" .)
+
+            # 漏掉 index.html 的话装上去是白屏，先确认
+            unzip -l "$FRONTEND" | grep -q ' index.html$' \
+              || { echo "前端包缺少 index.html" >&2; exit 1; }
+
+            FRONTEND_SHA=$(sha256sum "$FRONTEND" | cut -d' ' -f1)
+            [ -n "$ENTRIES" ] && ENTRIES="${ENTRIES},"$'\n'
+            ENTRIES="${ENTRIES}    \"frontend-${VERSION}.zip\": {\"sha256\": \"${FRONTEND_SHA}\", \"size\": $(stat -c%s "$FRONTEND")}"
+            echo "已打前端包，sha256 ${FRONTEND_SHA}"
+          fi
+
+          # 两边都没变还发版说不通 —— 只改了 README 之类。让它响一声，
+          # 免得发出一个空 release，用户点更新却什么也没装上
+          if [ -z "$ENTRIES" ]; then
+            echo "前后端都无变更，没有可发布的包" >&2
+            exit 1
+          fi
 
           # --- 校验清单 ---
           # 程序下载完先比对 sha256 才装，防止半截包或中间篡改
-          BACKEND_SHA=$(sha256sum "$BACKEND" | cut -d' ' -f1)
-          FRONTEND_SHA=$(sha256sum "$FRONTEND" | cut -d' ' -f1)
-          BACKEND_SIZE=$(stat -c%s "$BACKEND")
-          FRONTEND_SIZE=$(stat -c%s "$FRONTEND")
-
-          cat > dist/manifest.json <<EOF
           {
-            "version": "${VERSION}",
-            "files": {
-              "backend-${VERSION}.zip": {
-                "sha256": "${BACKEND_SHA}",
-                "size": ${BACKEND_SIZE}
-              },
-              "frontend-${VERSION}.zip": {
-                "sha256": "${FRONTEND_SHA}",
-                "size": ${FRONTEND_SIZE}
-              }
-            }
-          }
-          EOF
+            echo '{'
+            echo "  \"version\": \"${VERSION}\","
+            echo '  "files": {'
+            echo "$ENTRIES"
+            echo '  }'
+            echo '}'
+          } > dist/manifest.json
 
-          # 前端包漏掉 index.html 的话装上去是白屏，这里先确认
-          unzip -l "$FRONTEND" | grep -q ' index.html$' \
-            || { echo "前端包缺少 index.html" >&2; exit 1; }
+          python3 -c "import json,sys; json.load(open('dist/manifest.json'))" \
+            || { echo "生成的 manifest.json 不是合法 JSON" >&2; exit 1; }
 
           {
             echo "### 更新包"
             echo '```'
             ls -lh dist/
             echo '```'
-            echo "backend  sha256: ${BACKEND_SHA}"
-            echo "frontend sha256: ${FRONTEND_SHA}"
+            echo '```json'
+            cat dist/manifest.json
+            echo '```'
+            [ "$PACK_BACKEND" = "true" ] || echo "> 后端无变更，本版不含后端包。"
+            [ "$PACK_FRONTEND" = "true" ] || echo "> 前端无变更，本版不含前端包。"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: 发布到 Release
@@ -161,7 +227,8 @@ jobs:
           # 手动补发时 tag 可能还不存在，让 action 顺手建一个
           target_commitish: ${{ github.sha }}
           generate_release_notes: true
+          # 通配上传：这一版可能只有后端包或只有前端包，写死两个文件名
+          # 会因缺文件而失败
           files: |
-            dist/backend-${{ steps.version.outputs.value }}.zip
-            dist/frontend-${{ steps.version.outputs.value }}.zip
+            dist/*.zip
             dist/manifest.json
