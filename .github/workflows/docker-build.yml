@@ -4,14 +4,17 @@ on:
   push:
     branches:
       - main
-    tags:
-      - 'v*'
     # 只改文档时不触发构建
     paths-ignore:
       - '**.md'
       - '.gitignore'
   # 手动触发
   workflow_dispatch:
+
+# 不监听 tag：发版 tag 由 release.yml 在 VERSION 变更时自动建，而那次
+# VERSION 提交本身已经触发过一次构建了。再监听 tag 就是同一份代码构建两遍，
+# 白烧一次 GHCR 写入 —— GHCR 的次级速率限制正是按写入次数算的。
+# latest 的更新不依赖 tag，靠下面的 VERSION 变更判定。
 
 env:
   REGISTRY: ghcr.io
@@ -40,11 +43,8 @@ jobs:
           echo "value=$VALUE" >> "$GITHUB_OUTPUT"
 
           # 只有发版（VERSION 变更）才更新 latest，
-          # 日常提交推送的镜像不覆盖它。打 tag 发版时也算。
-          if [ "${{ github.ref_type }}" = "tag" ]; then
-            echo "released=true" >> "$GITHUB_OUTPUT"
-            echo "打 tag 发版，将更新 latest"
-          elif git rev-parse HEAD~1 >/dev/null 2>&1 \
+          # 日常提交推送的镜像不覆盖它
+          if git rev-parse HEAD~1 >/dev/null 2>&1 \
             && [ "$(git show HEAD~1:VERSION 2>/dev/null | tr -d '[:space:]')" != "$VALUE" ]; then
             echo "released=true" >> "$GITHUB_OUTPUT"
             echo "VERSION 已变更为 $VALUE，将更新 latest"
@@ -101,8 +101,6 @@ jobs:
           tags: |
             type=raw,value=latest,enable=${{ steps.version.outputs.released == 'true' }}
             type=raw,value=${{ steps.version.outputs.value }},enable={{is_default_branch}}
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
 
       # 只出 linux/amd64。多架构下每个平台都要单独写一份 manifest（外加
       # attestation），registry 写入次数翻倍，更容易撞上 GHCR 的次级速率限制；

@@ -6,6 +6,12 @@ on:
   push:
     tags:
       - 'v*'
+    # VERSION 改了就发版，不必再手工打 tag —— tag 由下面的步骤自动建。
+    # 光推 tag 也仍然有效（这里与 tags 触发是两条独立入口）
+    branches:
+      - main
+    paths:
+      - 'VERSION'
   # 手动补发某个版本的包
   workflow_dispatch:
     inputs:
@@ -45,8 +51,9 @@ jobs:
             exit 1
           fi
 
-          # tag 与 VERSION 文件不一致时，装上去的 overlay 会被程序判为
-          # 版本不符而拒绝，不如在这里就拦下
+          # tag 或手动输入的版本号与 VERSION 文件不一致时，装上去的 overlay
+          # 会被程序判为版本不符而拒绝，不如在这里就拦下。
+          # VERSION 变更触发的那条路径上两者同源，这里恒为真
           FILE_VERSION=$(cat VERSION | tr -d '[:space:]')
           if [ "$VALUE" != "$FILE_VERSION" ]; then
             echo "tag 版本 $VALUE 与 VERSION 文件里的 $FILE_VERSION 不一致" >&2
@@ -55,6 +62,26 @@ jobs:
 
           echo "value=$VALUE" >> "$GITHUB_OUTPUT"
           echo "打包版本 $VALUE"
+
+      # VERSION 变更触发时这里补上 tag。已存在就跳过 ——
+      # 同一个版本号重复推送（改完又改回来、手动补发）不该让整个流程失败
+      #
+      # 这个 tag 不会把本工作流再触发一遍：GITHUB_TOKEN 推送的 ref 按 GitHub
+      # 的规定不触发任何 workflow。所以无需额外防重复
+      - name: 按 VERSION 建 tag
+        env:
+          VERSION: ${{ steps.version.outputs.value }}
+        run: |
+          set -euo pipefail
+          if git ls-remote --exit-code --tags origin "v${VERSION}" >/dev/null 2>&1; then
+            echo "tag v${VERSION} 已存在，跳过创建"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag "v${VERSION}"
+          git push origin "v${VERSION}"
+          echo "已创建 tag v${VERSION}"
 
       - name: 安装 Node
         uses: actions/setup-node@v4
