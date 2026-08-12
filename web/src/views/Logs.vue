@@ -9,7 +9,7 @@ const lines = ref([])
 const keyword = ref('')
 const level = ref('')
 const autoScroll = ref(true)
-const autoRefresh = ref(false)
+const autoRefresh = ref(true)
 const loading = ref(false)
 const box = ref(null)
 let timer = null
@@ -47,7 +47,7 @@ async function load() {
 watch(autoRefresh, (on) => {
   clearInterval(timer)
   if (on) timer = setInterval(load, 5000)
-})
+}, { immediate: true })
 
 onMounted(load)
 onUnmounted(() => clearInterval(timer))

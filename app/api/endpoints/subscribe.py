@@ -226,16 +226,39 @@ def release_today(current_user: str = Depends(get_current_user)):
 
 
 @router.get("/codes/recommend")
-def recommend(limit: int = PAGE_SIZE, current_user: str = Depends(get_current_user)):
-    """推荐：评分高且未订阅的番号。"""
+def recommend(
+    limit: int = PAGE_SIZE,
+    page: int = 1,
+    current_user: str = Depends(get_current_user),
+):
+    """推荐：评分高且未订阅的番号。
+
+    高分未订阅的番号可能有上千条，一次全给前端太多，按 page 翻页。
+    榜单退化调用只关心前 limit 条，不传 page 时行为不变。
+    """
+    from sqlalchemy import func
+
+    size = max(limit, 1)
+    page = max(page, 1)
+    # 评分相同时按番号定序，否则翻页会出现重复或漏项
+    conditions = (Code.status == CodeStatus.NONE, Code.star.isnot(None))
     with session_scope() as session:
+        total = session.scalar(
+            select(func.count()).select_from(Code).where(*conditions)
+        ) or 0
         rows = session.scalars(
             select(Code)
-            .where(Code.status == CodeStatus.NONE, Code.star.isnot(None))
-            .order_by(Code.star.desc())
-            .limit(limit)
+            .where(*conditions)
+            .order_by(Code.star.desc(), Code.code)
+            .offset((page - 1) * size)
+            .limit(size)
         ).all()
-        return ResponseEntity.ok({"items": [row.to_dict() for row in rows]})
+        return ResponseEntity.ok({
+            "items": [row.to_dict() for row in rows],
+            "total": total,
+            "page": page,
+            "size": size,
+        })
 
 
 @router.get("/rank")

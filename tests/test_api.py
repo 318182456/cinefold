@@ -208,6 +208,25 @@ class TestSubscribe:
     def test_recommend(self, client, auth):
         assert "items" in client.get("/api/v1/codes/recommend", headers=auth).json()["data"]
 
+    def test_recommend_pagination(self, client, auth):
+        """推荐分页：两页不重叠，且 total 是筛选后的总数。"""
+        from app.database.models import Code, CodeStatus
+        from app.database.session import session_scope
+
+        with session_scope() as session:
+            for i in range(5):
+                session.merge(Code(
+                    code=f"REC-{i:03d}", status=CodeStatus.NONE,
+                    star=9.0 - i * 0.1, title="t",
+                ))
+
+        first = client.get("/api/v1/codes/recommend?limit=2&page=1", headers=auth).json()["data"]
+        second = client.get("/api/v1/codes/recommend?limit=2&page=2", headers=auth).json()["data"]
+
+        assert first["total"] >= 5
+        assert len(first["items"]) == 2
+        assert not {i["code"] for i in first["items"]} & {i["code"] for i in second["items"]}
+
 
 class TestActors:
     def test_subscribe_and_list(self, client, auth):

@@ -85,7 +85,8 @@ export const cancelCodesBatch = (codes) => http.post('/codes/cancel/batch', { co
 export const downloadCode = (payload) => http.post('/codes/download', payload)
 export const downloadAll = () => http.post('/codes/download/all')
 export const getReleaseToday = () => http.get('/codes/release_today')
-export const getRecommend = (limit = 15) => http.get('/codes/recommend', { params: { limit } })
+export const getRecommend = (limit = 15, page = 1) =>
+  http.get('/codes/recommend', { params: { limit, page } })
 export const translateTitles = () => http.post('/codes/translate')
 
 // ---------------------------------------------------------------- 数据源
