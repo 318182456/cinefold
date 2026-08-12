@@ -1,6 +1,6 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { askAgent, getAgentStatus } from '@/api'
+import { askAgent, cancelAgentAction, confirmAgentAction, getAgentStatus } from '@/api'
 import { renderMarkdown } from '@/utils/markdown'
 
 // 面板尺寸。拖动时要用它把面板夹在视口内，写死比读 DOM 省事且够准
@@ -14,7 +14,7 @@ const HISTORY_LIMIT = 12
 const POS_KEY = 'agent_panel_pos'
 const SUGGESTIONS = [
   '现在什么情况？',
-  '有多少订阅还没下到资源？',
+  '下载卡住的任务有哪些？',
   '最近有什么报错吗？',
   '配置有什么问题？',
 ]
@@ -129,6 +129,8 @@ async function send(text) {
       role: 'assistant',
       content: data?.answer || '没有返回内容',
       tools: data?.tools_used || [],
+      // 待确认的下载器操作，点确认才真的执行
+      proposals: (data?.proposals || []).map((p) => ({ ...p, status: 'pending' })),
     })
   } catch (err) {
     messages.value.push({
@@ -140,6 +142,31 @@ async function send(text) {
     sending.value = false
     scrollToBottom()
   }
+}
+
+async function confirmProposal(proposal) {
+  if (proposal.status !== 'pending') return
+  proposal.status = 'running'
+  try {
+    const data = await confirmAgentAction(proposal.id)
+    proposal.status = 'done'
+    proposal.result = data?.message || `已${proposal.label}`
+  } catch (err) {
+    // 失败要能重试：下载器临时连不上是常见情况
+    proposal.status = 'pending'
+    proposal.error = err.message
+  }
+  scrollToBottom()
+}
+
+async function cancelProposal(proposal) {
+  if (proposal.status !== 'pending') return
+  try {
+    await cancelAgentAction(proposal.id)
+  } catch {
+    // 后端没有这条提案也算取消成功，UI 照常收起
+  }
+  proposal.status = 'cancelled'
 }
 
 function onKeydown(event) {
@@ -254,7 +281,8 @@ onBeforeUnmount(() => {
       <div ref="bodyRef" class="flex-1 space-y-3 overflow-y-auto p-3">
         <div v-if="!messages.length" class="space-y-3">
           <p class="text-xs leading-relaxed text-gray-500">
-            可以直接问系统当前的情况。助手会实时查库、读日志、看任务，只读不改。
+            可以直接问系统当前的情况。助手会实时查库、读日志、看任务，
+            也能操作 qb / tr 的下载任务 —— 动手前会先让你确认。
           </p>
           <div class="flex flex-wrap gap-1.5">
             <button
@@ -281,6 +309,80 @@ onBeforeUnmount(() => {
               :class="msg.failed ? 'text-red-400' : 'text-gray-200'"
               v-html="renderMarkdown(msg.content)"
             />
+            <!-- 待确认的下载器操作 -->
+            <div
+              v-for="proposal in msg.proposals || []"
+              :key="proposal.id"
+              class="rounded-lg border px-2.5 py-2 text-xs"
+              :class="proposal.destructive
+                ? 'border-red-900/70 bg-red-950/30'
+                : 'border-gray-700 bg-gray-800/40'"
+            >
+              <p class="flex items-center gap-1.5">
+                <svg
+                  v-if="proposal.destructive"
+                  class="h-3.5 w-3.5 shrink-0 text-red-400"
+                  fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"
+                >
+                  <path
+                    stroke-linecap="round" stroke-linejoin="round"
+                    d="M12 9v4m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"
+                  />
+                </svg>
+                <span :class="proposal.destructive ? 'font-medium text-red-300' : 'text-gray-300'">
+                  {{ proposal.label }}
+                </span>
+                <span class="text-gray-500">· {{ proposal.targets.length }} 个任务</span>
+              </p>
+
+              <ul class="mt-1.5 space-y-0.5">
+                <li
+                  v-for="target in proposal.targets"
+                  :key="target.hash"
+                  class="flex items-baseline gap-1.5 text-gray-400"
+                >
+                  <span class="truncate">{{ target.name }}</span>
+                  <span v-if="target.progress_percent !== null" class="shrink-0 text-[10px] text-gray-600">
+                    {{ target.progress_percent }}%
+                  </span>
+                </li>
+              </ul>
+
+              <p v-if="proposal.destructive && proposal.status === 'pending'" class="mt-1.5 text-[11px] text-red-400">
+                {{ proposal.action === 'delete_with_files'
+                  ? '磁盘文件会一并删除，不可恢复'
+                  : '只从下载器移除任务，磁盘文件保留' }}
+              </p>
+              <p v-if="proposal.error" class="mt-1.5 text-[11px] text-red-400">
+                {{ proposal.error }}
+              </p>
+
+              <div v-if="proposal.status === 'pending'" class="mt-2 flex gap-1.5">
+                <button
+                  class="rounded px-2 py-1 text-[11px] font-medium text-white"
+                  :class="proposal.destructive ? 'bg-red-600 hover:bg-red-700' : 'bg-brand hover:bg-brand-hover'"
+                  @click="confirmProposal(proposal)"
+                >
+                  确认执行
+                </button>
+                <button
+                  class="rounded border border-gray-700 px-2 py-1 text-[11px] text-gray-400 hover:bg-gray-800"
+                  @click="cancelProposal(proposal)"
+                >
+                  取消
+                </button>
+              </div>
+              <p v-else-if="proposal.status === 'running'" class="mt-2 text-[11px] text-gray-500">
+                执行中…
+              </p>
+              <p v-else-if="proposal.status === 'done'" class="mt-2 text-[11px] text-brand">
+                {{ proposal.result }}
+              </p>
+              <p v-else-if="proposal.status === 'cancelled'" class="mt-2 text-[11px] text-gray-500">
+                已取消
+              </p>
+            </div>
+
             <p v-if="msg.tools?.length" class="flex flex-wrap items-center gap-1 px-1">
               <span class="text-[10px] text-gray-600">查询了</span>
               <span

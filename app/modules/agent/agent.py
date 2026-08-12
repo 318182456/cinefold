@@ -9,7 +9,17 @@ from loguru import logger
 from app.core.config import get_settings
 from app.core.version import APP_VERSION
 
-from .tools import REGISTRY, TOOL_SCHEMAS, call_tool
+from .tools import PROPOSAL_TOOLS, REGISTRY, TOOL_SCHEMAS, call_tool
+
+
+def _extract_proposals(payload: str) -> list[dict]:
+    """从工具返回的 JSON 里取出提案。取不到就当没有，不影响对话。"""
+    try:
+        data = json.loads(payload)
+    except (json.JSONDecodeError, TypeError):
+        return []
+    proposal = data.get("proposal") if isinstance(data, dict) else None
+    return [proposal] if isinstance(proposal, dict) else []
 
 SYSTEM_PROMPT = f"""你是 cinefold（版本 {APP_VERSION}）的运维助手。cinefold 是影片资源自动化订阅下载器，
 链路是：抓取番号 → 按规则过滤 → 推送下载器 → 校验入库 → 消息通知。
@@ -23,8 +33,21 @@ SYSTEM_PROMPT = f"""你是 cinefold（版本 {APP_VERSION}）的运维助手。c
 - 数据条目多的时候用 Markdown 表格或列表呈现。
 - 用户问「什么情况」「怎么样了」这类笼统问题，先用 overview 看全局，
   必要时再结合 list_tasks、read_logs 补充。
-- 你只有只读权限，不能替用户订阅、下载或改配置。被要求这类操作时，
-  说明你查得到但改不了，并告诉用户在哪个页面自己操作。"""
+
+关于下载器操作：
+- 你可以操作 qBittorrent / Transmission 的任务（暂停、恢复、重新检查、
+  强制汇报、删除）。流程固定为：先用 list_downloads 拿到真实 hash，
+  再用 propose_action 提交。
+- propose_action 只是生成待确认项，不会真的执行。调用后必须告诉用户
+  「请在下方确认后执行」，绝不能说「已经暂停了」「已经删掉了」这类话。
+- 删除分两种：delete 只从下载器移除任务、磁盘文件保留；delete_with_files
+  连文件一起删且不可逆。用户没有明确说要删文件时，一律选 delete。
+- 筛选条件要复述清楚（比如「进度低于 10% 的 3 个任务」），让用户能核对
+  范围对不对。范围拿不准时先问，不要自己扩大。
+- list_downloads 返回 note 说还有未列出的任务时，必须告诉用户「符合条件的
+  共 N 个，这次只处理其中 M 个，剩下的需要再操作一次」。一次最多 20 个，
+  绝不能让用户以为点一次确认就全处理完了。
+- 订阅、下载新资源、改配置这些仍然做不到，被问到就说明并指出该去哪个页面。"""
 
 # 一轮对话里最多允许模型连续调多少次工具。给足串联查询的空间
 # （比如先 overview 再 read_logs），又不至于在模型犯傻时无限打转
@@ -87,6 +110,7 @@ class ChatAgent:
             return {
                 "answer": "AI 助手已在 设置 → 其他 → AI 助手 中关闭。",
                 "tools_used": [],
+                "proposals": [],
                 "enabled": False,
             }
         if not self.enabled:
@@ -96,10 +120,16 @@ class ChatAgent:
                     "填写接口地址、模型和 API Key（留空则沿用翻译的 AI 配置）。"
                 ),
                 "tools_used": [],
+                "proposals": [],
                 "enabled": False,
             }
         if not (question or "").strip():
-            return {"answer": "请说说你想了解什么。", "tools_used": [], "enabled": True}
+            return {
+                "answer": "请说说你想了解什么。",
+                "tools_used": [],
+                "proposals": [],
+                "enabled": True,
+            }
 
         messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
         for item in (history or [])[-MAX_HISTORY:]:
@@ -111,6 +141,8 @@ class ChatAgent:
         messages.append({"role": "user", "content": question})
 
         tools_used: list[str] = []
+        # 本轮产生的待确认操作，随答复一起带给前端渲染确认条
+        proposals: list[dict] = []
 
         try:
             with httpx.Client(timeout=120, proxy=self.proxy) as client:
@@ -121,6 +153,7 @@ class ChatAgent:
                         return {
                             "answer": "AI 接口没有返回内容，稍后再试。",
                             "tools_used": tools_used,
+                            "proposals": proposals,
                             "enabled": True,
                         }
 
@@ -132,6 +165,7 @@ class ChatAgent:
                         return {
                             "answer": answer or "没能得出结论，换个说法再问问？",
                             "tools_used": tools_used,
+                            "proposals": proposals,
                             "enabled": True,
                         }
 
@@ -148,6 +182,8 @@ class ChatAgent:
                         result = call_tool(name, func.get("arguments") or "{}")
                         if name in REGISTRY:
                             tools_used.append(name)
+                        if name in PROPOSAL_TOOLS:
+                            proposals += _extract_proposals(result)
                         messages.append({
                             "role": "tool",
                             "tool_call_id": call.get("id") or "",
@@ -159,6 +195,7 @@ class ChatAgent:
             return {
                 "answer": "这个问题查得有点绕，我没能收敛出结论。试试把问题问得更具体些。",
                 "tools_used": tools_used,
+                "proposals": proposals,
                 "enabled": True,
             }
 
@@ -167,6 +204,7 @@ class ChatAgent:
             return {
                 "answer": f"AI 接口返回错误（HTTP {exc.response.status_code}），请检查接口地址、模型名与 API Key。",
                 "tools_used": tools_used,
+                "proposals": proposals,
                 "enabled": True,
             }
         except Exception as exc:
@@ -174,6 +212,7 @@ class ChatAgent:
             return {
                 "answer": f"对话失败：{exc}",
                 "tools_used": tools_used,
+                "proposals": proposals,
                 "enabled": True,
             }
 

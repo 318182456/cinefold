@@ -103,11 +103,13 @@ id (autoincrement) / namespace / key / content / create_time
 | `GET/POST /message` | 消息回调（Telegram/企业微信 webhook） |
 | `GET  /agent/status` | AI 助手是否可用 |
 | `POST /agent/chat` | AI 助手对话 |
+| `POST /agent/confirm` · `POST /agent/cancel` | 确认/放弃助手提出的下载器操作 |
 
 ## 5. 模块清单
 
 ### 下载客户端 `modules/downloadclient/`
 统一接口：`__init__` / `login_*` / `add_torrent` / `add_torrent_by_magnet` / `monitor_torrent`
+`control_torrent(action, hashes)` — pause/resume/recheck/reannounce，迅雷未实现
 - `qbittorrent` — QBitTorrentClient
 - `transmission` — TransmissionClient
 - `thunder` — Thunder（另有 `get_device_id` / `get_pan_auth` / `analyze_size`）
@@ -138,8 +140,11 @@ id (autoincrement) / namespace / key / content / create_time
 
 ### AI 助手 `modules/agent/`
 - `agent` — ChatAgent，OpenAI 兼容接口 + function calling，最多 5 轮工具调用
-- `tools` — 只读工具集：`overview` / `query_codes` / `code_detail` / `list_actors` /
-  `list_tasks` / `read_logs` / `check_config`
+- `tools` — 只读工具：`overview` / `query_codes` / `code_detail` / `list_actors` /
+  `list_tasks` / `read_logs` / `list_downloads` / `check_config`；
+  另有 `propose_action` 登记待确认的下载器操作
+- `actions` — 提案的登记与执行。内存存储、5 分钟过期、一次性消费；
+  执行才调下载器的 `control_torrent` / `delete_torrent`
 - 配置独立于翻译（`AGENT_*`），留空则回退到 `OPENAI_*`
 
 ### 云盘 `modules/cloudnas/`

@@ -1,7 +1,10 @@
 """agent 可调用的工具集。
 
-每个工具都是只读的，直接查库或读现成的服务层结果，不做任何写操作——
-对话入口很容易被问出"帮我把这个删了"，工具层不给这个能力最省心。
+除 propose_action 外全是只读的，直接查库或读现成的服务层结果。
+
+propose_action 也不直接动手：它只登记一个待确认操作，用户在面板上点确认才
+真正执行（见 actions.py）。对话入口很容易被问出"把进度低的都删了"，而模型
+完全可能把筛选条件理解错，删除又不可逆 —— 让人来当最后一道闸。
 """
 from __future__ import annotations
 
@@ -182,6 +185,138 @@ def tool_read_logs(args: dict) -> dict:
     return {"returned": len(logs), "keyword": keyword, "logs": logs}
 
 
+def tool_list_downloads(args: dict) -> dict:
+    """下载器里的实时任务。番号库只记状态，进度和卡没卡得问下载器。"""
+    from app.modules.downloadclient import get_download_client, list_configured_clients
+
+    client_name = (args.get("client") or "").strip().lower()
+    keyword = (args.get("keyword") or "").strip().lower()
+    state = (args.get("state") or "").strip().lower()
+    try:
+        max_progress = float(args.get("max_progress"))
+    except (TypeError, ValueError):
+        max_progress = None
+    limit = min(int(args.get("limit") or 20), ROW_LIMIT)
+
+    names = [client_name] if client_name else list_configured_clients()
+    items: list[dict] = []
+    errors: list[str] = []
+
+    for name in names:
+        client = get_download_client(name)
+        if client is None:
+            continue
+        try:
+            for row in client.monitor_torrent():
+                items.append({
+                    "client": name,
+                    "hash": row.get("hash", ""),
+                    "name": row.get("name", ""),
+                    # 进度按百分比给，模型对 0.07 与 7% 的理解稳定性差别很大
+                    "progress_percent": round((row.get("progress") or 0) * 100, 1),
+                    "state": row.get("state", ""),
+                    "completed": bool(row.get("completed")),
+                })
+        except Exception as exc:
+            logger.warning(f"读取 {name} 任务列表异常: {exc}")
+            errors.append(f"{name}: {exc}")
+
+    if keyword:
+        items = [i for i in items if keyword in i["name"].lower()]
+    if state:
+        items = [i for i in items if state in i["state"].lower()]
+    if max_progress is not None:
+        items = [i for i in items if i["progress_percent"] <= max_progress]
+
+    items.sort(key=lambda i: i["progress_percent"])
+    total = len(items)
+    result = {
+        "total": total,
+        "returned": min(total, limit),
+        "items": items[:limit],
+        "clients": names,
+    }
+    if errors:
+        result["errors"] = errors
+    if total > limit:
+        result["note"] = f"还有 {total - limit} 个未列出，可缩小筛选范围"
+    return result
+
+
+def _lookup_torrents(hashes: list[str], client_name: str = "") -> dict[str, dict]:
+    """按 hash 精确查任务，返回 {小写 hash: {name, progress_percent, client}}。"""
+    from app.modules.downloadclient import get_download_client, list_configured_clients
+
+    names = [client_name] if client_name else list_configured_clients()
+    found: dict[str, dict] = {}
+
+    for name in names:
+        client = get_download_client(name)
+        if client is None:
+            continue
+        try:
+            rows = client.monitor_torrent(hashes)
+        except Exception as exc:
+            logger.warning(f"按 hash 查询 {name} 任务异常: {exc}")
+            continue
+        for row in rows:
+            key = (row.get("hash") or "").lower()
+            if key and key not in found:
+                found[key] = {
+                    "client": name,
+                    "name": row.get("name", ""),
+                    "progress_percent": round((row.get("progress") or 0) * 100, 1),
+                }
+    return found
+
+
+def tool_propose_action(args: dict) -> dict:
+    """登记一个待用户确认的下载器操作。
+
+    这里只登记不执行 —— 助手可能把筛选条件理解错，删除又不可逆，
+    所以必须由用户在面板上点确认才真正动手。
+    """
+    from .actions import ACTIONS, create_proposal
+
+    action = (args.get("action") or "").strip().lower()
+    if action not in ACTIONS:
+        return {"error": f"不支持的操作 {action}，可用：{', '.join(ACTIONS)}"}
+
+    raw_hashes = args.get("hashes") or []
+    if isinstance(raw_hashes, str):
+        raw_hashes = [h.strip() for h in raw_hashes.split(",")]
+    hashes = [h for h in (raw_hashes or []) if h]
+    if not hashes:
+        return {"error": "必须给出要操作的任务 hash，先用 list_downloads 查"}
+    if len(hashes) > ROW_LIMIT:
+        return {"error": f"一次最多操作 {ROW_LIMIT} 个任务，请分批"}
+
+    client_name = (args.get("client") or "").strip().lower()
+
+    # 用当前真实的任务名回填，避免助手把名字记错，用户看到的确认信息才可信。
+    # 只查这几个 hash —— 下载器里挂着几千个种子是常态，全量拉一遍要几十秒
+    known = _lookup_torrents(hashes, client_name)
+
+    targets = []
+    for value in hashes:
+        info = known.get(value.lower())
+        targets.append({
+            "hash": value,
+            "name": info["name"] if info else "(下载器中未找到该任务)",
+            "progress_percent": info["progress_percent"] if info else None,
+            "found": bool(info),
+        })
+
+    proposal = create_proposal(action, targets, client_name)
+    return {
+        "proposal": proposal,
+        "message": (
+            f"已生成待确认操作：{proposal['label']}，涉及 {len(targets)} 个任务。"
+            "请告知用户在面板上点确认后才会执行，不要声称已经执行完毕。"
+        ),
+    }
+
+
 def tool_check_config(_: dict) -> dict:
     """配置体检：哪些必要项没配。密钥一律只报是否已配，不回显内容。"""
     from app.core.config import get_settings
@@ -313,6 +448,69 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "list_downloads",
+            "description": (
+                "查下载器（qBittorrent / Transmission）里的实时任务：进度、状态。"
+                "问『下载卡住了吗』『哪些任务进度低』，或要对任务动手之前，都先用它拿 hash。"
+                "结果按进度升序。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "client": {
+                        "type": "string",
+                        "enum": ["qbittorrent", "transmission"],
+                        "description": "只查某个下载器，留空查全部",
+                    },
+                    "keyword": {"type": "string", "description": "任务名关键词"},
+                    "state": {"type": "string", "description": "状态关键词，如 stalled、downloading、paused"},
+                    "max_progress": {
+                        "type": "number",
+                        "description": "只要进度不超过该百分比的任务，如 10 表示 10% 以下",
+                    },
+                    "limit": {"type": "integer", "description": f"返回条数，最大 {ROW_LIMIT}"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "propose_action",
+            "description": (
+                "对下载器任务发起操作。这一步只生成待确认项，不会真的执行 —— "
+                "用户在面板上点确认后才生效，所以调完必须告诉用户去确认，"
+                "绝不能说『已经暂停/删除好了』。hash 必须来自 list_downloads。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["pause", "resume", "recheck", "reannounce", "delete", "delete_with_files"],
+                        "description": (
+                            "delete 只删任务保留文件；delete_with_files 连磁盘文件一起删，"
+                            "不可逆，用户没明确说要删文件时不要选它"
+                        ),
+                    },
+                    "hashes": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "要操作的任务 hash，来自 list_downloads",
+                    },
+                    "client": {
+                        "type": "string",
+                        "enum": ["qbittorrent", "transmission"],
+                        "description": "任务所在的下载器，留空则全部下载器都试",
+                    },
+                },
+                "required": ["action", "hashes"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "check_config",
             "description": (
                 "检查配置完整性：下载器、资源站、媒体库、通知是否已配置，"
@@ -330,8 +528,13 @@ REGISTRY = {
     "list_actors": tool_list_actors,
     "list_tasks": tool_list_tasks,
     "read_logs": tool_read_logs,
+    "list_downloads": tool_list_downloads,
+    "propose_action": tool_propose_action,
     "check_config": tool_check_config,
 }
+
+# 会产生待确认提案的工具。答复里要把提案带给前端，靠它识别
+PROPOSAL_TOOLS = {"propose_action"}
 
 
 def call_tool(name: str, arguments: str | dict) -> str:

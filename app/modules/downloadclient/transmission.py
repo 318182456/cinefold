@@ -119,7 +119,14 @@ class TransmissionClient:
             return []
 
         try:
-            torrents = self.client.get_torrents(ids=list(hashes) if hashes else None)
+            # 只取用得上的字段。默认会把每个种子的 files 数组也拉回来，
+            # 种子上千时 RPC 要跑一百多秒，指定字段后是秒级
+            torrents = self.client.get_torrents(
+                ids=list(hashes) if hashes else None,
+                arguments=[
+                    "hashString", "name", "percentDone", "status", "downloadDir",
+                ],
+            )
             return [
                 {
                     "hash": t.hashString,
@@ -233,6 +240,39 @@ class TransmissionClient:
             return hit
         except Exception as exc:
             logger.error(f"删除 Transmission 种子失败: {exc}")
+            return []
+
+    def control_torrent(self, action: str, hashes: Sequence[str]) -> list[str]:
+        """暂停/恢复/重新检查/强制汇报。语义同 qBittorrent 版。"""
+        if not hashes or not self._ensure_client():
+            return []
+
+        method_name = {
+            "pause": "stop_torrent",
+            "resume": "start_torrent",
+            "recheck": "verify_torrent",
+            "reannounce": "reannounce_torrent",
+        }.get(action)
+        if method_name is None:
+            logger.warning(f"不支持的 Transmission 操作 {action}")
+            return []
+
+        wanted = [h for h in hashes if h]
+        try:
+            # 同 delete_torrent：不存在的 id 会让 transmission-rpc 抛异常
+            existing = {
+                t.hashString.lower() for t in self.client.get_torrents(ids=list(wanted))
+            }
+            hit = [h for h in wanted if h.lower() in existing]
+            if not hit:
+                logger.info(f"Transmission 中已无这些种子，跳过 {action}")
+                return []
+
+            getattr(self.client, method_name)(ids=hit)
+            logger.info(f"Transmission {action} {len(hit)} 个种子: {', '.join(hit)}")
+            return hit
+        except Exception as exc:
+            logger.error(f"Transmission {action} 失败: {exc}")
             return []
 
     def test_connection(self) -> tuple[bool, str]:

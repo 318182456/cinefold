@@ -211,3 +211,8 @@ export const getAgentStatus = () => http.get('/agent/status')
 // 助手可能要连着调好几个工具，比默认 60s 更能等
 export const askAgent = (question, history = []) =>
   http.post('/agent/chat', { question, history }, { timeout: 180000 })
+// 确认执行助手提出的下载器操作
+export const confirmAgentAction = (proposalId) =>
+  http.post('/agent/confirm', { proposal_id: proposalId })
+export const cancelAgentAction = (proposalId) =>
+  http.post('/agent/cancel', { proposal_id: proposalId })

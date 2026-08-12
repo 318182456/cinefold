@@ -367,6 +367,53 @@ class QBitTorrentClient:
             logger.error(f"删除 qBittorrent 种子失败: {exc}")
             return []
 
+    def control_torrent(self, action: str, hashes: Sequence[str]) -> list[str]:
+        """暂停/恢复/重新检查/强制汇报。返回实际操作到的 hash。
+
+        qb 5.x 把 pause/resume 改名成 stop/start，旧名在新版被移除。
+        库版本与服务端版本的组合太多，逐个探测方法名比判版本可靠。
+        """
+        if not hashes or not self._ensure_client():
+            return []
+
+        # 每个动作按优先级列出候选方法名，取第一个存在的
+        candidates = {
+            "pause": ("torrents_stop", "torrents_pause"),
+            "resume": ("torrents_start", "torrents_resume"),
+            "recheck": ("torrents_recheck",),
+            "reannounce": ("torrents_reannounce",),
+        }.get(action)
+        if candidates is None:
+            logger.warning(f"不支持的 qBittorrent 操作 {action}")
+            return []
+
+        wanted = [h for h in hashes if h]
+        try:
+            existing = {
+                t.hash.lower()
+                for t in self.client.torrents_info(torrent_hashes=list(wanted))
+            }
+            hit = [h for h in wanted if h.lower() in existing]
+            if not hit:
+                logger.info(f"qBittorrent 中已无这些种子，跳过 {action}")
+                return []
+
+            method = next(
+                (getattr(self.client, name) for name in candidates
+                 if hasattr(self.client, name)),
+                None,
+            )
+            if method is None:
+                logger.error(f"当前 qbittorrent-api 不支持 {action}")
+                return []
+
+            method(torrent_hashes=hit)
+            logger.info(f"qBittorrent {action} {len(hit)} 个种子: {', '.join(hit)}")
+            return hit
+        except Exception as exc:
+            logger.error(f"qBittorrent {action} 失败: {exc}")
+            return []
+
     def test_connection(self) -> tuple[bool, str]:
         """供配置页「测试连接」使用。"""
         mode = "API Key" if self.apikey else "账号密码"
