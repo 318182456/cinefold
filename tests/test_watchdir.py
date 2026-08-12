@@ -1419,6 +1419,30 @@ def test_sync_short_filename_records_no_alias(rule):
     assert _aliases() == {}
 
 
+def test_same_alias_twice_in_one_batch_does_not_abort_sync(rule):
+    """同一批事务里两个文件哈希出同一个 code，整批登记不能因此回滚。
+
+    code 只由文件名（stem）算出，不含目录，所以不同子目录下的同名长片名
+    文件必然同 code。「先查后插」堵不住这种情况：session.get() 查不到
+    自己刚 add 还没 flush 的对象，两条都进 INSERT，commit 时撞
+    code_alias_pkey，同批里其余文件的登记跟着一起没了。
+    """
+    rule_id, source_dir, library = rule
+    for sub in ("a", "b"):
+        d = source_dir / sub
+        d.mkdir()
+        (d / f"{LONG_STEM}.mp4").write_bytes(b"A" * 64)
+    # 同批里的无辜文件，前两个撞主键时它不该被连累
+    (source_dir / "FC2-PPV-4482146.mp4").write_bytes(b"B" * 64)
+
+    result = watchdir.sync_rule(rule_id, dry_run=False)
+
+    assert result.errors == []
+    assert len(_aliases()) == 1
+    # 三个文件都要登记成功，而不是整批回滚
+    assert len(_links()) == 3
+
+
 def test_alias_is_not_duplicated_across_syncs(rule):
     """重复对账不该反复插同一条别名。"""
     rule_id, source_dir, library = rule

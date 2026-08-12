@@ -1383,12 +1383,21 @@ def _register_alias(session, code: str, source_path: str) -> None:
     只有走了哈希的 code 才需要 —— 其余 code 本身就是文件名，记了是冗余。
 
     复用调用方的 session：这是登记流程的一部分，同一事务里成或败。
+
+    交给数据库忽略冲突，不用「先查后插」：同一批事务里可能有多个文件哈希出
+    同一个 code（同名文件分散在不同目录），session.get() 查不到自己刚 add
+    还没 flush 的对象，commit 时 executemany 撞 code_alias_pkey，那一批
+    登记全部回滚。定时同步与手动触发并发跑时同理，两个事务各自都查不到。
+
+    冲突跳过而非覆盖：已有记录与新记录的 filename 同源（都是哈希的原像），
+    覆盖没有意义，跳过还省一次写。
     """
     if not is_hashed_code(code):
         return
 
-    if session.get(CodeAlias, code) is None:
-        session.add(CodeAlias(code=code, filename=Path(source_path).stem))
+    insert_ignore_duplicate(session, CodeAlias, [
+        {"code": code, "filename": Path(source_path).stem},
+    ])
 
 
 def _register(
