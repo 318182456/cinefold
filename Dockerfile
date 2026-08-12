@@ -43,6 +43,7 @@ COPY VERSION /app/VERSION
 COPY --from=web /web/dist /usr/share/nginx/html
 
 COPY deploy/nginx.conf /etc/nginx/nginx.conf
+COPY deploy/starting.html /etc/nginx/html/__starting.html
 COPY deploy/supervisord.conf /etc/supervisord.conf
 
 VOLUME ["/data"]

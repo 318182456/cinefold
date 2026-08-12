@@ -1,7 +1,8 @@
 """FastAPI 应用装配。"""
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
+import time
+from contextlib import asynccontextmanager, contextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -15,28 +16,54 @@ from app.utils.log import setup_loguru_logger
 API_PREFIX = "/api/v1"
 
 
+@contextmanager
+def _step(index: int, total: int, title: str):
+    """记录单个启动步骤的起止与耗时。
+
+    启动慢的时候光看首尾两条日志判断不出卡在哪，所以每步都进出各打一条。
+    """
+    logger.info(f"[{index}/{total}] {title}…")
+    started = time.perf_counter()
+    try:
+        yield
+    except Exception as exc:
+        cost = time.perf_counter() - started
+        logger.exception(f"[{index}/{total}] {title} 失败（{cost:.1f}s）：{exc}")
+        raise
+    cost = time.perf_counter() - started
+    logger.info(f"[{index}/{total}] {title} 完成，耗时 {cost:.1f}s")
+
+
 def init_cinefold() -> None:
     """启动初始化：日志 → 配置 → 数据库 → 调度器。"""
     setup_loguru_logger()
-    logger.info("cinefold 启动中")
+    logger.info(f"cinefold {APP_VERSION} 启动中")
+    started = time.perf_counter()
 
-    get_settings()
+    total = 5
 
-    from app.database.utils.setup import setup_database
-    setup_database()
+    with _step(1, total, "加载配置"):
+        get_settings()
 
-    from app.scheduler import start_scheduler
-    start_scheduler()
+    with _step(2, total, "初始化数据库"):
+        from app.database.utils.setup import setup_database
+        setup_database()
 
-    from app.modules.notify.tgpolling import start_polling
-    start_polling()
+    with _step(3, total, "启动调度器"):
+        from app.scheduler import start_scheduler
+        start_scheduler()
+
+    with _step(4, total, "启动 Telegram 轮询"):
+        from app.modules.notify.tgpolling import start_polling
+        start_polling()
 
     # 目录实时监听。watchdog 缺失或没有规则时会自行跳过，
     # 此时功能退化为定时全量对账，不影响启动
-    from app.modules.watcher import start_watching
-    start_watching()
+    with _step(5, total, "启动目录监听"):
+        from app.modules.watcher import start_watching
+        start_watching()
 
-    logger.info("cinefold 启动完成")
+    logger.info(f"cinefold 启动完成，总耗时 {time.perf_counter() - started:.1f}s")
 
 
 @asynccontextmanager

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import secrets
+import time
 
 from loguru import logger
 
@@ -33,13 +34,21 @@ def generate_code(length: int = 12) -> str:
 
 def setup_database() -> None:
     """建表 + 建初始账号。幂等，每次启动都会调用。"""
+    started = time.perf_counter()
     DBBase.metadata.create_all(engine)
+    logger.info(f"  建表完成，耗时 {time.perf_counter() - started:.1f}s")
+
+    started = time.perf_counter()
     update_database()
+    logger.info(f"  字段迁移完成，耗时 {time.perf_counter() - started:.1f}s")
+
     insert_first_user()
 
     # 内置数据源登记，已存在的不覆盖
+    started = time.perf_counter()
     from app.modules.ladysite.sources import sync_builtin_sources
     sync_builtin_sources()
+    logger.info(f"  数据源登记完成，耗时 {time.perf_counter() - started:.1f}s")
 
 
 def update_database() -> None:
