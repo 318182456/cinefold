@@ -148,7 +148,7 @@ def list_watchdirs(current_user: str = Depends(get_current_user)):
             "create_time": "",
         })
 
-    from app.modules.watcher import is_watching
+    from app.modules.watcher import is_starting, is_watching
 
     return ResponseEntity.ok({
         "items": rows,
@@ -156,6 +156,9 @@ def list_watchdirs(current_user: str = Depends(get_current_user)):
         "library_exists": bool(library) and Path(library).is_dir(),
         "delete_enabled": settings.medialink_delete_enabled,
         "watching": is_watching(),
+        # 大目录上建监听要几分钟，这期间 watching 还是假，得让页面
+        # 把「建立中」和「没启用」分开显示
+        "watching_starting": is_starting(),
         # 页面据此说明「没有实时监听时多久才会对账一次」
         "auto_sync": settings.watchdir_auto_sync,
         "sync_interval": settings.watchdir_sync_interval,

@@ -16,6 +16,7 @@ const libraryPath = ref('')
 const libraryExists = ref(false)
 const deleteEnabled = ref(false)
 const watching = ref(false)
+const watchingStarting = ref(false)
 // 定时对账间隔（分钟）与自动同步总开关，供提示文案使用
 const syncInterval = ref(30)
 const autoSync = ref(true)
@@ -39,6 +40,7 @@ const confirmingRule = ref(null)
 // 每个新文件都要等写入稳定（最多 6 秒），没有进度就完全是黑盒
 const progress = ref([])
 let progressTimer = null
+let watchTimer = null
 
 const runningProgress = computed(() => progress.value.filter((p) => p.running))
 
@@ -91,6 +93,31 @@ function stopProgressPoll() {
   if (progressTimer) {
     clearInterval(progressTimer)
     progressTimer = null
+  }
+}
+
+// 监听建立中的轮询。只刷状态字段，不走 load() —— 那个会翻 loading，
+// 列表每 5 秒闪一次加载态
+async function pollWatchState() {
+  try {
+    const data = await listWatchDirs()
+    watching.value = !!data.watching
+    watchingStarting.value = !!data.watching_starting
+    if (!watchingStarting.value) stopWatchPoll()
+  } catch {
+    // 查不到就下一轮再说，不打断页面
+  }
+}
+
+function startWatchPoll() {
+  if (watchTimer) return
+  watchTimer = setInterval(pollWatchState, 5000)
+}
+
+function stopWatchPoll() {
+  if (watchTimer) {
+    clearInterval(watchTimer)
+    watchTimer = null
   }
 }
 
@@ -151,8 +178,12 @@ async function load() {
     libraryExists.value = !!data.library_exists
     deleteEnabled.value = !!data.delete_enabled
     watching.value = !!data.watching
+    watchingStarting.value = !!data.watching_starting
     syncInterval.value = data.sync_interval || 30
     autoSync.value = data.auto_sync !== false
+
+    // 建监听要几分钟，轮询着等它好，省得用户自己刷页面
+    if (watchingStarting.value) startWatchPoll()
   } catch (err) {
     toast.error(err.message)
   } finally {
@@ -315,7 +346,10 @@ onMounted(async () => {
   if (progress.value.some((p) => p.running)) startProgressPoll()
 })
 
-onUnmounted(stopProgressPoll)
+onUnmounted(() => {
+  stopProgressPoll()
+  stopWatchPoll()
+})
 </script>
 
 <template>
@@ -330,9 +364,9 @@ onUnmounted(stopProgressPoll)
         <p class="text-xs text-gray-500">实时监听</p>
         <p
           class="mt-1 text-xl font-semibold"
-          :class="watching ? 'text-emerald-400' : 'text-gray-500'"
+          :class="watching ? 'text-emerald-400' : watchingStarting ? 'text-sky-400' : 'text-gray-500'"
         >
-          {{ watching ? '运行中' : '未启用' }}
+          {{ watching ? '运行中' : watchingStarting ? '建立中' : '未启用' }}
         </p>
       </div>
       <div class="card">
@@ -364,6 +398,14 @@ onUnmounted(stopProgressPoll)
     <p v-if="!autoSync" class="rounded-lg bg-amber-950/40 px-3 py-2 text-xs text-amber-300">
       自动同步已关闭（WATCHDIR_AUTO_SYNC=false）。定时对账与实时监听都不会运行，
       只有手动点「全部对账」或单条规则的「同步」才会执行。
+    </p>
+    <p
+      v-else-if="watchingStarting"
+      class="rounded-lg bg-sky-950/40 px-3 py-2 text-xs text-sky-300"
+    >
+      实时监听正在后台建立。inotify 不支持递归，需要逐个子目录注册，
+      目录多或放在 NAS 上时可能要几分钟。这期间同步依赖定时对账（每
+      {{ syncInterval }} 分钟），不影响使用。
     </p>
     <p
       v-else-if="!watching"

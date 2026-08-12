@@ -18,6 +18,7 @@ watchdog 捕获源目录与媒体库的文件增删，触发对应规则的同�
 from __future__ import annotations
 
 import threading
+import time
 from pathlib import Path
 
 from loguru import logger
@@ -35,6 +36,11 @@ _observer = None
 _lock = threading.Lock()
 # 待同步的规则 id → 定时器。同一规则重复触发时重置计时，实现防抖
 _pending: dict[int, threading.Timer] = {}
+# 后台建监听的线程。is_watching 要用它区分「正在建」和「没开」
+_starting: threading.Thread | None = None
+# 建监听期间被 stop_watching 打断的标志。schedule 那几分钟里规则可能又变了，
+# 建完直接扔掉，否则它会把刚 stop 掉的 observer 又装回去
+_cancelled = threading.Event()
 
 
 def _sync_later(rule_id: int) -> None:
@@ -92,8 +98,57 @@ def _build_handler():
     return _Handler
 
 
-def start_watching() -> bool:
-    """启动监听。返回是否真的启动了。
+def start_watching(background: bool = True) -> bool:
+    """启动监听。
+
+    inotify 不支持递归，watchdog 得把目录树整棵走一遍、给每个子目录单独
+    注册 watch。媒体库大 + 挂在网络存储上时这一步能到几分钟，挡在启动
+    路径上就是几分钟打不开页面。
+
+    监听只是实时性优化，定时全量对账才是正确性保证（见模块头注释），
+    所以默认丢后台线程去建，启动流程不等它。background=False 时同步执行，
+    给需要拿到结果的调用方用（重启监听、测试）。
+
+    返回值：background=True 时表示「是否已派出线程」，不代表监听建成。
+    """
+    global _starting
+
+    if _observer is not None:
+        return True
+
+    # 这是一次新的建立请求，把上一轮 stop 留下的取消标志清掉
+    _cancelled.clear()
+
+    if not background:
+        return _start_watching_sync()
+
+    with _lock:
+        # 已经有线程在建了就不重复派 —— 重复 schedule 同一批目录很浪费
+        if _starting is not None and _starting.is_alive():
+            return True
+
+        thread = threading.Thread(
+            target=_start_watching_guarded,
+            name="watcher-start",
+            daemon=True,
+        )
+        _starting = thread
+
+    thread.start()
+    logger.info("[监听] 正在后台建立，大目录或网络存储上可能需要几分钟")
+    return True
+
+
+def _start_watching_guarded() -> None:
+    """后台线程入口。线程里抛出去的异常没人接，日志里也看不见，所以兜住。"""
+    try:
+        _start_watching_sync()
+    except Exception as exc:
+        logger.exception(f"[监听] 后台建立失败: {exc}")
+
+
+def _start_watching_sync() -> bool:
+    """真正建立监听。返回是否真的启动了。
 
     监听两侧：
       源目录   —— 捕获新增/删除，驱动正向同步
@@ -106,6 +161,8 @@ def start_watching() -> bool:
 
     if _observer is not None:
         return True
+
+    started = time.perf_counter()
 
     # 自动同步总开关关掉时，实时监听也不起 —— 否则文件一动就同步了，
     # 「关掉自动同步」这个意图落不到实处
@@ -180,10 +237,16 @@ def start_watching() -> bool:
         logger.warning("[监听] 没有可监听的目录")
         return False
 
+    # 目录树走完可能已经过去几分钟，这期间规则若被改过，stop_watching 会
+    # 置上取消标志。此时这个 observer 已经过期，装上去只会盖掉新的那份
+    if _cancelled.is_set():
+        logger.info("[监听] 建立过程中被取消，丢弃本次结果")
+        return False
+
     observer.daemon = True
     observer.start()
     _observer = observer
-    logger.info(f"[监听] 已启动，监听 {watched} 个目录")
+    logger.info(f"[监听] 已启动，监听 {watched} 个目录，耗时 {time.perf_counter() - started:.1f}s")
     return True
 
 
@@ -192,9 +255,21 @@ def is_watching() -> bool:
     return _observer is not None and _observer.is_alive()
 
 
+def is_starting() -> bool:
+    """监听是否正在后台建立。
+
+    大目录上这个过程要几分钟，其间 is_watching 还是假。页面得把它和
+    「没开」区分开，否则看着像功能坏了。
+    """
+    return _observer is None and _starting is not None and _starting.is_alive()
+
+
 def stop_watching() -> None:
     """停止监听，并取消所有待执行的同步。"""
     global _observer
+
+    # 先置标志再停 —— 后台线程可能正卡在 schedule 里，让它建完自己丢弃
+    _cancelled.set()
 
     with _lock:
         for timer in _pending.values():
