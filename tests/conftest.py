@@ -29,7 +29,11 @@ for key in (
     "ROUSI_TOKEN", "ROUSI_PASSKEY", "ROUSI_HOST",
     "PTT_COOKIE", "PTT_HOST", "NICEPT_COOKIE", "NICEPT_HOST",
     "TELEGRAM_BOT_TOKEN", "WECHAT_CORP_ID", "BT_URL",
-    "OPENAI_API_KEY", "BAIDU_API_KEY", "GOOGLE_API_KEY",
+    # AI 助手会在自身配置留空时回退到 OPENAI_*，两组都得清，
+    # 否则 agent 测试会真的去请求接口
+    "OPENAI_API_KEY", "OPENAI_URL", "OPENAI_MODEL",
+    "AGENT_URL", "AGENT_MODEL", "AGENT_API_KEY",
+    "BAIDU_API_KEY", "GOOGLE_API_KEY",
     # 留着会让测试连到真实的数据库与 Redis
     "DATABASE_URL", "REDIS_URL", "REDIS_JOB_STORE",
     # 留着会让测试真的去调过盾服务：单次过盾几十秒，还受进程级锁串行，

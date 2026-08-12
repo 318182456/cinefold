@@ -15,6 +15,7 @@
 | 资源站 | JavDB · JavBus · JavLibrary · 厂牌官网（9 家） |
 | 通知 | Telegram · 企业微信（含指令回调） |
 | 翻译 | OpenAI 兼容接口 · 百度 · Google |
+| AI 助手 | 侧边悬浮对话，直接问系统当前情况（只读） |
 
 ---
 
@@ -115,6 +116,42 @@ BYPASS_URL=http://host:8191/v1
 | javlibrary | 403 Cloudflare | 正常 |
 
 过盾需要启动真实浏览器，单次请求可能耗时 30–60 秒，属正常现象。抓取任务由定时器驱动，不影响使用。
+
+---
+
+## AI 助手
+
+页面右下角的悬浮球，点开即可用自然语言问系统当前的情况。球可以拖到任意位置，
+位置记在浏览器本地。
+
+```bash
+AGENT_ENABLED=True
+AGENT_URL=https://api.openai.com/v1
+AGENT_MODEL=gpt-4o-mini
+AGENT_API_KEY=sk-xxx
+```
+
+三项留空则沿用翻译的 `OPENAI_*` 配置。分开配是因为翻译只需要便宜的小模型，
+而助手要稳定地做工具调用，通常得换更强的模型。没配 API Key 时悬浮球不显示。
+
+助手通过工具实时查询真实数据，不凭印象作答。可用的工具：
+
+| 工具 | 用途 |
+|---|---|
+| `overview` | 各状态计数、演员数、最近 7 天新增与下载量 |
+| `query_codes` | 按状态或关键词查番号列表 |
+| `code_detail` | 单个番号的详情与下载历史 |
+| `list_actors` | 已订阅的演员 |
+| `list_tasks` | 定时任务与下次执行时间 |
+| `read_logs` | 最近日志，可按关键词过滤 |
+| `check_config` | 配置完整性体检 |
+
+问法举例：「现在什么情况」「有多少订阅还没下到资源」「ABC-123 为什么没下载」
+「最近有什么报错」「配置有什么问题」。答复下方会列出本轮实际查过哪些工具。
+
+**只读**。工具层不提供任何写操作，助手改不了配置、也不能替你订阅或下载 ——
+被这样要求时它会说明并指出该去哪个页面自己操作。`check_config` 只返回各项
+是否已配置，不回显密钥内容。
 
 ---
 
@@ -354,7 +391,7 @@ curl http://host:3750/api/v1/dashboard -H 'Authorization: Bearer <token>'
 
 ```bash
 # 后端
-.venv/bin/python -m pytest tests/ -q      # 455 项测试
+.venv/bin/python -m pytest tests/ -q      # 578 项测试
 .venv/bin/python -m uvicorn app.api:app --port 56168 --reload
 
 # 前端

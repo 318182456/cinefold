@@ -479,6 +479,17 @@ const GROUPS = [
         ],
       },
       {
+        title: 'AI 助手',
+        hint: '侧边悬浮的对话入口，可直接问系统当前情况。留空则沿用上面翻译的 AI 配置；'
+          + '助手要做工具调用，建议用比翻译更强的模型',
+        fields: [
+          { k: 'agent_enabled', label: '启用助手', t: 'bool' },
+          { k: 'agent_url', label: '接口地址', ph: 'https://api.openai.com/v1' },
+          { k: 'agent_model', label: '模型', ph: 'gpt-4o-mini' },
+          { k: 'agent_api_key', label: 'API Key', t: 'password' },
+        ],
+      },
+      {
         title: 'CloudDrive2',
         fields: [
           { k: 'cloudnas_url', label: '地址' },

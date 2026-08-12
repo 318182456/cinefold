@@ -205,3 +205,9 @@ export const startMigrate = (payload) => http.post('/migrate/start', payload)
 export const getImageCacheStats = () => http.get('/image-cache/stats')
 export const bulkCancelSubscribe = (payload) =>
   http.post('/codes/cancel/bulk', payload)
+
+// ---------------------------------------------------------------- AI 助手
+export const getAgentStatus = () => http.get('/agent/status')
+// 助手可能要连着调好几个工具，比默认 60s 更能等
+export const askAgent = (question, history = []) =>
+  http.post('/agent/chat', { question, history }, { timeout: 180000 })

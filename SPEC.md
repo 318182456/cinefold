@@ -101,6 +101,8 @@ id (autoincrement) / namespace / key / content / create_time
 | `POST /codes/download/all` | 批量下载 |
 | `GET  /image-proxy` | 图片代理 |
 | `GET/POST /message` | 消息回调（Telegram/企业微信 webhook） |
+| `GET  /agent/status` | AI 助手是否可用 |
+| `POST /agent/chat` | AI 助手对话 |
 
 ## 5. 模块清单
 
@@ -133,6 +135,12 @@ id (autoincrement) / namespace / key / content / create_time
 
 ### 翻译 `modules/translate/`
 - `baidu` · `google` · `translateai`（OpenAI 兼容）
+
+### AI 助手 `modules/agent/`
+- `agent` — ChatAgent，OpenAI 兼容接口 + function calling，最多 5 轮工具调用
+- `tools` — 只读工具集：`overview` / `query_codes` / `code_detail` / `list_actors` /
+  `list_tasks` / `read_logs` / `check_config`
+- 配置独立于翻译（`AGENT_*`），留空则回退到 `OPENAI_*`
 
 ### 云盘 `modules/cloudnas/`
 - CloudDrive2 gRPC，离线下载

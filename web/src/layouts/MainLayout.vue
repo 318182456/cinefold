@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { checkVersion, getVersion } from '@/api'
 import { useConfigStore } from '@/stores/config'
 import AppLogo from '@/components/AppLogo.vue'
+import AgentPanel from '@/components/AgentPanel.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -153,5 +154,8 @@ onMounted(async () => {
         </RouterView>
       </main>
     </div>
+
+    <!-- 全站可用的悬浮助手 -->
+    <AgentPanel />
   </div>
 </template>

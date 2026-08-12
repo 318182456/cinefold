@@ -33,6 +33,7 @@ SENSITIVE_KEYS = {
     "mteam_api_key", "wechat_corp_secret", "wechat_token",
     "wechat_encoding_aes_key", "telegram_bot_token", "secret_key",
     "cloudnas_password", "baidu_api_key", "google_api_key", "openai_api_key",
+    "agent_api_key",
     "github_token", "oidc_client_secret", "medialink_webhook_token",
     # 连接串里通常内嵌账号密码
     "database_url", "redis_url",
@@ -252,6 +253,14 @@ class Settings:
     openai_url: str = ""
     openai_model: str = ""
     openai_api_key: str = ""
+
+    # --- AI 助手 ---
+    # 与翻译分开配：翻译只要便宜的小模型，助手要能稳定做工具调用，
+    # 通常得用更强的模型。留空则回退到上面的翻译配置
+    agent_enabled: bool = True
+    agent_url: str = ""
+    agent_model: str = ""
+    agent_api_key: str = ""
 
     # --- 自定义 BT 源 ---
     bt_url: str = ""
@@ -474,6 +483,11 @@ def load_settings() -> Settings:
         openai_url=_env("OPENAI_URL"),
         openai_model=_env("OPENAI_MODEL"),
         openai_api_key=_env("OPENAI_API_KEY"),
+
+        agent_enabled=_env_bool("AGENT_ENABLED", True),
+        agent_url=_env("AGENT_URL"),
+        agent_model=_env("AGENT_MODEL"),
+        agent_api_key=_env("AGENT_API_KEY"),
 
         bt_url=_env("BT_URL"),
         bt_json_data=_env("BT_JSON_DATA"),
