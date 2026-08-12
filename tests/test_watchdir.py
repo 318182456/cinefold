@@ -676,6 +676,74 @@ def test_backfill_records_torrent_that_appeared_later(rule, fake_downloader):
         assert row is not None and row.code == "SV-late"
 
 
+def test_collection_torrent_with_many_files_registers_once(rule, fake_downloader):
+    """一个种子含多个视频（合集）时，同批事务里只能写一条 History。
+
+    否则每个文件都 add 一次同一个 hash，commit 撞主键，整批登记全丢。
+    """
+    rule_id, source_dir, library = rule
+    files = []
+    for i in range(5):
+        f = source_dir / f"clip{i}.mp4"
+        f.write_bytes(b"C" * 64)
+        files.append(f)
+    # 五个文件同属一个种子
+    fake_downloader.torrents["HASH_PACK"] = [str(f) for f in files]
+
+    result = watchdir.sync_rule(rule_id, dry_run=False)
+
+    assert result.errors == []
+    assert len(result.linked) == 5
+    with session_scope() as session:
+        rows = session.scalars(sa.select(History)).all()
+        assert [r.hash for r in rows] == ["HASH_PACK"]
+
+
+def test_collection_torrent_spanning_batches(rule, fake_downloader, monkeypatch):
+    """合集的文件跨过提交批次边界时也不能撞主键。
+
+    批次一满就提交换新 session，后一批的 session 是全新的，靠
+    「查 session 里攒了什么」那种去重完全失效。
+    """
+    rule_id, source_dir, _ = rule
+    monkeypatch.setattr(watchdir, "REGISTER_BATCH_SIZE", 2)
+    files = []
+    for i in range(7):
+        f = source_dir / f"span{i}.mp4"
+        f.write_bytes(b"S" * 64)
+        files.append(f)
+    fake_downloader.torrents["HASH_SPAN"] = [str(f) for f in files]
+
+    result = watchdir.sync_rule(rule_id, dry_run=False)
+
+    assert result.errors == []
+    assert len(result.linked) == 7
+    with session_scope() as session:
+        rows = session.scalars(sa.select(History)).all()
+        assert [r.hash for r in rows] == ["HASH_SPAN"]
+
+
+def test_backfill_collection_torrent_registers_once(rule, fake_downloader):
+    """补查路径同理：一个种子对应多条 media_link，也只写一条 History。"""
+    rule_id, source_dir, _ = rule
+    files = []
+    for i in range(4):
+        f = source_dir / f"late{i}.mp4"
+        f.write_bytes(b"L" * 64)
+        files.append(f)
+
+    # 建链接时下载器是空的
+    watchdir.sync_rule(rule_id, dry_run=False)
+
+    fake_downloader.torrents["HASH_LATEPACK"] = [str(f) for f in files]
+    added = watchdir.backfill_torrents()
+
+    assert added == 1
+    with session_scope() as session:
+        rows = session.scalars(sa.select(History)).all()
+        assert [r.hash for r in rows] == ["HASH_LATEPACK"]
+
+
 def test_backfill_skips_already_recorded(rule, fake_downloader):
     rule_id, source_dir, _ = rule
     a = source_dir / "clip.mp4"

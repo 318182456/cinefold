@@ -35,7 +35,9 @@ from app.core.config import get_settings
 from app.database.models import (
     CodeAlias, History, MediaLink, PendingDelete, WatchDir,
 )
-from app.database.session import SessionLocal, session_scope
+from app.database.session import (
+    SessionLocal, insert_ignore_duplicate, session_scope,
+)
 from app.services import watchdir_progress as progress
 from app.services.medialink import VIDEO_SUFFIXES, handle_media_deleted
 
@@ -1253,20 +1255,25 @@ def _record_torrents(
         logger.debug(f"[{code}] 下载器里找不到对应种子，可能是手工放入的文件")
         return []
 
-    def _write(s) -> None:
-        for h in hashes:
-            existing = s.get(History, h)
-            if existing is not None:
-                # 已有记录（cinefold 自己下载的）不改 code —— 那边的 code 是
-                # 真番号，比这里从文件名生成的更准
-                continue
-            s.add(History(hash=h, code=code, save_path=source_path))
+    # 交给数据库忽略冲突，不做「先查后插」—— 后者堵不住重复：
+    #
+    #   · 一个种子含多个视频（合集）时，同一批事务里前面的文件刚 add 的
+    #     History 还没 flush，session.get() 查不到，于是同一个 hash 被 add
+    #     多次，commit 时 executemany 撞主键，整批登记全丢
+    #   · 定时同步和手动触发并发跑时，两个事务各自都查不到，双双插入
+    #
+    # 冲突跳过而不是覆盖，正好也是想要的语义：已有记录（cinefold 自己下载的）
+    # code 是真番号，比这里从文件名生成的更准，不该被改掉。
+    rows = [
+        {"hash": h, "code": code, "save_path": source_path}
+        for h in dict.fromkeys(hashes)  # 反查可能给出重复 hash，先去重
+    ]
 
     if session is not None:
-        _write(session)
+        insert_ignore_duplicate(session, History, rows)
     else:
         with session_scope() as own:
-            _write(own)
+            insert_ignore_duplicate(own, History, rows)
 
     logger.info(f"[{code}] 已登记 {len(hashes)} 个种子: {', '.join(hashes)}")
     return hashes
@@ -1335,22 +1342,39 @@ def backfill_torrents(watch_id: int = 0) -> int:
     if not mapping:
         return 0
 
-    added = 0
-    with session_scope() as session:
-        for row in pending:
-            hashes = mapping.get(row["source_path"]) or []
-            for h in hashes:
-                if session.get(History, h) is not None:
-                    continue
-                session.add(History(
-                    hash=h, code=row["code"], save_path=row["source_path"]
-                ))
-                added += 1
-                logger.info(
-                    f"[{row['code']}] 补登记种子 {h}（建链接时下载器里还没有）"
-                )
+    # 一个种子可能对应多条 media_link（合集里的多个视频），先按 hash 去重，
+    # 否则同一个 hash 在一批里出现多次
+    rows: dict[str, dict] = {}
+    for row in pending:
+        for h in mapping.get(row["source_path"]) or []:
+            if h in rows:
+                continue
+            rows[h] = {
+                "hash": h, "code": row["code"], "save_path": row["source_path"],
+            }
 
-    return added
+    if not rows:
+        return 0
+
+    with session_scope() as session:
+        # 去重之后仍走 insert-ignore：这里查过没有、插入前别处（webhook、
+        # 另一轮同步）刚插进去的情况堵不住，交给数据库跳过
+        known = {
+            h for (h,) in session.execute(
+                select(History.hash).where(History.hash.in_(list(rows)))
+            ).all()
+        }
+        fresh = [r for h, r in rows.items() if h not in known]
+        if not fresh:
+            return 0
+
+        insert_ignore_duplicate(session, History, fresh)
+        for r in fresh:
+            logger.info(
+                f"[{r['code']}] 补登记种子 {r['hash']}（建链接时下载器里还没有）"
+            )
+
+    return len(fresh)
 
 
 def _register_alias(session, code: str, source_path: str) -> None:

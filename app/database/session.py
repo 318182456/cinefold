@@ -138,21 +138,43 @@ def session_scope() -> Iterator[Session]:
         session.close()
 
 
-def batch_insert_ignore_duplicate(
+def insert_ignore_stmt(model: type[DBBase]):
+    """构造「主键冲突就跳过」的 INSERT。
+
+    SQLite 用 INSERT OR IGNORE，PostgreSQL 用 ON CONFLICT DO NOTHING。
+    """
+    if is_sqlite():
+        return insert(model).prefix_with("OR IGNORE")
+    return pg_insert(model).on_conflict_do_nothing()
+
+
+def insert_ignore_duplicate(
     session: Session, model: type[DBBase], rows: Sequence[dict]
 ) -> int:
-    """批量插入，主键冲突时跳过。
+    """批量插入并忽略冲突，但**不提交** —— 提交时机交给调用方。
 
-    抓取任务会反复遇到已入库的番号，让数据库直接忽略冲突比先查后插快得多。
-    SQLite 用 INSERT OR IGNORE，PostgreSQL 用 ON CONFLICT DO NOTHING。
+    需要把插入和同事务里其他写操作一起提交时用这个（比如监控目录登记：
+    硬链接记录和种子记录必须同成同败）。只想插一批就走
+    batch_insert_ignore_duplicate。
+
+    返回请求条数，不是实际插入条数 —— 忽略掉多少条数据库不告诉我们。
     """
     if not rows:
         return 0
-    if is_sqlite():
-        stmt = insert(model).prefix_with("OR IGNORE")
-    else:
-        stmt = pg_insert(model).on_conflict_do_nothing()
-    result = session.execute(stmt, list(rows))
+    session.execute(insert_ignore_stmt(model), list(rows))
+    return len(rows)
+
+
+def batch_insert_ignore_duplicate(
+    session: Session, model: type[DBBase], rows: Sequence[dict]
+) -> int:
+    """批量插入，主键冲突时跳过，插完就提交。
+
+    抓取任务会反复遇到已入库的番号，让数据库直接忽略冲突比先查后插快得多。
+    """
+    if not rows:
+        return 0
+    result = session.execute(insert_ignore_stmt(model), list(rows))
     session.commit()
     # executemany 返回的 IteratorResult 没有 rowcount，退回请求条数
     return getattr(result, "rowcount", None) or len(rows)
