@@ -14,7 +14,9 @@ import pytest
 import sqlalchemy as sa
 
 from app.core.config import get_settings
-from app.database.models import History, MediaLink, PendingDelete, WatchDir
+from app.database.models import (
+    CodeAlias, History, MediaLink, PendingDelete, WatchDir,
+)
 from app.database.session import session_scope
 from app.services import medialink, watchdir
 
@@ -52,7 +54,7 @@ def clean_tables():
 
     def _clear():
         with session_scope() as session:
-            for model in (PendingDelete, MediaLink, WatchDir, History):
+            for model in (PendingDelete, MediaLink, CodeAlias, WatchDir, History):
                 for row in session.scalars(sa.select(model)).all():
                     session.delete(row)
 
@@ -1256,3 +1258,133 @@ def test_wait_stable_rejects_growing_file(tmp_path, monkeypatch):
     monkeypatch.setattr(watchdir, "STABLE_CHECK_ROUNDS", 3)
 
     assert watchdir._wait_stable(growing) is False
+
+
+# ----------------------------------------------------------------------
+# 长文件名的 code：哈希 + 别名表
+# ----------------------------------------------------------------------
+# 日文长片名放不进 varchar(64) 的 code 列，PostgreSQL 会直接拒绝插入
+# （StringDataRightTruncation），整轮同步中断。SQLite 不校验长度，
+# 所以这些用例断言的是长度本身，而不是依赖数据库报错。
+#
+# 长度贴着阈值上下各取一个，覆盖边界：短的走原文，长的走哈希
+LONG_STEM = (
+    "【超高画質】《01本編》レベチ過ぎ！超～キレカワ激マブ美女！！"
+    "華奢なのに出るとこ出たスペシャル美ボディ一女神！"
+    "【完全版】高画質フルバージョン収録"
+)
+
+
+def _aliases() -> dict[str, str]:
+    with session_scope() as session:
+        return {
+            r.code: r.filename
+            for r in session.scalars(sa.select(CodeAlias)).all()
+        }
+
+
+def test_long_filename_code_fits_column():
+    """超长片名的 code 必须落在 varchar(64) 之内。"""
+    assert len(LONG_STEM) > watchdir.CODE_MAX_LENGTH
+
+    code = watchdir.make_code(
+        WatchDir(source_dir="/x", code_prefix="short"),
+        Path(f"/x/{LONG_STEM}.mp4"),
+    )
+
+    assert len(code) <= watchdir.CODE_MAX_LENGTH
+    # 前缀留在哈希外面，按规则筛选仍然可用
+    assert code.startswith("short-")
+
+
+def test_long_filenames_sharing_prefix_do_not_collide():
+    """前缀相同的两个长片名不能撞成同一个 code。
+
+    撞了会被当成同一部片子，删一部连带删掉另一部 —— 裸截断正是这个后果。
+    """
+    plain = WatchDir(source_dir="/x", code_prefix="")
+    a = watchdir.make_code(plain, Path(f"/x/{LONG_STEM}-01.mp4"))
+    b = watchdir.make_code(plain, Path(f"/x/{LONG_STEM}-02.mp4"))
+
+    assert a != b
+
+
+def test_code_is_stable_across_calls():
+    """同一文件每轮对账都要算出同一个 code，否则会重复登记。"""
+    rule = WatchDir(source_dir="/x", code_prefix="om")
+    path = Path(f"/x/{LONG_STEM}.mp4")
+    assert watchdir.make_code(rule, path) == watchdir.make_code(rule, path)
+
+
+def test_code_fits_even_with_maximum_prefix():
+    """code_prefix 列宽 32，配满也不能让 code 溢出 64。"""
+    code = watchdir.make_code(
+        WatchDir(source_dir="/x", code_prefix="p" * 32),
+        Path(f"/x/{LONG_STEM}.mp4"),
+    )
+    assert len(code) <= watchdir.CODE_MAX_LENGTH
+
+
+def test_sync_long_filename_records_alias(rule):
+    """同步长片名文件时，别名表要记下 code → 原文件名。
+
+    code 变成哈希后列表页认不出是哪部片子，这张表是唯一的找回途径。
+    """
+    rule_id, source_dir, library = rule
+    (source_dir / f"{LONG_STEM}.mp4").write_bytes(b"A" * 64)
+
+    result = watchdir.sync_rule(rule_id, dry_run=False)
+
+    assert result.errors == []
+    code = next(iter(_links().values()))
+    assert len(code) <= watchdir.CODE_MAX_LENGTH
+    assert _aliases() == {code: LONG_STEM}
+
+
+def test_sync_short_filename_records_no_alias(rule):
+    """短文件名的 code 本身就是文件名，别名表不该留垃圾记录。"""
+    rule_id, source_dir, library = rule
+    (source_dir / "FC2-PPV-4482146.mp4").write_bytes(b"A" * 64)
+
+    watchdir.sync_rule(rule_id, dry_run=False)
+
+    assert _aliases() == {}
+
+
+def test_alias_is_not_duplicated_across_syncs(rule):
+    """重复对账不该反复插同一条别名。"""
+    rule_id, source_dir, library = rule
+    (source_dir / f"{LONG_STEM}.mp4").write_bytes(b"A" * 64)
+
+    watchdir.sync_rule(rule_id, dry_run=False)
+    watchdir.sync_rule(rule_id, dry_run=False)
+
+    assert len(_aliases()) == 1
+
+
+def test_rename_does_not_record_bogus_alias(rule):
+    """改名走移动判定，code 不变，也不该凭空记一条别名。
+
+    改名后源文件名与 code 本就不一致（code 沿用第一次登记的那个），
+    若拿「code 里含不含文件名」当判据，这里会误记一条 SV-before → after。
+    """
+    rule_id, source_dir, library = rule
+    old = source_dir / "before.mp4"
+    old.write_bytes(b"R" * 64)
+    watchdir.sync_rule(rule_id, dry_run=False)
+
+    old.rename(source_dir / "after.mp4")
+    watchdir.sync_rule(rule_id, dry_run=False)
+
+    assert _aliases() == {}
+
+
+def test_is_hashed_code_tells_the_two_forms_apart():
+    plain = WatchDir(source_dir="/x", code_prefix="SV")
+    short = watchdir.make_code(plain, Path("/x/FC2-PPV-4482146.mp4"))
+    hashed = watchdir.make_code(plain, Path(f"/x/{LONG_STEM}.mp4"))
+
+    assert watchdir.is_hashed_code(hashed) is True
+    assert watchdir.is_hashed_code(short) is False
+    # 番号里带 h 的普通 code 不能被误判
+    assert watchdir.is_hashed_code("SV-heyzo-1234") is False

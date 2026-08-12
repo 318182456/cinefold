@@ -22,6 +22,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import time
 from dataclasses import dataclass, field
@@ -31,7 +32,9 @@ from loguru import logger
 from sqlalchemy import select
 
 from app.core.config import get_settings
-from app.database.models import History, MediaLink, PendingDelete, WatchDir
+from app.database.models import (
+    CodeAlias, History, MediaLink, PendingDelete, WatchDir,
+)
 from app.database.session import session_scope
 from app.services import watchdir_progress as progress
 from app.services.medialink import VIDEO_SUFFIXES, handle_media_deleted
@@ -50,6 +53,16 @@ STABLE_CHECK_ROUNDS = 3
 # 不可能落到一分钟前。取值远大于 STABLE_CHECK_INTERVAL × ROUNDS，
 # 比原来的观测法更保守。
 STABLE_MTIME_AGE = 60.0
+
+# code 列在 media_link / history / pending_delete / code 四张表里都是
+# varchar(64)。code 由文件名生成，长片名必须截断，否则 PostgreSQL 拒绝插入
+CODE_MAX_LENGTH = 64
+# 长文件名转哈希时取的位数。32 位十六进制（128 bit）对几万条文件的碰撞
+# 概率可以忽略；加上 32 字符的前缀上限与标记位也仍在 64 以内
+CODE_HASH_LENGTH = 32
+# 哈希 code 的标记位。用它认出「这个 code 读不出片名，去 code_alias 查」，
+# 比事后猜格式可靠。十六进制里不会出现 h，不会与哈希本身混淆
+CODE_HASH_MARK = "h"
 
 # 正在下载的临时文件，不该建链接
 IGNORED_SUFFIXES = {".part", ".!qb", ".tmp", ".temp", ".downloading", ".aria2"}
@@ -222,10 +235,50 @@ def make_code(rule: WatchDir, source: Path) -> str:
 
     code 在 media_link 里是「同一部片子的多份文件 + 多个种子」的分组键，
     不要求是真番号。加前缀是为了与真番号隔离，方便列表页筛选。
+
+    超过 CODE_MAX_LENGTH 的换成哈希，见 _hash_code。
     """
     stem = source.stem
     prefix = (rule.code_prefix or "").strip()
-    return f"{prefix}-{stem}" if prefix else stem
+    code = f"{prefix}-{stem}" if prefix else stem
+    if len(code) <= CODE_MAX_LENGTH:
+        return code
+    return _hash_code(prefix, stem)
+
+
+def _hash_code(prefix: str, stem: str) -> str:
+    """长文件名换成「前缀 + 文件名哈希」。
+
+    code 列是 varchar(64)，而它来自文件名 —— 日文长片名轻松超过 64 字符，
+    PostgreSQL 会直接拒绝插入（StringDataRightTruncation），整轮同步中断。
+    SQLite 不校验长度，所以这个坑只在 PG 上现形。
+
+    不能裸截断：两个长片名很可能共享同一段前缀，截完撞成同一个 code 就会被
+    当成同一部片子，删一部连带删另一部。哈希整个文件名才能保证不撞。
+
+    代价是 code 不再有可读性，列表页认不出是哪部片子。原文件名记在
+    code_alias 表里补回来（登记时写，见 _register_alias）。规则前缀留在
+    哈希外面不参与计算，按前缀筛选还能用。
+    """
+    digest = CODE_HASH_MARK + hashlib.sha1(
+        stem.encode("utf-8")
+    ).hexdigest()[:CODE_HASH_LENGTH]
+    if not prefix:
+        return digest
+    # code_prefix 列宽 32，与「-」和哈希拼起来会差一个字符溢出 64。
+    # 宁可切前缀也不能动哈希 —— 哈希短一位就多一分撞车风险
+    room = CODE_MAX_LENGTH - len(digest) - 1
+    return f"{prefix[:room]}-{digest}"
+
+
+def is_hashed_code(code: str) -> bool:
+    """code 是否为哈希形式（即原文件名放不进 code 列）。
+
+    靠标记位判断，不靠「code 里含不含文件名」—— 文件改名后源文件名与 code
+    本就不一致（改名走移动判定，code 保持不变），那种判据会把普通 code
+    误认成哈希。
+    """
+    return code.rsplit("-", 1)[-1].startswith(CODE_HASH_MARK)
 
 
 def _wait_stable(path: Path) -> bool:
@@ -1104,6 +1157,20 @@ def backfill_torrents(watch_id: int = 0) -> int:
     return added
 
 
+def _register_alias(session, code: str, source_path: str) -> None:
+    """哈希 code 记一条「code → 原文件名」，让它重新可读。
+
+    只有走了哈希的 code 才需要 —— 其余 code 本身就是文件名，记了是冗余。
+
+    复用调用方的 session：这是登记流程的一部分，同一事务里成或败。
+    """
+    if not is_hashed_code(code):
+        return
+
+    if session.get(CodeAlias, code) is None:
+        session.add(CodeAlias(code=code, filename=Path(source_path).stem))
+
+
 def _register(code: str, source_path: str, link_path: str) -> None:
     """写入 media_link。直接落库而不走 register_scrape。
 
@@ -1132,6 +1199,8 @@ def _register(code: str, source_path: str, link_path: str) -> None:
                 inode=inode,
                 device=device,
             ))
+
+        _register_alias(session, code, source_path)
 
 
 def _drop_record(link_path: str) -> None:

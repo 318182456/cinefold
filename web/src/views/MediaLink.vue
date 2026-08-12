@@ -281,6 +281,15 @@ onMounted(() => {
       <div v-for="group in grouped" :key="group.code" class="card space-y-2">
         <div class="flex flex-wrap items-center gap-2">
           <span class="font-mono text-sm font-medium text-brand">{{ group.code }}</span>
+          <!-- 长片名放不进 code 列，code 是哈希 —— 把原文件名显示出来，
+               否则这一组根本认不出是哪部片子 -->
+          <span
+            v-if="group.links[0].filename"
+            class="min-w-0 max-w-full truncate text-xs text-gray-400"
+            :title="group.links[0].filename"
+          >
+            {{ group.links[0].filename }}
+          </span>
           <span class="badge bg-gray-800 text-gray-400">
             {{ group.links.length }} 条链接
           </span>

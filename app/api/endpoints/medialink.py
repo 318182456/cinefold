@@ -15,7 +15,7 @@ from sqlalchemy import func, or_, select
 
 from app.api.endpoints import get_current_user
 from app.core.config import get_settings
-from app.database.models import History, MediaLink
+from app.database.models import CodeAlias, History, MediaLink
 from app.database.session import session_scope
 from app.schemas.reponse import ResponseEntity
 from app.services.medialink import handle_media_deleted, register_scrape
@@ -126,6 +126,11 @@ def list_medialinks(
                 MediaLink.code.like(like),
                 MediaLink.link_path.like(like),
                 MediaLink.source_path.like(like),
+                # 哈希 code 搜不出片名，得连别名表一起搜。source_path 里通常
+                # 也含文件名，但直通模式改名后两者会不一致，别名才是准的
+                MediaLink.code.in_(
+                    select(CodeAlias.code).where(CodeAlias.filename.like(like))
+                ),
             ))
         if missing_only:
             # 失效判定只能靠磁盘探测，没法下推成 SQL 条件；
@@ -161,9 +166,10 @@ def list_medialinks(
             "source_exists": _exists_cached(r.source_path),
         } for r in rows]
 
-    # 种子数按番号批量查，避免每行一次查询
+    # 种子数与文件名别名都按番号批量查，避免每行一次查询
     codes = {i["code"] for i in page_items}
     counts: dict[str, int] = {}
+    aliases: dict[str, str] = {}
     if codes:
         with session_scope() as session:
             counts = {
@@ -173,8 +179,16 @@ def list_medialinks(
                     .group_by(History.code)
                 ).all()
             }
+            # 长文件名的 code 是哈希，读不出是哪部片子，别名表里取回原名
+            aliases = {
+                code: name for code, name in session.execute(
+                    select(CodeAlias.code, CodeAlias.filename)
+                    .where(CodeAlias.code.in_(codes))
+                ).all()
+            }
     for item in page_items:
         item["torrent_count"] = counts.get(item["code"], 0)
+        item["filename"] = aliases.get(item["code"], "")
 
     settings = get_settings()
     return ResponseEntity.ok({
