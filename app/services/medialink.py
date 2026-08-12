@@ -833,8 +833,18 @@ def handle_media_deleted(
     #
     # 只保护登记过的源文件；种子里的其它文件（样品图、说明 txt）不设这层
     # 保护 —— 它们本来就没有硬链接，多一次 stat 是白费
+    #
+    # 直通模式（link_path == source_path，没有真的建过硬链接）要把自己排除掉，
+    # 否则期望值算成 2 而实际 nlink 只有 1 —— 检查虽不会误拦（只拦超出的），
+    # 但语义上该文件的合法引用数就是 1
     registered_sources = {row.source_path for row in links if row.source_path}
-    allowed_links = 1 + len(link_paths)
+    # 直通登记：同一条记录里 link_path 与 source_path 指向同一个文件，
+    # 说明压根没建过硬链接。按记录逐条比对，不拿两个集合求交 ——
+    # 后者会把「A 的源文件恰好是 B 的链接」这种交叉情况也算进来
+    passthrough_paths = {
+        row.link_path for row in links if row.link_path == row.source_path
+    }
+    allowed_links = 1 + len(link_paths) - len(passthrough_paths)
     for path in sorted(source_paths):
         expected = allowed_links if path in registered_sources else 0
         _delete_file(path, result, expected_links=expected)
@@ -844,8 +854,13 @@ def handle_media_deleted(
     if torrent_files:
         _prune_torrent_dirs(torrent_files, result)
 
-    # 3) 删硬链接
+    # 3) 删硬链接。
+    #    直通模式下 link_path 就是刚在第 2 步删掉的那个源文件，跳过 ——
+    #    再走一遍只会在日志里刷「文件已不存在」，并把同一路径重复计一次
     for path in link_paths:
+        if path in passthrough_paths:
+            result.links_deleted.append(path)
+            continue
         _delete_file(path, result)
         result.links_deleted.append(path)
 

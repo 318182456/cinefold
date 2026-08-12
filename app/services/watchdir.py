@@ -152,7 +152,16 @@ def target_base(rule: WatchDir) -> Path | None:
 
     目标目录不要求此刻就存在 —— 建链接时会自动 mkdir。但父目录得能建出来，
     这个交给 os.link 报错，不在这里预判。
+
+    直通模式没有「目标目录」这回事：源目录自己就是媒体库目录，Emby 直接扫它。
+    返回源目录，下游的归属判定（link_path 前缀匹配）与路径计算就都成立了。
     """
+    if rule.passthrough:
+        try:
+            return Path(rule.source_dir)
+        except (OSError, ValueError):
+            return None
+
     raw = (rule.target_dir or "").strip()
     if raw:
         try:
@@ -178,7 +187,14 @@ def target_path(
 
     源文件不在源目录内时返回 None —— 说明调用方传错了，宁可不建。
     base 省略时按规则自行解析；批量调用时传进来可省掉重复解析。
+
+    直通模式下目标就是源文件自己。直接返回 source 而不走 root / relative：
+    后者会把路径重新拼一遍（resolve 过符号链接、分隔符可能变形），拼出来的
+    字符串与 str(source) 不一定逐字相等，而下游正是拿这两者做字典键比对的。
     """
+    if rule.passthrough:
+        return source
+
     root = base if base is not None else target_base(rule)
     if root is None:
         return None
@@ -316,6 +332,7 @@ def sync_rule(rule_id: int, dry_run: bool = False) -> SyncResult:
             target_subdir=row.target_subdir,
             name=row.name, enabled=row.enabled, recursive=row.recursive,
             reverse_delete=row.reverse_delete, code_prefix=row.code_prefix,
+            passthrough=row.passthrough,
         )
 
     result.source_dir = rule.source_dir
@@ -381,11 +398,25 @@ def sync_rule(rule_id: int, dry_run: bool = False) -> SyncResult:
     # 不等于规则算出的目标路径，在 expected 里根本找不到。只认 expected 的话，
     # 「在 Emby 里删掉刮削建的那份」不但不联动，下一轮还会按规则路径重建一份
     scanned_sources = {str(s) for s in expected.values()}
-    media_deleted = {
-        link_path for link_path, record in linked_records.items()
-        if record.source_path in scanned_sources
-        and not Path(link_path).exists()
-    }
+    if rule.passthrough:
+        # 直通模式下 link_path == source_path，两者同生共死：文件被 Emby 删掉时
+        # 源文件也就没了，上面那套「源文件还在、链接没了」的判据一条都不成立，
+        # media_deleted 会恒为空，反向删除永远不触发。
+        #
+        # 这里只能退回到「登记过、现在文件不在了」。代价是分辨不出这一删究竟
+        # 来自 Emby 还是别的途径（用户直接删源目录、脚本清理）—— 但直通模式下
+        # 这两者本就是同一个文件的同一次删除，没有区分的必要，后续动作一样：
+        # 删种、清记录。真正的误删防护交给 inode 移动判定与宽限期扣留
+        media_deleted = {
+            link_path for link_path, record in linked_records.items()
+            if not Path(link_path).exists()
+        }
+    else:
+        media_deleted = {
+            link_path for link_path, record in linked_records.items()
+            if record.source_path in scanned_sources
+            and not Path(link_path).exists()
+        }
 
     # 链接已被删的那些源文件，本轮不能再为它们建链接 —— 那是在跟用户的删除
     # 操作对着干，而且下一轮又会被删掉，来回拉锯
@@ -415,7 +446,9 @@ def sync_rule(rule_id: int, dry_run: bool = False) -> SyncResult:
     # 建的，路径按它的规则组织，与我们算出来的对不上）。不认领就会重复建，
     # 媒体库里凭空多出一部同样的片子。
     # 只在确实有待建链接时才扫 —— 全量 rglob 在大库上是分钟级的
-    if todo:
+    #
+    # 直通模式没有认领这回事：目标就是源文件本身，不存在「别处已有一份链接」
+    if todo and not rule.passthrough:
         if track:
             progress.update(
                 rule_id, phase="claiming",
@@ -448,20 +481,26 @@ def sync_rule(rule_id: int, dry_run: bool = False) -> SyncResult:
             result.skipped.append(f"文件仍在写入，本轮跳过: {source}")
             continue
 
-        ok, err = _hardlink(source, target)
-        if not ok:
-            logger.error(err)
-            result.errors.append(err)
-            continue
+        # 直通模式不建链接，只登记。文件已经在它该在的位置了
+        if not rule.passthrough:
+            ok, err = _hardlink(source, target)
+            if not ok:
+                logger.error(err)
+                result.errors.append(err)
+                continue
 
         code = make_code(rule, source)
         _register(code, str(source), target_str)
-        # 种子信息趁现在存下来 —— 删除时下载器里可能已经没有这个种子了
+        # 种子信息趁现在存下来 —— 删除时下载器里可能已经没有这个种子了。
+        # 直通模式尤其依赖这一步：没有硬链接，删除时全靠这条记录找回种子
         _record_torrents(code, str(source))
         result.linked.append(target_str)
         if track:
             progress.update(rule_id, done=index, linked=len(result.linked))
-        logger.info(f"[{code}] 已建硬链接 {source} → {target}")
+        if rule.passthrough:
+            logger.info(f"[{code}] 直通模式已登记 {source}")
+        else:
+            logger.info(f"[{code}] 已建硬链接 {source} → {target}")
 
     if track:
         progress.update(
@@ -480,6 +519,11 @@ def sync_rule(rule_id: int, dry_run: bool = False) -> SyncResult:
             continue
         # 源文件仍在本轮扫描结果里，说明这条关联好好的（认领的链接走这条）
         if record.source_path in scanned_sources and Path(target_str).exists():
+            continue
+        # 直通模式下没有「只删链接、留着源文件」这种中间态 —— 链接就是源文件。
+        # 这些记录全部由上面的 media_deleted 接管，走第 3 步的反向删除路径。
+        # 在这里再处理一遍就成了「删掉刚判定为待反向删除的那个文件」
+        if rule.passthrough:
             continue
 
         source_gone = not Path(record.source_path).exists()
@@ -547,7 +591,13 @@ def sync_rule(rule_id: int, dry_run: bool = False) -> SyncResult:
             if dry_run:
                 result.moved.append({"from": target_str, "to": str(moved_to)})
                 continue
-            _register(record.code, record.source_path, str(moved_to))
+            # 直通模式下 source_path 必须跟着一起改 —— 它与 link_path 是同一个
+            # 文件。只改 link_path 会让记录里的源路径指向一个已经不在的位置，
+            # 之后删种要靠它反查下载器，指错了就什么都查不到
+            new_source = (
+                str(moved_to) if rule.passthrough else record.source_path
+            )
+            _register(record.code, new_source, str(moved_to))
             _drop_record(target_str)
             _clear_hold(target_str)
             result.moved.append({"from": target_str, "to": str(moved_to)})

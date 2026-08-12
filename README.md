@@ -196,6 +196,57 @@ Bot 能推送但收不到消息时，先看这里。
 
 ---
 
+## 媒体联动删除
+
+在 Emby / Jellyfin 里删掉一部影片，联动删除源文件、种子任务和刮削产物。
+
+### 前置条件
+
+三项缺一条都不会生效：
+
+1. `MEDIALINK_DELETE_ENABLED=true`。**默认是 `false`** —— 此时接口照常返回
+   200、日志照常打印，但一个文件都不会删（内部降级成演练）。
+2. Emby 装 Webhooks 插件，事件勾选删除类，地址填
+   `http://<cinefold>:3750/api/v1/webhook/emby`，请求头带
+   `X-Cinefold-Token`（对应 `MEDIALINK_WEBHOOK_TOKEN`）。
+3. Emby 容器与 cinefold 容器的媒体目录**挂载路径保持一致**。不一致时只能靠
+   文件名兜底匹配，同名文件多了会误伤。
+
+接入前先演练一次，确认命中的文件和种子都对：
+
+```bash
+curl -X POST "http://host:3750/api/v1/webhook/emby?dry_run=1" \
+  -H 'Content-Type: application/json' \
+  -H 'X-Cinefold-Token: <token>' \
+  -d '{"Event":"item.remove","Item":{"Path":"/media/ABS-001/ABS-001.mp4"}}'
+```
+
+返回里 `torrents_deleted` / `files_deleted` / `links_deleted` 都非空才算通。
+若报「未找到关联记录」，说明这个文件没登记过 —— 见下。
+
+### 两种目录模式
+
+删除联动的依据是 `media_link` 表里的关联记录。记录怎么来，取决于监控目录用
+哪种模式：
+
+| 模式 | 做什么 | 适用 |
+| --- | --- | --- |
+| 硬链接（默认） | 源目录 → 目标目录建硬链接，Emby 扫目标目录 | 需要刮削、需要分类整理 |
+| 直通 | 不建链接，Emby 直接扫源目录 | 不刮削、不整理的内容（短视频等） |
+
+直通模式在添加监控目录时勾选，此时不需要填目标目录。它只做两件事：登记
+`media_link`（`link_path` 就是源文件本身）、把种子 hash 落到 `history` ——
+目的仅仅是让上面那条删除联动能找到东西。
+
+**直通模式没有硬链接兜底**：Emby 里删掉就是直接删源文件，没有中间态。建议
+先不开反向删除，观察一段时间再放开。误删防护只剩两道：inode 移动判定
+（在目录里挪动文件不会被当成删除）和宽限期扣留（`WATCHDIR_DELETE_GRACE`）。
+
+刮削场景下的记录由 `/webhook/scrape` 回调登记，与监控目录无关。历史遗留的
+库两者都没走过，表里没有记录，删除时不会有任何动作。
+
+---
+
 ## API
 
 除登录外均需鉴权，支持两种方式：
@@ -218,7 +269,7 @@ curl http://host:3750/api/v1/dashboard -H 'Authorization: Bearer <token>'
 
 ```bash
 # 后端
-.venv/bin/python -m pytest tests/ -q      # 138 项测试
+.venv/bin/python -m pytest tests/ -q      # 437 项测试
 .venv/bin/python -m uvicorn app.api:app --port 56168 --reload
 
 # 前端

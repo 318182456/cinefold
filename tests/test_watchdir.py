@@ -15,7 +15,7 @@ import sqlalchemy as sa
 from app.core.config import get_settings
 from app.database.models import History, MediaLink, PendingDelete, WatchDir
 from app.database.session import session_scope
-from app.services import watchdir
+from app.services import medialink, watchdir
 
 
 @pytest.fixture
@@ -1044,3 +1044,161 @@ def test_claimed_link_not_rebuilt_after_library_delete(rule):
 
     # 规则算出的那个路径也不该冒出来
     assert not (library / "sv" / "a.mp4").exists()
+
+
+# ----------------------------------------------------------------------
+# 直通模式：不建硬链接，源目录自己就是 Emby 扫的目录
+# ----------------------------------------------------------------------
+@pytest.fixture
+def passthrough_rule(tmp_path, configure):
+    """直通规则：没有目标目录，Emby 直接扫源目录。
+
+    返回 (rule_id, 源目录)。
+    """
+    source_dir = tmp_path / "shorts"
+    source_dir.mkdir(parents=True)
+
+    configure(
+        medialink_library_path=str(source_dir),
+        medialink_scrape_dir="",
+        medialink_delete_enabled=True,
+        watchdir_delete_grace=0,
+    )
+
+    with session_scope() as session:
+        session.add(WatchDir(
+            source_dir=str(source_dir), target_dir="", target_subdir="",
+            name="shorts", enabled=True, recursive=True,
+            reverse_delete=True, code_prefix="SV", passthrough=True,
+        ))
+    with session_scope() as session:
+        rule_id = session.scalar(sa.select(WatchDir.id))
+
+    return rule_id, source_dir
+
+
+def test_passthrough_target_is_the_source_itself():
+    rule = WatchDir(source_dir="/downloads/shorts", passthrough=True)
+    source = Path("/downloads/shorts/2026/a.mp4")
+    assert watchdir.target_path(rule, source) == source
+
+
+def test_passthrough_registers_without_creating_links(passthrough_rule):
+    """只登记，不建文件 —— 目录里还是那一个文件。"""
+    rule_id, source_dir = passthrough_rule
+    a = source_dir / "clip.mp4"
+    a.write_bytes(b"C" * 64)
+
+    result = watchdir.sync_rule(rule_id, dry_run=False)
+
+    assert result.linked == [str(a)]
+    assert result.errors == []
+    # 没有多出任何文件，且 link_path 就是源文件本身
+    assert list(source_dir.rglob("*.mp4")) == [a]
+    assert _links() == {str(a): "SV-clip"}
+    assert a.stat().st_nlink == 1
+
+
+def test_passthrough_records_torrent_at_register_time(
+    passthrough_rule, fake_downloader
+):
+    """删除时全靠这条记录找回种子，登记这一刻必须落库。"""
+    rule_id, source_dir = passthrough_rule
+    a = source_dir / "clip.mp4"
+    a.write_bytes(b"C" * 64)
+    fake_downloader.torrents["HASH_C"] = [str(a)]
+
+    watchdir.sync_rule(rule_id, dry_run=False)
+
+    with session_scope() as session:
+        rows = {h.hash: h.code for h in session.scalars(sa.select(History)).all()}
+    assert rows == {"HASH_C": "SV-clip"}
+
+
+def test_passthrough_deletion_removes_torrent_and_record(
+    passthrough_rule, fake_downloader
+):
+    """Emby 删掉文件 → 删种 + 清记录。这是这个模式存在的唯一理由。"""
+    rule_id, source_dir = passthrough_rule
+    a = source_dir / "clip.mp4"
+    a.write_bytes(b"C" * 64)
+    fake_downloader.torrents["HASH_C"] = [str(a)]
+    watchdir.sync_rule(rule_id, dry_run=False)
+
+    a.unlink()  # 模拟 Emby 删除
+    result = watchdir.sync_rule(rule_id, dry_run=False)
+
+    assert len(result.reverse_deleted) == 1
+    assert result.reverse_deleted[0]["torrents"] == ["HASH_C"]
+    assert fake_downloader.deleted == ["HASH_C"]
+    assert _links() == {}
+
+
+def test_passthrough_deletion_reports_link_once(
+    passthrough_rule, fake_downloader
+):
+    """link_path 与 source_path 是同一个文件，不该被计两次。"""
+    rule_id, source_dir = passthrough_rule
+    a = source_dir / "clip.mp4"
+    a.write_bytes(b"C" * 64)
+    watchdir.sync_rule(rule_id, dry_run=False)
+    a.unlink()
+
+    outcome = medialink.handle_media_deleted(link_path=str(a), dry_run=False)
+
+    assert outcome.links_deleted == [str(a)]
+    assert outcome.errors == []
+
+
+def test_passthrough_keeps_file_when_reverse_delete_off(passthrough_rule):
+    """没开反向删除时，记录留着不动 —— 别把用户的文件当成该清理的垃圾。"""
+    rule_id, source_dir = passthrough_rule
+    with session_scope() as session:
+        session.get(WatchDir, rule_id).reverse_delete = False
+    a = source_dir / "clip.mp4"
+    a.write_bytes(b"C" * 64)
+    watchdir.sync_rule(rule_id, dry_run=False)
+
+    a.unlink()
+    result = watchdir.sync_rule(rule_id, dry_run=False)
+
+    assert result.reverse_deleted == []
+    assert any("未开启反向删除" in s for s in result.skipped)
+
+
+def test_passthrough_move_updates_both_paths(passthrough_rule):
+    """在源目录里挪动文件是移动不是删除，两个路径字段都要跟着走。"""
+    rule_id, source_dir = passthrough_rule
+    a = source_dir / "clip.mp4"
+    a.write_bytes(b"C" * 64)
+    watchdir.sync_rule(rule_id, dry_run=False)
+
+    moved = source_dir / "2026"
+    moved.mkdir()
+    target = moved / "clip.mp4"
+    a.rename(target)
+
+    result = watchdir.sync_rule(rule_id, dry_run=False)
+
+    assert result.reverse_deleted == []
+    assert target.exists()
+    with session_scope() as session:
+        rows = session.scalars(sa.select(MediaLink)).all()
+        assert len(rows) == 1
+        # 直通模式下两个字段指的是同一个文件，必须同时更新
+        assert rows[0].link_path == str(target)
+        assert rows[0].source_path == str(target)
+
+
+def test_passthrough_sync_is_idempotent(passthrough_rule):
+    """重复对账不该反复登记，也不该把已登记的文件判成待处理。"""
+    rule_id, source_dir = passthrough_rule
+    (source_dir / "clip.mp4").write_bytes(b"C" * 64)
+    watchdir.sync_rule(rule_id, dry_run=False)
+
+    result = watchdir.sync_rule(rule_id, dry_run=False)
+
+    assert result.linked == []
+    assert result.unlinked == []
+    assert result.reverse_deleted == []
+    assert len(_links()) == 1

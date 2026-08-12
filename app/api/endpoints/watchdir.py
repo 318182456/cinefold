@@ -37,6 +37,9 @@ class WatchDirRequest(BaseModel):
     recursive: bool = True
     reverse_delete: bool = False
     code_prefix: str = ""
+    # 直通模式：不建硬链接，源目录直接就是 Emby 扫的目录。
+    # 只登记关联与种子信息，让删除联动能生效
+    passthrough: bool = False
 
 
 class WatchDirUpdate(BaseModel):
@@ -49,6 +52,7 @@ class WatchDirUpdate(BaseModel):
     recursive: bool | None = None
     reverse_delete: bool | None = None
     code_prefix: str | None = None
+    passthrough: bool | None = None
 
 
 def _sync_in_background(rule_id: int, dry_run: bool = False) -> bool:
@@ -98,6 +102,12 @@ def list_watchdirs(current_user: str = Depends(get_current_user)):
     # 页面要据此提示配置问题
     for item in rows:
         item["source_exists"] = Path(item["source_dir"]).is_dir()
+        # 直通模式没有独立的目标目录，源目录自己就是。照实显示成同一个路径，
+        # 免得页面上出现一个空的目标目录看起来像配置漏了
+        if item.get("passthrough"):
+            item["resolved_target"] = item["source_dir"]
+            item["target_exists"] = item["source_exists"]
+            continue
         # 目标目录按 target_dir → 库根+子目录 的优先级算出来给页面直接显示，
         # 免得前端再重复一遍这个回退逻辑
         ok, _, target = _resolve_target(
@@ -129,6 +139,7 @@ def list_watchdirs(current_user: str = Depends(get_current_user)):
             "recursive": True,
             "reverse_delete": settings.medialink_delete_enabled,
             "code_prefix": "",
+            "passthrough": False,
             "source_exists": False,
             "target_exists": Path(scrape_dir).is_dir(),
             "last_scan_time": "",
@@ -167,14 +178,21 @@ def create_watchdir(
     target_dir = (body.target_dir or "").strip().rstrip("/\\")
     target_subdir = (body.target_subdir or "").strip().strip("/\\")
 
-    ok, message, target = _resolve_target(target_dir, target_subdir)
-    if not ok:
-        return ResponseEntity.fail(message, code=400)
+    # 直通模式不建链接，源目录自己就是媒体库目录：既没有目标目录要解析，
+    # 也无所谓跨不跨文件系统。填了目标目录就清掉，免得列表页显示出一个
+    # 根本不会被用到的路径
+    if body.passthrough:
+        target_dir = ""
+        target_subdir = ""
+    else:
+        ok, message, target = _resolve_target(target_dir, target_subdir)
+        if not ok:
+            return ResponseEntity.fail(message, code=400)
 
-    # 硬链接不能跨文件系统，配置时就该拦住，而不是等同步时每个文件报一次错
-    ok, message = _check_same_fs(source, target)
-    if not ok:
-        return ResponseEntity.fail(message, code=400)
+        # 硬链接不能跨文件系统，配置时就该拦住，而不是等同步时每个文件报一次错
+        ok, message = _check_same_fs(source, target)
+        if not ok:
+            return ResponseEntity.fail(message, code=400)
 
     with session_scope() as session:
         existing = session.scalar(
@@ -192,6 +210,7 @@ def create_watchdir(
             recursive=body.recursive,
             reverse_delete=body.reverse_delete,
             code_prefix=(body.code_prefix or "").strip(),
+            passthrough=body.passthrough,
         )
         session.add(row)
         session.flush()  # 拿到自增 id，下面要用
@@ -348,11 +367,21 @@ def update_watchdir(
             row.target_dir = body.target_dir.strip().rstrip("/\\")
         if body.target_subdir is not None:
             row.target_subdir = body.target_subdir.strip().strip("/\\")
+        if body.passthrough is not None:
+            row.passthrough = body.passthrough
+            # 切进直通模式时清掉目标目录，语义同新增
+            if body.passthrough:
+                row.target_dir = ""
+                row.target_subdir = ""
 
         # 源目录或目标目录任一改动，都要按改后的组合重新校验 ——
-        # 只在改源目录时校验的话，单独改目标目录能绕过跨文件系统检查
-        if body.source_dir is not None or body.target_dir is not None \
-                or body.target_subdir is not None:
+        # 只在改源目录时校验的话，单独改目标目录能绕过跨文件系统检查。
+        # passthrough 也算改动项：从直通切回硬链接模式时，那时才第一次需要
+        # 目标目录，不校验就会留下一条建不出链接的规则
+        if not row.passthrough and (
+            body.source_dir is not None or body.target_dir is not None
+            or body.target_subdir is not None or body.passthrough is not None
+        ):
             ok, message, target = _resolve_target(row.target_dir, row.target_subdir)
             if not ok:
                 return ResponseEntity.fail(message, code=400)

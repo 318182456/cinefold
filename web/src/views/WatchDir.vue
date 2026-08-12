@@ -98,11 +98,15 @@ function blankDraft() {
     recursive: true,
     reverse_delete: false,
     code_prefix: '',
+    // 直通模式：不建硬链接，Emby 直接扫源目录
+    passthrough: false,
   }
 }
 
 // 目标目录的实际落点，与后端 _resolve_target 的优先级保持一致
 const targetPreview = computed(() => {
+  // 直通模式没有目标目录，源目录自己就是
+  if (draft.value.passthrough) return (draft.value.source_dir || '').trim()
   const dir = (draft.value.target_dir || '').trim()
   if (dir) return dir
   if (!libraryPath.value) return ''
@@ -176,6 +180,7 @@ function openEdit(item) {
     recursive: item.recursive,
     reverse_delete: item.reverse_delete,
     code_prefix: item.code_prefix,
+    passthrough: !!item.passthrough,
   }
   editorOpen.value = true
 }
@@ -453,6 +458,9 @@ onUnmounted(stopProgressPoll)
           >
             {{ item.enabled ? '启用' : '停用' }}
           </span>
+          <span v-if="item.passthrough" class="badge bg-sky-950/60 text-sky-400">
+            直通
+          </span>
           <span v-if="item.reverse_delete" class="badge bg-red-950/60 text-red-400">
             反向删除
           </span>
@@ -526,9 +534,17 @@ onUnmounted(stopProgressPoll)
             />
             <div class="min-w-0 flex-1">
               <p class="text-[11px] text-gray-500">
-                {{ item.protected ? '输出目录' : '目标目录' }}
+                {{ item.protected ? '输出目录' : (item.passthrough ? '媒体库目录' : '目标目录') }}
               </p>
               <p
+                v-if="item.passthrough"
+                class="truncate text-[11px] text-gray-600"
+                title="直通模式：源目录即媒体库目录，不建硬链接"
+              >
+                同源目录（不建链接）
+              </p>
+              <p
+                v-else
                 class="truncate text-[11px] text-gray-600"
                 :title="item.resolved_target"
               >
@@ -588,42 +604,67 @@ onUnmounted(stopProgressPoll)
         <div class="space-y-1">
           <label class="text-xs text-gray-500">源目录（绝对路径）</label>
           <input v-model="draft.source_dir" class="input" placeholder="/downloads/短视频" />
-          <p class="text-[11px] text-gray-600">
+          <p v-if="!draft.passthrough" class="text-[11px] text-gray-600">
             必须与目标目录在同一文件系统，否则无法建硬链接。
           </p>
-        </div>
-
-        <div class="space-y-1">
-          <label class="text-xs text-gray-500">目标目录（绝对路径）</label>
-          <input
-            v-model="draft.target_dir"
-            class="input"
-            placeholder="/volume3/h_video/短视频"
-          />
-          <p class="text-[11px] text-gray-600">
-            想放哪就填哪，与设置里的媒体库根目录无关 —— 短视频、电影各有独立媒体库时用这个。
+          <p v-else class="text-[11px] text-gray-600">
+            把这个目录直接添加为 Emby 的媒体库。
           </p>
         </div>
 
-        <!-- 旧配置方式，只在还没填目标目录时露出来，避免两个字段同时可见让人困惑 -->
-        <div v-if="!draft.target_dir.trim()" class="space-y-1">
-          <label class="text-xs text-gray-500">或：媒体库子目录（可留空）</label>
-          <input v-model="draft.target_subdir" class="input" placeholder="短视频" />
-          <p class="text-[11px] text-gray-600">
-            留空目标目录时才生效，拼在媒体库根目录
-            {{ libraryPath || '（未配置）' }} 之后。
+        <!-- 直通模式决定下面是否还需要目标目录，所以放在源目录紧后面 -->
+        <label class="flex items-start gap-2 text-xs text-gray-400">
+          <input v-model="draft.passthrough" type="checkbox" class="mt-0.5 accent-brand" />
+          <span>
+            直通模式：不建硬链接，Emby 直接扫源目录
+            <span class="block text-[11px] text-gray-500">
+              适合不需要刮削、不需要整理的内容（短视频等）。只登记关联与种子，
+              让「Emby 里删片 → 删源文件 + 删种」这条联动生效。
+            </span>
+          </span>
+        </label>
+
+        <template v-if="!draft.passthrough">
+          <div class="space-y-1">
+            <label class="text-xs text-gray-500">目标目录（绝对路径）</label>
+            <input
+              v-model="draft.target_dir"
+              class="input"
+              placeholder="/volume3/h_video/短视频"
+            />
+            <p class="text-[11px] text-gray-600">
+              想放哪就填哪，与设置里的媒体库根目录无关 —— 短视频、电影各有独立媒体库时用这个。
+            </p>
+          </div>
+
+          <!-- 旧配置方式，只在还没填目标目录时露出来，避免两个字段同时可见让人困惑 -->
+          <div v-if="!draft.target_dir.trim()" class="space-y-1">
+            <label class="text-xs text-gray-500">或：媒体库子目录（可留空）</label>
+            <input v-model="draft.target_subdir" class="input" placeholder="短视频" />
+            <p class="text-[11px] text-gray-600">
+              留空目标目录时才生效，拼在媒体库根目录
+              {{ libraryPath || '（未配置）' }} 之后。
+            </p>
+          </div>
+
+          <p
+            v-if="targetPreview"
+            class="rounded-lg bg-gray-900/60 px-3 py-2 text-[11px] text-gray-400"
+          >
+            链接将建到 <span class="text-gray-300">{{ targetPreview }}</span>，
+            源目录内的层级结构原样保留。
           </p>
-        </div>
+          <p v-else class="rounded-lg bg-amber-950/40 px-3 py-2 text-[11px] text-amber-300">
+            请填写目标目录 —— 媒体库根目录也没配置，无处建立链接。
+          </p>
+        </template>
 
         <p
-          v-if="targetPreview"
-          class="rounded-lg bg-gray-900/60 px-3 py-2 text-[11px] text-gray-400"
+          v-else
+          class="rounded-lg bg-amber-950/40 px-3 py-2 text-[11px] text-amber-300"
         >
-          链接将建到 <span class="text-gray-300">{{ targetPreview }}</span>，
-          源目录内的层级结构原样保留。
-        </p>
-        <p v-else class="rounded-lg bg-amber-950/40 px-3 py-2 text-[11px] text-amber-300">
-          请填写目标目录 —— 媒体库根目录也没配置，无处建立链接。
+          直通模式没有硬链接兜底：Emby 里删掉就是直接删源文件，删了找不回来。
+          建议先不开反向删除，用「演练」确认命中的文件和种子都对，再放开。
         </p>
 
         <div class="grid gap-3 sm:grid-cols-2">

@@ -58,6 +58,8 @@ def update_database() -> None:
         ("datasource", "deleted", "BOOLEAN NOT NULL DEFAULT FALSE"),
         # 目标目录改为可填任意绝对路径。旧规则该列为空，回退到 target_subdir
         ("watch_dir", "target_dir", "VARCHAR(500) NOT NULL DEFAULT ''"),
+        # 直通模式：不建硬链接，只登记关联。存量规则一律为假，行为不变
+        ("watch_dir", "passthrough", "BOOLEAN NOT NULL DEFAULT FALSE"),
     ]
     for table, column, column_type in migrations:
         check_and_create_column(engine, table, column, column_type)

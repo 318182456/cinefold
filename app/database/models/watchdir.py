@@ -50,6 +50,14 @@ class WatchDir(DBBase):
     # code 前缀。留空则直接用文件名（不含扩展名）作 code
     code_prefix: Mapped[str] = mapped_column(String(32), nullable=False, default="")
 
+    # 直通模式：不建硬链接，源目录本身就是媒体库目录。
+    # 适用于不需要刮削、不需要分类整理的内容（短视频等）—— Emby 直接扫源目录，
+    # 只登记 media_link（link_path == source_path）与种子信息，
+    # 目的仅仅是让「Emby 删片 → 删种 + 删源文件」这条联动链路能生效。
+    #
+    # 代价是没有硬链接兜底：Emby 一删就是真删源文件，没有中间态可回退
+    passthrough: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
     # --- 运行状态，仅供页面展示 ---
     last_scan_time: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     # 上次全量对账时目录里的视频文件数
@@ -69,6 +77,7 @@ class WatchDir(DBBase):
             "recursive": self.recursive,
             "reverse_delete": self.reverse_delete,
             "code_prefix": self.code_prefix,
+            "passthrough": self.passthrough,
             "last_scan_time": self.last_scan_time.strftime("%Y-%m-%d %H:%M:%S")
             if self.last_scan_time else "",
             "file_count": self.file_count,
