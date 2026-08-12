@@ -1388,3 +1388,226 @@ def test_is_hashed_code_tells_the_two_forms_apart():
     assert watchdir.is_hashed_code(short) is False
     # 番号里带 h 的普通 code 不能被误判
     assert watchdir.is_hashed_code("SV-heyzo-1234") is False
+
+
+# ----------------------------------------------------------------------
+# 种子反查的调用次数
+# ----------------------------------------------------------------------
+# find_torrents_by_path 的成本与下载器里的种子总数成正比：它要把每个种子的
+# 文件清单都拉一遍才能建索引。每个文件查一次的话，几千个文件就是几百万次
+# HTTP 往返 —— 同步会慢到看着像卡死。这几个用例锁的是「整轮只查一次」。
+
+
+@pytest.fixture
+def count_torrent_lookups(monkeypatch):
+    """记录 find_torrents_by_path 每次收到的路径批次。"""
+    calls = []
+
+    def _fake(paths):
+        calls.append(list(paths))
+        return {}
+
+    import app.modules.downloadclient as dc
+    monkeypatch.setattr(dc, "find_torrents_by_path", _fake)
+    return calls
+
+
+def test_sync_queries_downloader_once_per_round(rule, count_torrent_lookups):
+    """一轮同步只反查一次，不管有多少个文件。"""
+    rule_id, source_dir, library = rule
+    for i in range(12):
+        (source_dir / f"clip{i}.mp4").write_bytes(b"A" * 64)
+
+    result = watchdir.sync_rule(rule_id, dry_run=False)
+
+    assert len(result.linked) == 12
+    assert len(count_torrent_lookups) == 1
+    # 一次调用里带上全部待登记文件
+    assert len(count_torrent_lookups[0]) == 12
+
+
+def test_dry_run_does_not_query_downloader(rule, count_torrent_lookups):
+    """演练不落库，也就不必问下载器。"""
+    rule_id, source_dir, library = rule
+    (source_dir / "clip.mp4").write_bytes(b"A" * 64)
+
+    watchdir.sync_rule(rule_id, dry_run=True)
+
+    assert count_torrent_lookups == []
+
+
+def test_idempotent_sync_skips_downloader(rule, count_torrent_lookups):
+    """没有新文件时不该再问下载器 —— 定时对账每轮都跑，白查很贵。"""
+    rule_id, source_dir, library = rule
+    (source_dir / "clip.mp4").write_bytes(b"A" * 64)
+    watchdir.sync_rule(rule_id, dry_run=False)
+    count_torrent_lookups.clear()
+
+    watchdir.sync_rule(rule_id, dry_run=False)
+
+    assert count_torrent_lookups == []
+
+
+def test_claiming_queries_downloader_once(rule, count_torrent_lookups):
+    """认领路径同样只查一次 —— 首次接管刮削库时会认领大量文件。"""
+    rule_id, source_dir, library = rule
+    target = library / "sv"
+    target.mkdir(parents=True)
+    for i in range(8):
+        source = source_dir / f"claim{i}.mp4"
+        source.write_bytes(b"C" * 64)
+        # 刮削工具按自己的规则建的链接，路径与我们算出的对不上
+        os.link(source, target / f"scraped-{i}.mp4")
+
+    result = watchdir.sync_rule(rule_id, dry_run=False)
+
+    assert len(result.claimed) == 8
+    assert len(count_torrent_lookups) == 1
+    assert len(count_torrent_lookups[0]) == 8
+
+
+def test_recorded_torrents_come_from_batch(rule, monkeypatch):
+    """批量查回来的种子要正确落到各自的 History 记录上。
+
+    共用一份映射最容易错的地方就是串行 —— 甲的种子记到乙名下。
+    """
+    rule_id, source_dir, library = rule
+    a = source_dir / "a.mp4"
+    b = source_dir / "b.mp4"
+    a.write_bytes(b"A" * 64)
+    b.write_bytes(b"B" * 64)
+
+    import app.modules.downloadclient as dc
+    monkeypatch.setattr(dc, "find_torrents_by_path", lambda paths: {
+        str(a): ["hash-a"],
+        str(b): ["hash-b1", "hash-b2"],
+    })
+
+    watchdir.sync_rule(rule_id, dry_run=False)
+
+    with session_scope() as session:
+        recorded = {
+            r.hash: (r.code, r.save_path)
+            for r in session.scalars(sa.select(History)).all()
+        }
+
+    assert recorded["hash-a"] == ("SV-a", str(a))
+    assert recorded["hash-b1"] == ("SV-b", str(b))
+    assert recorded["hash-b2"] == ("SV-b", str(b))
+
+
+# ----------------------------------------------------------------------
+# 批量等待与批量提交
+# ----------------------------------------------------------------------
+
+
+def test_fresh_files_wait_once_not_per_file(rule, monkeypatch):
+    """一批新文件只等一轮，不是每个文件各等一轮。
+
+    逐个 sleep 是串行的：30 个新文件就要等一分钟，而这一分钟里它们本来
+    也都在同时写入。等一次就够。
+    """
+    rule_id, source_dir, library = rule
+    for i in range(20):
+        (source_dir / f"fresh{i}.mp4").write_bytes(b"A" * 64)
+
+    sleeps = []
+    monkeypatch.setattr(watchdir.time, "sleep", lambda s: sleeps.append(s))
+    # 让文件看起来是刚写完的，强制走等待路径
+    monkeypatch.setattr(watchdir, "STABLE_MTIME_AGE", 10_000.0)
+    monkeypatch.setattr(watchdir, "STABLE_CHECK_ROUNDS", 3)
+
+    result = watchdir.sync_rule(rule_id, dry_run=False)
+
+    assert len(result.linked) == 20
+    # 20 个文件若逐个等，至少 20 次 sleep；批量等待只需轮数级别
+    assert len(sleeps) <= watchdir.STABLE_CHECK_ROUNDS
+
+
+def test_growing_file_is_still_skipped_in_batch(rule, monkeypatch):
+    """批量等待不能放过仍在写入的文件 —— 那会让 Emby 扫进残缺文件。"""
+    rule_id, source_dir, library = rule
+    stable = source_dir / "stable.mp4"
+    growing = source_dir / "growing.mp4"
+    stable.write_bytes(b"A" * 64)
+    growing.write_bytes(b"B" * 64)
+
+    monkeypatch.setattr(watchdir, "STABLE_MTIME_AGE", 10_000.0)
+
+    # 每次「睡醒」都让 growing 长大，stable 不动
+    def _grow(_seconds):
+        with growing.open("ab") as fh:
+            fh.write(b"B" * 64)
+
+    monkeypatch.setattr(watchdir.time, "sleep", _grow)
+
+    result = watchdir.sync_rule(rule_id, dry_run=False)
+
+    linked = {Path(p).name for p in result.linked}
+    assert linked == {"stable.mp4"}
+    assert any("growing.mp4" in s for s in result.skipped)
+
+
+def test_registers_commit_in_batches(rule, monkeypatch):
+    """登记按批提交，不是每条一个事务。
+
+    SQLite 上一次 commit 约 18ms，几千个文件逐条提交光提交就要好几分钟。
+    """
+    rule_id, source_dir, library = rule
+    for i in range(10):
+        (source_dir / f"clip{i}.mp4").write_bytes(b"A" * 64)
+
+    monkeypatch.setattr(watchdir, "REGISTER_BATCH_SIZE", 4)
+
+    commits = []
+    original = watchdir.SessionLocal
+
+    class _CountingSession:
+        def __init__(self):
+            self._inner = original()
+
+        def commit(self):
+            commits.append(1)
+            return self._inner.commit()
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+    monkeypatch.setattr(watchdir, "SessionLocal", _CountingSession)
+
+    result = watchdir.sync_rule(rule_id, dry_run=False)
+
+    assert len(result.linked) == 10
+    # 10 条按 4 一批：3 次提交（4 + 4 + 2），远少于逐条的 10 次
+    assert len(commits) == 3
+    # 记录必须全部落库 —— 攒批不能把最后不满一批的那些丢掉
+    assert len(_links()) == 10
+
+
+def test_batch_flushes_remainder_on_early_exit(rule, monkeypatch):
+    """循环中途抛异常时，已建好链接的那批必须提交。
+
+    硬链接已经在磁盘上了，记录却没落库的话，下一轮对账会把它们当孤儿删掉。
+    """
+    rule_id, source_dir, library = rule
+    for i in range(6):
+        (source_dir / f"clip{i}.mp4").write_bytes(b"A" * 64)
+
+    monkeypatch.setattr(watchdir, "REGISTER_BATCH_SIZE", 100)
+
+    calls = {"n": 0}
+    real_make_code = watchdir.make_code
+
+    def _boom(rule_obj, source):
+        calls["n"] += 1
+        if calls["n"] > 3:
+            raise RuntimeError("模拟中途失败")
+        return real_make_code(rule_obj, source)
+
+    monkeypatch.setattr(watchdir, "make_code", _boom)
+
+    with pytest.raises(RuntimeError):
+        watchdir.sync_rule(rule_id, dry_run=False)
+
+    # 崩之前登记成功的 3 条要在库里，不能整批丢掉
+    assert len(_links()) == 3

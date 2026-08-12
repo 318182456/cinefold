@@ -35,7 +35,7 @@ from app.core.config import get_settings
 from app.database.models import (
     CodeAlias, History, MediaLink, PendingDelete, WatchDir,
 )
-from app.database.session import session_scope
+from app.database.session import SessionLocal, session_scope
 from app.services import watchdir_progress as progress
 from app.services.medialink import VIDEO_SUFFIXES, handle_media_deleted
 
@@ -53,6 +53,10 @@ STABLE_CHECK_ROUNDS = 3
 # 不可能落到一分钟前。取值远大于 STABLE_CHECK_INTERVAL × ROUNDS，
 # 比原来的观测法更保守。
 STABLE_MTIME_AGE = 60.0
+
+# 登记攒多少条提交一次。见 _RegisterBatch —— 大了省提交开销，
+# 小了崩溃时少丢。200 条约合 1 次提交 / 3.6 秒的处理量，两头都不吃亏
+REGISTER_BATCH_SIZE = 200
 
 # code 列在 media_link / history / pending_delete / code 四张表里都是
 # varchar(64)。code 由文件名生成，长片名必须截断，否则 PostgreSQL 拒绝插入
@@ -281,6 +285,18 @@ def is_hashed_code(code: str) -> bool:
     return code.rsplit("-", 1)[-1].startswith(CODE_HASH_MARK)
 
 
+def _looks_settled(path: Path) -> bool:
+    """靠 mtime 判断文件是否早就写完了，不 sleep。
+
+    还在下载/拷贝的文件 mtime 一直在刷新，不可能落到 STABLE_MTIME_AGE 之前。
+    """
+    try:
+        st = path.stat()
+    except OSError:
+        return False
+    return time.time() - st.st_mtime >= STABLE_MTIME_AGE
+
+
 def _wait_stable(path: Path) -> bool:
     """等文件写完。连续两次观测大小不变即认为稳定。
 
@@ -315,6 +331,45 @@ def _wait_stable(path: Path) -> bool:
 
     # 轮数用完还在变，说明确实在持续写入
     return False
+
+
+def _settle_together(sources: list[Path]) -> set[str]:
+    """一次性等一批新文件写完，返回其中已稳定的。
+
+    逐个 _wait_stable 是串行的：每个文件至少 sleep 2s，一批 30 个新文件就是
+    一分钟，而这一分钟里其余 29 个文件本来也在同时写入 —— 等一次就够了。
+
+    做法是「记大小 → 睡一次 → 再记大小」，两次相同的判为稳定。轮数与单文件
+    版本一致，只是把 sleep 从每文件一次变成每轮一次。
+    """
+    if not sources:
+        return set()
+
+    def _sizes(paths: list[Path]) -> dict[str, int]:
+        out: dict[str, int] = {}
+        for p in paths:
+            try:
+                out[str(p)] = p.stat().st_size
+            except OSError:
+                continue  # 读不到的这轮不算稳定，下一轮对账再说
+        return out
+
+    watching = list(sources)
+    settled: set[str] = set()
+    last = _sizes(watching)
+
+    for _ in range(max(1, STABLE_CHECK_ROUNDS)):
+        if not watching:
+            break
+        time.sleep(STABLE_CHECK_INTERVAL)
+        now = _sizes(watching)
+        for key, size in now.items():
+            if key in last and last[key] == size:
+                settled.add(key)
+        watching = [p for p in watching if str(p) not in settled]
+        last = now
+
+    return settled
 
 
 # ----------------------------------------------------------------------
@@ -539,43 +594,72 @@ def sync_rule(rule_id: int, dry_run: bool = False) -> SyncResult:
             message=f"共 {len(videos)} 个文件，{len(todo)} {pending}",
         )
 
-    for index, (target_str, source) in enumerate(todo, start=1):
-        target = Path(target_str)
-
-        if dry_run:
-            result.linked.append(target_str)
-            continue
-
+    # 种子归属一次性查完。放在循环外是硬要求，不是优化 —— 详见 _prefetch_torrents
+    torrent_map: dict[str, list[str]] = {}
+    if todo and not dry_run:
         if track:
-            progress.update(
-                rule_id, done=index - 1, current=source.name,
-                message="等待文件写入完成…",
-            )
+            progress.update(rule_id, message="正在向下载器反查种子归属…")
+        torrent_map = _prefetch_torrents([str(s) for _, s in todo])
 
-        if not _wait_stable(source):
-            result.skipped.append(f"文件仍在写入，本轮跳过: {source}")
-            continue
+    # 新文件（mtime 还很新）统一等一轮，而不是循环里逐个 sleep 2 秒 ——
+    # 它们本来就在同时写入，等一次和等 N 次的效果一样，见 _settle_together
+    settled: set[str] = set()
+    if todo and not dry_run:
+        fresh = [s for _, s in todo if not _looks_settled(s)]
+        if fresh:
+            if track:
+                progress.update(
+                    rule_id,
+                    message=f"等待 {len(fresh)} 个新文件写入完成…",
+                )
+            settled = _settle_together(fresh)
 
-        # 直通模式不建链接，只登记。文件已经在它该在的位置了
-        if not rule.passthrough:
-            ok, err = _hardlink(source, target)
-            if not ok:
-                logger.error(err)
-                result.errors.append(err)
+    # 登记按批提交，不是一条一个事务 —— 提交本身在 SQLite 上约 18ms，
+    # 几千个文件光提交要好几分钟。也不整轮一个事务：那样中途崩了
+    # （容器被重启、磁盘满）已建好的链接全都没登记，下一轮又要重来
+    with _RegisterBatch(REGISTER_BATCH_SIZE) as batch:
+        for index, (target_str, source) in enumerate(todo, start=1):
+            target = Path(target_str)
+
+            if dry_run:
+                result.linked.append(target_str)
                 continue
 
-        code = make_code(rule, source)
-        _register(code, str(source), target_str)
-        # 种子信息趁现在存下来 —— 删除时下载器里可能已经没有这个种子了。
-        # 直通模式尤其依赖这一步：没有硬链接，删除时全靠这条记录找回种子
-        _record_torrents(code, str(source))
-        result.linked.append(target_str)
-        if track:
-            progress.update(rule_id, done=index, linked=len(result.linked))
-        if rule.passthrough:
-            logger.info(f"[{code}] 直通模式已登记 {source}")
-        else:
-            logger.info(f"[{code}] 已建硬链接 {source} → {target}")
+            if track:
+                progress.update(
+                    rule_id, done=index - 1, current=source.name,
+                    message="正在登记…",
+                )
+
+            # 已在批量等待里确认稳定的直接过；其余（本就是存量文件）走
+            # 单文件判定，它对 mtime 老的文件不 sleep
+            if str(source) not in settled and not _wait_stable(source):
+                result.skipped.append(f"文件仍在写入，本轮跳过: {source}")
+                continue
+
+            # 直通模式不建链接，只登记。文件已经在它该在的位置了
+            if not rule.passthrough:
+                ok, err = _hardlink(source, target)
+                if not ok:
+                    logger.error(err)
+                    result.errors.append(err)
+                    continue
+
+            code = make_code(rule, source)
+            session = batch.session()
+            _register(code, str(source), target_str, session=session)
+            # 种子信息趁现在存下来 —— 删除时下载器里可能已经没有这个种子了。
+            # 直通模式尤其依赖这一步：没有硬链接，删除时全靠这条记录找回种子
+            _record_torrents(code, str(source), torrent_map, session=session)
+            batch.done()
+            result.linked.append(target_str)
+            if track:
+                progress.update(rule_id, done=index, linked=len(result.linked))
+            # 逐条 INFO 在几千个文件时会把日志刷爆，降到 DEBUG
+            if rule.passthrough:
+                logger.debug(f"[{code}] 直通模式已登记 {source}")
+            else:
+                logger.debug(f"[{code}] 已建硬链接 {source} → {target}")
 
     if track:
         progress.update(
@@ -824,6 +908,8 @@ def _claim_existing(
         return set()
 
     claimed: set[str] = set()
+    # 先只做判定，登记推到后面 —— 种子反查要整批查一次，见 _prefetch_torrents
+    hits: list[tuple[str, Path, str]] = []
     for target_str, source in todo:
         try:
             st = source.stat()
@@ -837,19 +923,22 @@ def _claim_existing(
             continue
 
         link_path = str(hit)
-        code = make_code(rule, source)
         claimed.add(target_str)
         result.claimed.append({
             "link_path": link_path,
             "source_path": str(source),
         })
+        hits.append((target_str, source, link_path))
 
-        if dry_run:
-            continue
+    if dry_run or not hits:
+        return claimed
 
+    torrent_map = _prefetch_torrents([str(s) for _, s, _ in hits])
+    for _, source, link_path in hits:
+        code = make_code(rule, source)
         _register(code, str(source), link_path)
         # 认领的链接同样要记种子 —— 反向删除时才有据可依
-        _record_torrents(code, str(source))
+        _record_torrents(code, str(source), torrent_map)
         logger.info(
             f"[{code}] 认领已有硬链接（未新建）: {source} → {link_path}"
         )
@@ -1036,7 +1125,99 @@ def cancel_hold(link_path: str) -> bool:
     return True
 
 
-def _record_torrents(code: str, source_path: str) -> list[str]:
+class _RegisterBatch:
+    """把多个文件的登记攒在一个事务里提交。
+
+    每条一个事务的话，提交本身就是瓶颈：SQLite 上一次 commit 要 fsync，
+    实测约 18ms，几千个文件光提交就是好几分钟。攒批之后提交次数降到
+    文件数 / size。
+
+    也不做成整轮一个事务：中途崩了（容器重启、磁盘写满）已经建好的硬链接
+    全都没有登记记录，下一轮对账会把它们当成「库有源无」重新处理。按批
+    提交则最多丢最后一批。
+    """
+
+    def __init__(self, size: int):
+        self.size = max(1, size)
+        self._session = None
+        self._pending = 0
+
+    def session(self):
+        """取当前批次的 session，没有就开一个。"""
+        if self._session is None:
+            self._session = SessionLocal()
+        return self._session
+
+    def done(self) -> None:
+        """记完一个文件。攒够一批就提交。"""
+        self._pending += 1
+        if self._pending >= self.size:
+            self.close()
+
+    def close(self) -> None:
+        """提交并关闭当前批次。失败时回滚，异常照常抛给调用方。"""
+        if self._session is None:
+            return
+        try:
+            self._session.commit()
+        except Exception:
+            self._session.rollback()
+            raise
+        finally:
+            self._session.close()
+            self._session = None
+            self._pending = 0
+
+    def __enter__(self) -> "_RegisterBatch":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        """循环中途抛异常时，别把未提交的这批也带走 —— 已经建好的硬链接
+        必须有对应记录，否则下一轮会把它们当孤儿链接删掉。"""
+        if exc_type is None:
+            self.close()
+            return
+        if self._session is not None:
+            try:
+                self._session.commit()
+            except Exception:
+                self._session.rollback()
+            finally:
+                self._session.close()
+                self._session = None
+                self._pending = 0
+
+
+def _prefetch_torrents(paths: list[str]) -> dict[str, list[str]]:
+    """一次性查出这批源文件对应的种子，供整轮同步共用。
+
+    find_torrents_by_path 的成本与「下载器里的种子总数」成正比，与传入路径
+    数量几乎无关 —— 它得把每个种子的文件清单都拉一遍才能建索引。所以必须
+    整批查一次，绝不能每个文件查一次：几千个文件 × 几百个种子的文件清单
+    请求，是几百万次 HTTP 往返，同步会慢到看着像卡死。
+
+    查不到就返回空表，登记照常进行 —— 种子信息不是登记的前提条件。
+    """
+    if not paths:
+        return {}
+
+    from app.modules.downloadclient import find_torrents_by_path
+
+    try:
+        mapping = find_torrents_by_path(paths)
+    except Exception as exc:
+        logger.warning(f"批量查询源文件对应种子失败: {exc}")
+        return {}
+
+    if mapping:
+        logger.info(f"下载器反查到 {len(mapping)} 个文件的种子归属")
+    return mapping
+
+
+def _record_torrents(
+    code: str, source_path: str, prefetched: dict[str, list[str]] | None = None,
+    session=None,
+) -> list[str]:
     """建链接时就把源文件对应的种子 hash 落到 History 表。
 
     为什么不等删除时再问下载器：那一刻种子可能已经不在了 —— 做种到期被清、
@@ -1047,30 +1228,45 @@ def _record_torrents(code: str, source_path: str) -> list[str]:
     删除流程走的正是 code → History → hash 这条路，写这里等于零改动接上。
     save_path 记源文件路径，便于排查。
 
+    prefetched 是整轮同步预先查好的映射（见 _prefetch_torrents）。传了就查表，
+    不再问下载器 —— 批量同步必须走这条路，否则每个文件一次全量反查。
+    单条调用（webhook、补查）不传，行为与原来一致。
+
+    session 同 _register：批量同步共用一个事务，避免逐条提交。
+
     返回记下的 hash 列表。查不到（手工拷进来的文件、下载器离线）返回空，
     删除时还有「按路径现查」兜底。
     """
-    from app.modules.downloadclient import find_torrents_by_path
+    if prefetched is not None:
+        hashes = prefetched.get(source_path) or []
+    else:
+        from app.modules.downloadclient import find_torrents_by_path
 
-    try:
-        mapping = find_torrents_by_path([source_path])
-    except Exception as exc:
-        logger.warning(f"[{code}] 查询源文件对应种子失败: {exc}")
-        return []
+        try:
+            mapping = find_torrents_by_path([source_path])
+        except Exception as exc:
+            logger.warning(f"[{code}] 查询源文件对应种子失败: {exc}")
+            return []
+        hashes = mapping.get(source_path) or []
 
-    hashes = mapping.get(source_path) or []
     if not hashes:
         logger.debug(f"[{code}] 下载器里找不到对应种子，可能是手工放入的文件")
         return []
 
-    with session_scope() as session:
+    def _write(s) -> None:
         for h in hashes:
-            existing = session.get(History, h)
+            existing = s.get(History, h)
             if existing is not None:
                 # 已有记录（cinefold 自己下载的）不改 code —— 那边的 code 是
                 # 真番号，比这里从文件名生成的更准
                 continue
-            session.add(History(hash=h, code=code, save_path=source_path))
+            s.add(History(hash=h, code=code, save_path=source_path))
+
+    if session is not None:
+        _write(session)
+    else:
+        with session_scope() as own:
+            _write(own)
 
     logger.info(f"[{code}] 已登记 {len(hashes)} 个种子: {', '.join(hashes)}")
     return hashes
@@ -1171,12 +1367,18 @@ def _register_alias(session, code: str, source_path: str) -> None:
         session.add(CodeAlias(code=code, filename=Path(source_path).stem))
 
 
-def _register(code: str, source_path: str, link_path: str) -> None:
+def _register(
+    code: str, source_path: str, link_path: str, session=None,
+) -> None:
     """写入 media_link。直接落库而不走 register_scrape。
 
     register_scrape 会扫整个媒体库按 inode 反查硬链接 —— 那是刮削场景下
     「不知道链接在哪」才需要的。这里链接是我们自己刚建的，路径确定，
     扫库纯属浪费（大库上是分钟级）。
+
+    传了 session 就复用，由调用方决定何时提交。批量同步必须这么用 ——
+    每个文件一个事务的话，提交本身（SQLite 上一次 fsync 约 18ms）就成了
+    大头：几千个文件光提交要好几分钟。
     """
     try:
         st = os.stat(source_path)
@@ -1184,15 +1386,15 @@ def _register(code: str, source_path: str, link_path: str) -> None:
     except OSError:
         inode, device = None, None
 
-    with session_scope() as session:
-        existing = session.get(MediaLink, link_path)
+    def _write(s) -> None:
+        existing = s.get(MediaLink, link_path)
         if existing is not None:
             existing.code = code
             existing.source_path = source_path
             existing.inode = inode
             existing.device = device
         else:
-            session.add(MediaLink(
+            s.add(MediaLink(
                 link_path=link_path,
                 code=code,
                 source_path=source_path,
@@ -1200,7 +1402,14 @@ def _register(code: str, source_path: str, link_path: str) -> None:
                 device=device,
             ))
 
-        _register_alias(session, code, source_path)
+        _register_alias(s, code, source_path)
+
+    if session is not None:
+        _write(session)
+        return
+
+    with session_scope() as own:
+        _write(own)
 
 
 def _drop_record(link_path: str) -> None:
