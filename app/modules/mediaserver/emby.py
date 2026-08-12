@@ -19,7 +19,9 @@ class Emby:
             return False
 
         try:
-            with httpx.Client(timeout=15) as client:
+            # Emby 一般就在内网，httpx 的 NO_PROXY 不认 CIDR，
+            # 只能在这里直接不信任环境代理，否则请求被转出去必然超时
+            with httpx.Client(timeout=15, trust_env=False) as client:
                 response = client.get(
                     f"{self.url}/emby/Items",
                     params={
@@ -48,7 +50,9 @@ class Emby:
         if not self.url or not self.api_key:
             return False, "未配置 Emby 地址或 API Key"
         try:
-            with httpx.Client(timeout=15) as client:
+            # Emby 一般就在内网，httpx 的 NO_PROXY 不认 CIDR，
+            # 只能在这里直接不信任环境代理，否则请求被转出去必然超时
+            with httpx.Client(timeout=15, trust_env=False) as client:
                 response = client.get(
                     f"{self.url}/emby/System/Info", params={"api_key": self.api_key}
                 )

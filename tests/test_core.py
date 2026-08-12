@@ -605,7 +605,21 @@ class TestGithubProxy:
 class TestLanNoProxy:
     """内网地址绕过代理。下载器和媒体库通常就在同一个局域网里。"""
 
-    def test_lan_appended_when_proxy_set(self, monkeypatch):
+    @pytest.mark.parametrize("host", [
+        "192.168.3.11:8086",    # qBittorrent 常见部署
+        "10.0.0.5:8096",
+        "172.20.0.3:8096",      # docker 默认网段
+        "127.0.0.1:8080",
+        "localhost:8080",
+    ])
+    def test_lan_bypasses_proxy(self, monkeypatch, host):
+        """断言 requests 真的绕过代理，而不是断言环境变量长什么样。
+
+        之前这里断言的是 "192.168.*" in NO_PROXY —— 字符串在，
+        但 requests 不认 glob，内网请求照样走代理，测试全绿而 bug 在线上。
+        """
+        from requests.utils import should_bypass_proxies
+
         from app.core.config import _protect_lan_from_proxy
 
         monkeypatch.setenv("HTTP_PROXY", "socks5://192.168.3.12:7890")
@@ -613,8 +627,26 @@ class TestLanNoProxy:
         monkeypatch.delenv("no_proxy", raising=False)
 
         _protect_lan_from_proxy()
-        assert "192.168.*" in os.environ["NO_PROXY"]
-        assert "127.0.0.1" in os.environ["NO_PROXY"]
+        assert should_bypass_proxies(f"http://{host}/api/v2/app/version", None)
+
+    def test_public_host_still_proxied(self, monkeypatch):
+        """别把外网也一起放过了，代理本来就是给外网用的。"""
+        from requests.utils import should_bypass_proxies
+
+        from app.core.config import _protect_lan_from_proxy
+
+        monkeypatch.setenv("HTTP_PROXY", "socks5://192.168.3.12:7890")
+        monkeypatch.delenv("NO_PROXY", raising=False)
+        monkeypatch.delenv("no_proxy", raising=False)
+
+        _protect_lan_from_proxy()
+        assert not should_bypass_proxies("https://api.github.com/repos/x/y", None)
+
+    def test_no_glob_entries(self, monkeypatch):
+        """glob 写法会被 requests / httpx 当普通字符，静默失效，禁止再出现。"""
+        from app.core.config import _LAN_NO_PROXY
+
+        assert not [h for h in _LAN_NO_PROXY if "*" in h]
 
     def test_untouched_without_proxy(self, monkeypatch):
         """没配代理就别去动环境变量。"""
@@ -637,7 +669,7 @@ class TestLanNoProxy:
         _protect_lan_from_proxy()
         entries = os.environ["NO_PROXY"].split(",")
         assert entries[0] == "example.com"
-        assert "10.*" in entries
+        assert "10.0.0.0/8" in entries
 
     def test_idempotent(self, monkeypatch):
         """get_settings 会被反复调用，不能每次都往里堆重复项。"""

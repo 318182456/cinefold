@@ -25,7 +25,9 @@ class Jellyfin:
 
         self._user_id = ""
         try:
-            with httpx.Client(timeout=15) as client:
+            # Jellyfin 一般就在内网，httpx 的 NO_PROXY 不认 CIDR，
+            # 只能在这里直接不信任环境代理，否则请求被转出去必然超时
+            with httpx.Client(timeout=15, trust_env=False) as client:
                 response = client.get(
                     f"{self.url}/Users",
                     headers={"X-Emby-Token": self.api_key},
@@ -54,7 +56,9 @@ class Jellyfin:
             if user_id:
                 params["userId"] = user_id
 
-            with httpx.Client(timeout=15) as client:
+            # Jellyfin 一般就在内网，httpx 的 NO_PROXY 不认 CIDR，
+            # 只能在这里直接不信任环境代理，否则请求被转出去必然超时
+            with httpx.Client(timeout=15, trust_env=False) as client:
                 response = client.get(
                     f"{self.url}/Items",
                     headers={"X-Emby-Token": self.api_key},
@@ -77,7 +81,9 @@ class Jellyfin:
         if not self.url or not self.api_key:
             return False, "未配置 Jellyfin 地址或 API Key"
         try:
-            with httpx.Client(timeout=15) as client:
+            # Jellyfin 一般就在内网，httpx 的 NO_PROXY 不认 CIDR，
+            # 只能在这里直接不信任环境代理，否则请求被转出去必然超时
+            with httpx.Client(timeout=15, trust_env=False) as client:
                 response = client.get(
                     f"{self.url}/System/Info", headers={"X-Emby-Token": self.api_key}
                 )
