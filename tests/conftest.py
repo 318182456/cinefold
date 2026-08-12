@@ -32,5 +32,11 @@ for key in (
     "OPENAI_API_KEY", "BAIDU_API_KEY", "GOOGLE_API_KEY",
     # 留着会让测试连到真实的数据库与 Redis
     "DATABASE_URL", "REDIS_URL", "REDIS_JOB_STORE",
+    # 留着会让测试真的去调过盾服务：单次过盾几十秒，还受进程级锁串行，
+    # 整套测试会被拖成十几分钟
+    "BYPASS_URL", "FLARE_SOLVERR_URL",
+    # 代理同理，会把本该失败的直连绕出去，测试结果随外部网络漂移
+    "PROXY", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
+    "http_proxy", "https_proxy", "all_proxy",
 ):
     os.environ.pop(key, None)

@@ -65,6 +65,37 @@ def _sync_later(rule_id: int) -> None:
         timer.start()
 
 
+def _target_bases(rule_ids: list[int]) -> dict[int, Path]:
+    """规则 id → 目标根目录，用于把媒体库事件归属到具体规则。
+
+    复用 watchdir.target_base()，保证归属判定与建链接时用的是同一套路径口径
+    （target_dir / target_subdir / 直通模式的差异都在那里处理）。
+
+    算不出目标目录的规则不放进表里 —— 它在 _owners 里就永远命中不了，
+    等于被排除在实时监听之外，只能靠定时全量对账兜底。这是对的：连目标
+    目录都解析不出来，也没法判断哪些路径归它管。
+    """
+    from app.services.watchdir import target_base
+
+    bases: dict[int, Path] = {}
+    with session_scope() as session:
+        for rule in session.scalars(
+            select(WatchDir).where(WatchDir.id.in_(rule_ids))
+        ).all():
+            base = target_base(rule)
+            if base is None:
+                logger.warning(
+                    f"[监听] 规则 {rule.name or rule.id} 算不出目标目录，"
+                    f"媒体库事件将不会触发它，仅靠定时对账"
+                )
+                continue
+            try:
+                bases[rule.id] = base.resolve()
+            except OSError:
+                bases[rule.id] = base
+    return bases
+
+
 def _build_handler():
     """构造事件处理器。watchdog 未安装时返回 None。"""
     try:
@@ -73,16 +104,53 @@ def _build_handler():
         return None
 
     class _Handler(FileSystemEventHandler):
-        """把事件归到规则上。rule_ids 是这个 handler 负责的规则。"""
+        """把事件归到规则上。rule_ids 是这个 handler 负责的规则。
 
-        def __init__(self, rule_ids: list[int], label: str):
+        bases 给出「规则 id → 目标根目录」时，媒体库事件按路径前缀归属，
+        只标脏真正管这个路径的规则；不给则退回全部标脏。
+        """
+
+        def __init__(
+            self,
+            rule_ids: list[int],
+            label: str,
+            bases: dict[int, Path] | None = None,
+        ):
             self.rule_ids = rule_ids
             self.label = label
+            self.bases = bases
+
+        def _owners(self, path: str) -> list[int]:
+            """哪些规则管这个路径。判不出来时退回全部，宁可多扫不可漏扫。"""
+            if not self.bases:
+                return self.rule_ids
+            try:
+                # bases 是 resolve 过的，这边不跟着解析的话，媒体库根目录只要
+                # 是个软链（NAS 上很常见），两边路径就永远对不上、全都判成不归属。
+                # 删除事件的路径此刻已经不存在，resolve 不能用 strict
+                target = Path(path).resolve()
+            except (OSError, ValueError):
+                return self.rule_ids
+
+            # 目标根目录之间可能嵌套（A=/lib、B=/lib/FC2），命中的全都要标脏：
+            # 路径落在 B 里的同时也落在 A 里，只取最深的那个会漏掉 A
+            hit = [
+                rule_id for rule_id in self.rule_ids
+                if (base := self.bases.get(rule_id)) is not None
+                and (target == base or base in target.parents)
+            ]
+            # 一个都没命中说明这路径不归任何规则管（媒体库里的其他内容），
+            # 直接丢掉 —— 这正是按前缀归属要省掉的那部分无谓扫描
+            return hit
 
         def _touch(self, path: str, kind: str) -> None:
             # 目录事件也要处理：整个子目录被删时，里面的文件不一定各来一条事件
+            owners = self._owners(path)
+            if not owners:
+                logger.debug(f"[监听] {self.label} {kind} 不属于任何规则，忽略: {path}")
+                return
             logger.debug(f"[监听] {self.label} {kind}: {path}")
-            for rule_id in self.rule_ids:
+            for rule_id in owners:
                 _sync_later(rule_id)
 
         def on_created(self, event):
@@ -223,7 +291,7 @@ def _start_watching_sync() -> bool:
         if library and Path(library).is_dir():
             try:
                 observer.schedule(
-                    handler_cls(reverse_rules, "媒体库"),
+                    handler_cls(reverse_rules, "媒体库", _target_bases(reverse_rules)),
                     library,
                     recursive=True,
                 )

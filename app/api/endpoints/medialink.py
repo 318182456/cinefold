@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import time
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from fastapi import APIRouter, Depends
@@ -16,7 +17,7 @@ from sqlalchemy import func, or_, select
 
 from app.api.endpoints import get_current_user
 from app.core.config import get_settings
-from app.database.models import CodeAlias, History, MediaLink
+from app.database.models import CodeAlias, History, MediaLink, PendingDelete
 from app.database.session import session_scope
 from app.schemas.reponse import ResponseEntity
 from app.services.medialink import handle_media_deleted, register_scrape
@@ -113,6 +114,43 @@ def _drop_stats_cache() -> None:
     _missing_cache = None
 
 
+def _attach_holds(items: list[dict], grace: int) -> None:
+    """给列表项补上扣留信息：这条链接是否在等着被删、什么时候删。
+
+    文件消失后不会立刻删，先扣留观察一个宽限期（见 PendingDelete）。页面上
+    「文件已丢失」的那些记录，用户最想知道的就是它到底会不会删、还剩多久 ——
+    只标红点说不清这件事。
+
+    只查当前页的 link_path，扣留表通常很小，一次 IN 查询就够。
+    """
+    paths = [i["link_path"] for i in items]
+    if not paths:
+        return
+
+    with session_scope() as session:
+        holds = {
+            r.link_path: r for r in session.scalars(
+                select(PendingDelete).where(PendingDelete.link_path.in_(paths))
+            ).all()
+        }
+
+    now = datetime.now()
+    for item in items:
+        row = holds.get(item["link_path"])
+        if row is None:
+            item["pending_delete"] = None
+            continue
+        deadline = row.detected_time + timedelta(seconds=grace)
+        item["pending_delete"] = {
+            # 哪一侧消失的，决定了到期后删的是源文件还是硬链接
+            "side": row.side,
+            "detected_time": row.detected_time.isoformat(),
+            # 预计删除时刻。已过期的保留原值，前端据此显示「下轮对账将删除」
+            "delete_at": deadline.isoformat(),
+            "seconds_left": max(0, int((deadline - now).total_seconds())),
+        }
+
+
 @router.get("")
 def list_medialinks(
     keyword: str = "",
@@ -202,6 +240,7 @@ def list_medialinks(
         item["filename"] = aliases.get(item["code"], "")
 
     settings = get_settings()
+    _attach_holds(page_items, settings.watchdir_delete_grace)
     return ResponseEntity.ok({
         "items": page_items,
         "total": total,

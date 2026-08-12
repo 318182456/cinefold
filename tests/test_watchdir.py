@@ -18,6 +18,7 @@ from app.database.models import (
     CodeAlias, History, MediaLink, PendingDelete, WatchDir,
 )
 from app.database.session import session_scope
+from app.modules import watcher
 from app.services import medialink, watchdir
 
 
@@ -533,6 +534,55 @@ def test_recovered_file_cancels_hold(rule, configure):
     assert result.unlinked == []
     assert link.exists()
     assert watchdir.list_holds(rule_id) == []
+
+
+def test_hold_cleared_when_reverse_delete_disabled(rule, configure):
+    """关掉反向删除后，之前攒下的扣留要清掉，不能永久挂在表里。
+
+    实测踩到的场景：开着反向删除时文件消失、登记了扣留，之后把开关关掉。
+    第 3 步的 continue 不走删除路径，_prune_holds 又只清「文件恢复了」和
+    「记录没了」两种 —— 这条哪种都不是，于是永久留在 pending_delete 里，
+    页面上显示「正在观察、即将删除」，实际永远不删。
+    """
+    rule_id, source_dir, library = rule
+    configure(watchdir_delete_grace=3600)
+    a = source_dir / "a.mp4"
+    a.write_bytes(b"A")
+    watchdir.sync_rule(rule_id, dry_run=False)
+    link = library / "sv" / "a.mp4"
+
+    # 媒体库侧被删 —— 走反向删除路径，宽限期内先扣留
+    link.unlink()
+    watchdir.sync_rule(rule_id, dry_run=False)
+    assert len(watchdir.list_holds(rule_id)) == 1
+
+    with session_scope() as session:
+        session.get(WatchDir, rule_id).reverse_delete = False
+    result = watchdir.sync_rule(rule_id, dry_run=False)
+
+    assert watchdir.list_holds(rule_id) == []
+    assert result.reverse_deleted == []
+    assert a.exists()  # 源文件不能被删
+    assert any("未开启反向删除" in s for s in result.skipped)
+
+
+def test_dry_run_keeps_hold_when_reverse_delete_disabled(rule, configure):
+    """演练不许改库 —— 扣留记录得留在原处。"""
+    rule_id, source_dir, library = rule
+    configure(watchdir_delete_grace=3600)
+    a = source_dir / "a.mp4"
+    a.write_bytes(b"A")
+    watchdir.sync_rule(rule_id, dry_run=False)
+    link = library / "sv" / "a.mp4"
+
+    link.unlink()
+    watchdir.sync_rule(rule_id, dry_run=False)
+    with session_scope() as session:
+        session.get(WatchDir, rule_id).reverse_delete = False
+
+    watchdir.sync_rule(rule_id, dry_run=True)
+
+    assert len(watchdir.list_holds(rule_id)) == 1
 
 
 def test_cancel_hold_manually(rule, configure):
@@ -1703,3 +1753,76 @@ def test_batch_flushes_remainder_on_early_exit(rule, monkeypatch):
 
     # 崩之前登记成功的 3 条要在库里，不能整批丢掉
     assert len(_links()) == 3
+
+
+# ----------------------------------------------------------------------
+# 媒体库事件归属
+# ----------------------------------------------------------------------
+class TestLibraryEventOwners:
+    """媒体库整个挂一个 handler，事件要按路径前缀归到具体规则上。
+
+    以前是「任何事件把所有反向规则全标脏」——从 Emby 删一个 FC2 影片，
+    FC2、欧美、短视频三条规则各全量扫一遍，删一个文件扫三次目录树。
+    """
+
+    @pytest.fixture
+    def handler_cls(self):
+        cls = watcher._build_handler()
+        if cls is None:
+            pytest.skip("未安装 watchdog")
+        return cls
+
+    def _bases(self, library: Path, names: dict[int, str]) -> dict[int, Path]:
+        for name in names.values():
+            (library / name).mkdir(parents=True, exist_ok=True)
+        return {rid: (library / name).resolve() for rid, name in names.items()}
+
+    def test_event_only_touches_owning_rule(self, handler_cls, tmp_path):
+        library = tmp_path / "lib"
+        bases = self._bases(library, {1: "FC2", 2: "ome", 3: "short"})
+        handler = handler_cls([1, 2, 3], "媒体库", bases)
+
+        assert handler._owners(str(library / "FC2" / "FC2PPV-1570936.mp4")) == [1]
+        assert handler._owners(str(library / "ome" / "a.mp4")) == [2]
+        # 子目录里的文件也要能归属
+        assert handler._owners(str(library / "short" / "2026" / "y.mp4")) == [3]
+
+    def test_path_outside_every_rule_is_dropped(self, handler_cls, tmp_path):
+        """媒体库里还有别的内容，那些事件不该惊动任何规则。"""
+        library = tmp_path / "lib"
+        bases = self._bases(library, {1: "FC2"})
+        (library / "other").mkdir(parents=True, exist_ok=True)
+        handler = handler_cls([1], "媒体库", bases)
+
+        assert handler._owners(str(library / "other" / "z.mp4")) == []
+
+    def test_deleted_path_still_attributes(self, handler_cls, tmp_path):
+        """反向删除靠的就是删除事件，路径此刻已经不存在，仍要能归属。"""
+        library = tmp_path / "lib"
+        bases = self._bases(library, {1: "FC2"})
+        handler = handler_cls([1], "媒体库", bases)
+
+        assert handler._owners(str(library / "FC2" / "gone.mp4")) == [1]
+
+    def test_nested_bases_touch_both(self, handler_cls, tmp_path):
+        """目标目录嵌套时（A=/lib、B=/lib/FC2），命中的规则都要标脏。"""
+        library = tmp_path / "lib"
+        library.mkdir(parents=True, exist_ok=True)
+        (library / "FC2").mkdir(exist_ok=True)
+        bases = {9: library.resolve(), 1: (library / "FC2").resolve()}
+        handler = handler_cls([9, 1], "媒体库", bases)
+
+        assert sorted(handler._owners(str(library / "FC2" / "a.mp4"))) == [1, 9]
+
+    def test_without_bases_falls_back_to_all(self, handler_cls, tmp_path):
+        """算不出目标目录时退回旧行为，宁可多扫不可漏扫。"""
+        library = tmp_path / "lib"
+        library.mkdir(parents=True, exist_ok=True)
+        handler = handler_cls([1, 2, 3], "媒体库", None)
+
+        assert handler._owners(str(library / "whatever.mp4")) == [1, 2, 3]
+
+    def test_source_handler_unaffected(self, handler_cls, tmp_path):
+        """源目录 handler 一个规则一个，不传 bases，行为不能变。"""
+        handler = handler_cls([7], "源[FC2]")
+        assert handler._owners(str(tmp_path / "anything.mp4")) == [7]

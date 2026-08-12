@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from loguru import logger
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 from app.core.config import get_settings
 from app.database.models import (
@@ -735,6 +735,15 @@ def sync_rule(rule_id: int, dry_run: bool = False) -> SyncResult:
         )
 
     # --- 3) 库无、源有：媒体库侧被删，反向删除 ---
+    # 关掉反向删除的规则，这一步永远不会走到删除，但之前可能已经攒下扣留记录
+    # （开着的时候登记的，或第 2 步直通分支转过来的）。留着有两个害处：表只增
+    # 不减（_prune_holds 只清「文件恢复了」和「记录没了」，这些两者都不是），
+    # 且页面上的扣留列表会显示一批「正在观察、即将删除」的条目，实际永远不删。
+    # 开关是规则级的，循环内不变，所以在循环外一次清完 —— 逐条 _clear_hold
+    # 会为每个文件白开一个事务
+    if media_deleted and not rule.reverse_delete and not dry_run:
+        _clear_holds(media_deleted)
+
     # 用上面预先算好的集合，而不是再 stat 一次 —— 第 1 步已经改过磁盘状态
     for target_str in sorted(media_deleted):
         if not rule.reverse_delete:
@@ -1068,6 +1077,29 @@ def _clear_hold(link_path: str) -> None:
         row = session.get(PendingDelete, link_path)
         if row is not None:
             session.delete(row)
+
+
+def _clear_holds(link_paths) -> int:
+    """批量撤销扣留，一个事务。返回实际删掉的条数。
+
+    逐条 _clear_hold 会为每个路径开一个事务，SQLite 上一次 commit 约 18ms，
+    整批文件就是分钟级。用 IN 一次删完。
+
+    IN 子句分片是必须的，不是优化：SQLite 默认参数上限 999（SQLITE_MAX_
+    VARIABLE_NUMBER），一个关掉反向删除的大目录很容易超过。
+    """
+    paths = list(link_paths)
+    if not paths:
+        return 0
+
+    removed = 0
+    with session_scope() as session:
+        for start in range(0, len(paths), 500):
+            chunk = paths[start:start + 500]
+            removed += session.execute(
+                delete(PendingDelete).where(PendingDelete.link_path.in_(chunk))
+            ).rowcount or 0
+    return removed
 
 
 def _prune_holds(watch_id: int, live_links) -> None:

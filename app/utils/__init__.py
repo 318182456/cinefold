@@ -83,8 +83,31 @@ def find_serial_numbers(text: str, limit: int = 0) -> list[str]:
     return out
 
 
+# 干净番号的样子，用于判断输入是否已经标准化
+_CLEAN_CODE = re.compile(r"[0-9]{0,4}[A-Z]+-\d{2,5}")
+# 从"番号 + 后缀噪声"里框出番号那一段。右边界不能是字母数字，
+# 否则 ABP9841080P 这种连写会被劈成 ABP-984
+_CODE_HEAD = re.compile(r"^([0-9]{0,4}[A-Z]{2,6})-?(\d{2,5})(?![A-Za-z0-9])")
+# FC2 前缀后紧跟的第一段数字才是番号
+_FC2_HEAD = re.compile(r"^FC2-?(?:PPV-?)?(\d+)")
+# 番号自带的后缀，要保留 —— 中文字幕(C/CH)、无码(U/UC)是番号的一部分，
+# 同一部片子的不同版本靠它区分。画质、日期、分集号不在此列，一律切掉
+_CODE_SUFFIX = re.compile(r"^-(?:C|CH|U|UC|UCH)(?![A-Za-z0-9])")
+
+
+def _with_suffix(core: str, rest: str) -> str:
+    """把番号本体与紧随其后的合法后缀拼回去。rest 是本体之后的剩余部分。"""
+    match = _CODE_SUFFIX.match(rest)
+    return core + match.group(0) if match else core
+
+
 def get_true_code(code: str) -> str:
     """标准化番号格式：统一大写，字母与数字之间补横杠。
+
+    只处理"番号本身"，末尾挂着的标题噪声会被切掉，但 -C/-UC 这类版本
+    后缀会保留。传进来的若是整个标题（Emby 的 Name、种子名等），请先用
+    find_serial_number 框出番号再交给这里——本函数不做全文搜索，只认
+    开头那一段。
 
     无法构成番号的输入（纯符号、纯数字等）返回空串，避免脏数据入库。
     """
@@ -95,11 +118,22 @@ def get_true_code(code: str) -> str:
     if not (re.search(r"[A-Z]", normalized) and re.search(r"\d", normalized)):
         return ""
     if normalized.startswith("FC2"):
-        # 去掉 FC2 与 PPV 前缀后再取数字，避免把 FC2 的 "2" 算进番号
-        digits = re.sub(r"\D", "", re.sub(r"^FC2[-]?(PPV)?", "", normalized))
-        return f"FC2-PPV-{digits}" if digits else normalized
+        # 只取前缀后的第一段数字。不能用 re.sub(r"\D", "") 把全串数字拼起来，
+        # 那样 "FC2PPV-1570936 (1080P) 9134" 会得到 FC2-PPV-157093610809134
+        match = _FC2_HEAD.match(normalized)
+        if not match:
+            return normalized
+        return _with_suffix(f"FC2-PPV-{match.group(1)}", normalized[match.end():])
     if "-" in normalized:
-        return normalized
+        # 已经干净就原样返回。这条快路必须留着：T28-544 这类单字母前缀
+        # 不符合 _CODE_HEAD 的 {2,6} letters，切一刀反而会切坏
+        if _CLEAN_CODE.fullmatch(normalized):
+            return normalized
+        match = _CODE_HEAD.match(normalized)
+        if not match:
+            return normalized
+        core = f"{match.group(1)}-{match.group(2)}"
+        return _with_suffix(core, normalized[match.end():])
     # ABP984 → ABP-984
     match = re.match(r"^([0-9]{0,4}[A-Z]+)(\d+)$", normalized)
     return f"{match.group(1)}-{match.group(2)}" if match else normalized

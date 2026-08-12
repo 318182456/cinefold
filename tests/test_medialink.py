@@ -760,3 +760,73 @@ def test_delete_proceeds_once_external_hardlink_is_gone(linked, tmp_path):
 
     assert not source.exists()
     assert not any("其它硬链接引用" in e for e in result.errors)
+
+
+# ---------------------------------------------------------------- 扣留信息
+@pytest.fixture
+def clean_holds():
+    """扣留表不在 clean_tables 范围内，用到的用例自己清。"""
+    from app.database.models import PendingDelete
+
+    def _clear():
+        with session_scope() as session:
+            for row in session.query(PendingDelete).all():
+                session.delete(row)
+    _clear()
+    yield
+    _clear()
+
+
+def test_attach_holds_reports_delete_deadline(clean_holds):
+    """扣留中的链接要带上预计删除时刻，页面才能显示「什么时候删」。"""
+    from datetime import datetime, timedelta
+
+    from app.api.endpoints.medialink import _attach_holds
+    from app.database.models import PendingDelete
+
+    detected = datetime.now() - timedelta(seconds=600)
+    with session_scope() as session:
+        session.add(PendingDelete(
+            link_path="/library/ABS-001.mp4",
+            watch_id=1,
+            code="ABS-001",
+            source_path="/downloads/abs-001.mp4",
+            side="source",
+            detected_time=detected,
+        ))
+
+    items = [
+        {"link_path": "/library/ABS-001.mp4"},
+        {"link_path": "/library/ABS-002.mp4"},
+    ]
+    _attach_holds(items, grace=1800)
+
+    hold = items[0]["pending_delete"]
+    assert hold["side"] == "source"
+    assert hold["delete_at"] == (detected + timedelta(seconds=1800)).isoformat()
+    # 已等 600s，宽限期 1800s，还剩约 1200s
+    assert 1100 < hold["seconds_left"] <= 1200
+    # 没有扣留的记录显式给 None，前端据此判断不显示
+    assert items[1]["pending_delete"] is None
+
+
+def test_attach_holds_zero_left_when_grace_passed(clean_holds):
+    """宽限期已过的显示为 0，前端据此提示「下轮对账将删除」。"""
+    from datetime import datetime, timedelta
+
+    from app.api.endpoints.medialink import _attach_holds
+    from app.database.models import PendingDelete
+
+    with session_scope() as session:
+        session.add(PendingDelete(
+            link_path="/library/ABS-003.mp4",
+            watch_id=1,
+            code="ABS-003",
+            side="library",
+            detected_time=datetime.now() - timedelta(seconds=3600),
+        ))
+
+    items = [{"link_path": "/library/ABS-003.mp4"}]
+    _attach_holds(items, grace=1800)
+
+    assert items[0]["pending_delete"]["seconds_left"] == 0

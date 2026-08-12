@@ -49,6 +49,41 @@ class TestCodeRecognition:
         assert get_true_code("ABP-984") == "ABP-984"
         assert get_true_code("fc2ppv1234567") == "FC2-PPV-1234567"
 
+    @pytest.mark.parametrize("raw, expected", [
+        # 番号后面挂着标题噪声。曾经把全串数字拼起来，Emby 传来的
+        # "FC2PPV-1570936 (1080p) 9134" 会变成 FC2-PPV-157093610809134
+        ("FC2PPV-1570936 (1080p) 9134", "FC2-PPV-1570936"),
+        ("FC2PPV 1570936 [FHD] 2024", "FC2-PPV-1570936"),
+        ("FC2PPV-1570936-1", "FC2-PPV-1570936"),
+        ("ABP984 1080p", "ABP-984"),
+        ("SSIS-001-4K", "SSIS-001"),
+        # 干净输入不能被动过
+        ("FC2-PPV-1570936", "FC2-PPV-1570936"),
+        ("FC2-1570936", "FC2-PPV-1570936"),
+        ("259LUXU-1234", "259LUXU-1234"),
+        # 单字母前缀不符合"2-6 个字母"，切一刀会切成 T-28，必须原样留下
+        ("T28-544", "T28-544"),
+    ])
+    def test_get_true_code_strips_trailing_noise(self, raw, expected):
+        assert get_true_code(raw) == expected
+
+    @pytest.mark.parametrize("raw, expected", [
+        ("SSIS-001-C", "SSIS-001-C"),
+        ("ssis001-ch", "SSIS-001-CH"),
+        ("SSIS-001-UC", "SSIS-001-UC"),
+        ("FC2PPV-1570936-C", "FC2-PPV-1570936-C"),
+    ])
+    def test_get_true_code_keeps_version_suffix(self, raw, expected):
+        # -C/-UC 是番号的一部分，同一部片子的不同版本靠它区分，不能当噪声切掉
+        assert get_true_code(raw) == expected
+
+    def test_get_true_code_agrees_with_find_serial_number(self):
+        # 两者对同一个番号必须给出同一个字符串，否则入库与查库对不上。
+        # 带 -C/-UC 后缀的不在此列：get_true_code 保留后缀，find_serial_number
+        # 只框番号本体，两者有意不同
+        for raw in ("FC2PPV-1570936-1", "ABP984 1080p", "SSIS-001", "259LUXU-1234"):
+            assert get_true_code(raw) == find_serial_number(raw)
+
 
 class TestFindSerialNumbers:
     """一条消息里列多个番号是常见写法，不能只取第一个。"""

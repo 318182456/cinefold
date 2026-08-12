@@ -61,6 +61,15 @@ function shortTime(value) {
   return value.slice(0, 16).replace('T', ' ')
 }
 
+// 扣留中的记录还剩多久被删。与监控目录页的口径保持一致
+function deleteLabel(hold) {
+  const left = hold.seconds_left || 0
+  if (left <= 0) return '下轮对账将删除'
+  if (left >= 3600) return `${Math.ceil(left / 3600)} 小时后删除`
+  if (left >= 60) return `${Math.ceil(left / 60)} 分钟后删除`
+  return `${left} 秒后删除`
+}
+
 async function load() {
   loading.value = true
   try {
@@ -352,6 +361,18 @@ onMounted(() => {
               </p>
               <p class="truncate text-[11px] text-gray-600" :title="link.link_path">
                 {{ link.link_path }}
+              </p>
+              <!-- 扣留观察中：文件已消失但还没删，说清楚什么时候删 -->
+              <p
+                v-if="link.pending_delete"
+                class="text-[11px] text-amber-400"
+                :title="`发现消失 ${shortTime(link.pending_delete.detected_time)}`"
+              >
+                ⏳ {{ deleteLabel(link.pending_delete) }} ·
+                {{ shortTime(link.pending_delete.delete_at) }}
+                <span class="text-gray-600">
+                  （{{ link.pending_delete.side === 'source' ? '源文件消失' : '媒体库文件消失' }}）
+                </span>
               </p>
             </div>
             <button
