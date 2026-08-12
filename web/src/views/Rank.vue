@@ -2,9 +2,11 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { getRank, subscribeRank, subscribeCode } from '@/api'
 import { useToast } from '@/composables/useToast'
+import { useCodeSelection } from '@/composables/useCodeSelection'
 import CodeCard from '@/components/CodeCard.vue'
 import EmptyState from '@/components/EmptyState.vue'
 import LoadingBlock from '@/components/LoadingBlock.vue'
+import SelectionBar from '@/components/SelectionBar.vue'
 
 const toast = useToast()
 const items = ref([])
@@ -56,8 +58,11 @@ async function subOne(code) {
   }
 }
 
+const sel = useCodeSelection(paged, load)
+
 watch(rankType, () => {
   page.value = 1
+  sel.clear()
   load()
 })
 onMounted(load)
@@ -80,15 +85,43 @@ onMounted(load)
       </button>
     </div>
 
+    <SelectionBar v-if="items.length" :sel="sel" />
+
     <LoadingBlock v-if="loading" :rows="4" />
 
     <template v-else-if="items.length">
       <div class="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
         <template v-for="item in paged" :key="item.code">
-          <CodeCard v-if="item.title || item.status !== undefined" :item="item" @changed="load" />
-          <div v-else class="card flex items-center justify-between">
-            <span class="font-mono text-sm text-brand">{{ item.code }}</span>
-            <button class="btn-primary px-2.5 py-1 text-xs" @click="subOne(item.code)">订阅</button>
+          <CodeCard
+            v-if="item.title || item.status !== undefined"
+            :item="item"
+            :selectable="sel.active.value"
+            :selected="sel.isSelected(item.code)"
+            @toggle-select="sel.toggle"
+            @changed="load"
+          />
+          <div
+            v-else
+            class="card flex items-center justify-between"
+            :class="[
+              sel.active.value ? 'cursor-pointer' : '',
+              sel.active.value && sel.isSelected(item.code) ? 'border-brand bg-brand/5' : '',
+            ]"
+            @click="sel.active.value && sel.toggle(item.code)"
+          >
+            <span class="flex items-center gap-2">
+              <input
+                v-if="sel.active.value"
+                type="checkbox"
+                class="h-3.5 w-3.5 cursor-pointer accent-brand"
+                :checked="sel.isSelected(item.code)"
+                @click.stop="sel.toggle(item.code)"
+              />
+              <span class="font-mono text-sm text-brand">{{ item.code }}</span>
+            </span>
+            <button class="btn-primary px-2.5 py-1 text-xs" @click.stop="subOne(item.code)">
+              订阅
+            </button>
           </div>
         </template>
       </div>

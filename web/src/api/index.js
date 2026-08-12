@@ -79,6 +79,9 @@ export const searchCodes = (keyword) => http.get('/search', { params: { keyword 
 export const searchTorrents = (code) => http.get('/torrents', { params: { code } })
 export const subscribeCode = (code) => http.post('/codes/sub', { code })
 export const cancelCode = (code) => http.post('/codes/cancel', { code })
+// 多选批量操作，一次请求走完，不在前端循环
+export const subscribeCodesBatch = (codes) => http.post('/codes/sub/batch', { codes })
+export const cancelCodesBatch = (codes) => http.post('/codes/cancel/batch', { codes })
 export const downloadCode = (payload) => http.post('/codes/download', payload)
 export const downloadAll = () => http.post('/codes/download/all')
 export const getReleaseToday = () => http.get('/codes/release_today')
@@ -96,7 +99,13 @@ export const checkAllDataSources = () => http.post('/datasources/check')
 
 // ---------------------------------------------------------------- 硬链接
 export const listMediaLinks = (params) => http.get('/medialinks', { params })
-export const getMediaLinkStats = () => http.get('/medialinks/stats')
+// check_missing=false 时跳过全表磁盘探测，只回总数与番号数，秒级返回。
+// 带探测那次库大时会超过全局 60s，单独放宽超时，免得白等一场又超时
+export const getMediaLinkStats = (checkMissing = true) =>
+  http.get('/medialinks/stats', {
+    params: { check_missing: checkMissing },
+    ...(checkMissing ? { timeout: 300000 } : {}),
+  })
 export const registerMediaLink = (payload) => http.post('/medialinks/register', payload)
 export const previewMediaLinkDelete = (payload) =>
   http.post('/medialinks/preview', payload)

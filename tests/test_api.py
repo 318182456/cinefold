@@ -996,6 +996,50 @@ class TestBulkCancel:
         )
         assert response.json()["code"] == 400
 
+    def test_batch_cancel_by_codes(self, client, token):
+        """列表页多选取消：只动选中的那几个。"""
+        from app.database.models import Code, CodeStatus
+        from app.database.session import session_scope
+
+        self._seed([
+            ("PICK-1", CodeStatus.SUBSCRIBED, "2015-01-01", "t"),
+            ("PICK-2", CodeStatus.SUBSCRIBED, "2015-01-01", "t"),
+            ("KEEP-1", CodeStatus.SUBSCRIBED, "2015-01-01", "t"),
+        ])
+        body = client.post(
+            "/api/v1/codes/cancel/batch",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"codes": ["PICK-1", "PICK-2", "GHOST-9"]},
+        ).json()
+
+        assert body["code"] == 200
+        assert body["data"]["cancelled"] == ["PICK-1", "PICK-2"]
+        assert body["data"]["missing"] == ["GHOST-9"]
+        with session_scope() as session:
+            assert session.get(Code, "PICK-1").status == CodeStatus.NONE
+            assert session.get(Code, "KEEP-1").status == CodeStatus.SUBSCRIBED
+
+    def test_batch_endpoints_reject_empty_list(self, client, token):
+        headers = {"Authorization": f"Bearer {token}"}
+        for path in ("/api/v1/codes/cancel/batch", "/api/v1/codes/sub/batch"):
+            assert client.post(path, headers=headers, json={"codes": []}).json()["code"] == 400
+
+    def test_batch_subscribe_by_codes(self, client, token):
+        """榜单等页面多选订阅，番号会被标准化。"""
+        from app.database.models import Code, CodeStatus
+        from app.database.session import session_scope
+
+        body = client.post(
+            "/api/v1/codes/sub/batch",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"codes": ["stars789", "MIDE-778"]},
+        ).json()
+
+        assert body["code"] == 200
+        assert body["data"]["subscribed"] == ["STARS-789", "MIDE-778"]
+        with session_scope() as session:
+            assert session.get(Code, "STARS-789").status == CodeStatus.SUBSCRIBED
+
 
 class TestNexusBreaker:
     """站点不可用时熔断，别拿两万个订阅逐个去撞配额。"""

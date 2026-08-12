@@ -2,9 +2,11 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { getBrands, getBrandCodes } from '@/api'
 import { useToast } from '@/composables/useToast'
+import { useCodeSelection } from '@/composables/useCodeSelection'
 import CodeCard from '@/components/CodeCard.vue'
 import EmptyState from '@/components/EmptyState.vue'
 import LoadingBlock from '@/components/LoadingBlock.vue'
+import SelectionBar from '@/components/SelectionBar.vue'
 
 const toast = useToast()
 
@@ -61,9 +63,12 @@ const shown = computed(() => {
 const pages = computed(() => Math.max(Math.ceil(shown.value.length / size), 1))
 const paged = computed(() => shown.value.slice((page.value - 1) * size, page.value * size))
 
+const sel = useCodeSelection(paged, () => select(active.value))
+
 // 筛选条件变化后当前页可能已越界
 watch([filter, subFilter, keyword, active], () => {
   page.value = 1
+  sel.clear()
 })
 
 async function load() {
@@ -185,11 +190,16 @@ onMounted(load)
       </div>
 
       <template v-else-if="shown.length">
+        <SelectionBar :sel="sel" />
+
         <div class="grid gap-3 lg:grid-cols-2 2xl:grid-cols-3">
           <CodeCard
             v-for="item in paged"
             :key="item.code"
             :item="item"
+            :selectable="sel.active.value"
+            :selected="sel.isSelected(item.code)"
+            @toggle-select="sel.toggle"
             @changed="select(active)"
           />
         </div>

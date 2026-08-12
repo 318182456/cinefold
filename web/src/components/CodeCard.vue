@@ -6,8 +6,11 @@ import { useConfigStore } from '@/stores/config'
 
 const props = defineProps({
   item: { type: Object, required: true },
+  // 多选模式：显示勾选框，卡片空白处点击即切换选中
+  selectable: { type: Boolean, default: false },
+  selected: { type: Boolean, default: false },
 })
-const emit = defineEmits(['changed', 'detail'])
+const emit = defineEmits(['changed', 'detail', 'toggle-select'])
 
 const toast = useToast()
 const configStore = useConfigStore()
@@ -73,11 +76,18 @@ async function download() {
 </script>
 
 <template>
-  <div class="card flex gap-3 transition-colors hover:border-gray-700">
+  <div
+    class="card flex gap-3 transition-colors hover:border-gray-700"
+    :class="[
+      selectable ? 'cursor-pointer' : '',
+      selectable && selected ? 'border-brand bg-brand/5' : '',
+    ]"
+    @click="selectable && emit('toggle-select', item.code)"
+  >
     <!-- 封面 -->
     <div
       class="relative h-28 w-20 shrink-0 overflow-hidden rounded-lg bg-gray-800"
-      @click="emit('detail', item)"
+      @click.stop="selectable ? emit('toggle-select', item.code) : emit('detail', item)"
     >
       <img
         v-if="cover && !imageFailed"
@@ -96,7 +106,14 @@ async function download() {
     <!-- 信息 -->
     <div class="flex min-w-0 flex-1 flex-col">
       <div class="flex items-start justify-between gap-2">
-        <span class="font-mono text-sm font-semibold text-brand">{{ item.code }}</span>
+        <input
+          v-if="selectable"
+          type="checkbox"
+          class="mt-0.5 h-3.5 w-3.5 shrink-0 cursor-pointer accent-brand"
+          :checked="selected"
+          @click.stop="emit('toggle-select', item.code)"
+        />
+        <span class="mr-auto font-mono text-sm font-semibold text-brand">{{ item.code }}</span>
         <span class="badge shrink-0" :class="status.class">{{ status.text }}</span>
       </div>
 
@@ -117,11 +134,11 @@ async function download() {
           class="btn px-2.5 py-1 text-xs"
           :class="subscribed ? 'btn-ghost' : 'btn-primary'"
           :disabled="busy"
-          @click="toggleSubscribe"
+          @click.stop="toggleSubscribe"
         >
           {{ subscribed ? '取消订阅' : '订阅' }}
         </button>
-        <button class="btn-ghost px-2.5 py-1 text-xs" :disabled="busy" @click="download">
+        <button class="btn-ghost px-2.5 py-1 text-xs" :disabled="busy" @click.stop="download">
           下载
         </button>
       </div>

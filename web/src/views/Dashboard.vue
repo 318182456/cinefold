@@ -2,9 +2,11 @@
 import { onMounted, ref } from 'vue'
 import { getDashboard, getReleaseToday, downloadAll } from '@/api'
 import { useToast } from '@/composables/useToast'
+import { useCodeSelection } from '@/composables/useCodeSelection'
 import CodeCard from '@/components/CodeCard.vue'
 import EmptyState from '@/components/EmptyState.vue'
 import LoadingBlock from '@/components/LoadingBlock.vue'
+import SelectionBar from '@/components/SelectionBar.vue'
 
 const toast = useToast()
 const stats = ref(null)
@@ -49,6 +51,8 @@ async function triggerDownload() {
   }
 }
 
+const sel = useCodeSelection(today, load)
+
 onMounted(load)
 </script>
 
@@ -73,10 +77,21 @@ onMounted(load)
 
     <!-- 今日上新 -->
     <section>
-      <h2 class="mb-3 text-sm font-medium text-gray-300">今日上新</h2>
+      <div class="mb-3 flex flex-wrap items-center gap-3">
+        <h2 class="text-sm font-medium text-gray-300">今日上新</h2>
+        <SelectionBar v-if="today.length" :sel="sel" />
+      </div>
       <LoadingBlock v-if="loading" :rows="2" />
       <div v-else-if="today.length" class="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-        <CodeCard v-for="item in today" :key="item.code" :item="item" @changed="load" />
+        <CodeCard
+          v-for="item in today"
+          :key="item.code"
+          :item="item"
+          :selectable="sel.active.value"
+          :selected="sel.isSelected(item.code)"
+          @toggle-select="sel.toggle"
+          @changed="load"
+        />
       </div>
       <EmptyState v-else text="今天还没有新片" hint="数据来自定时抓取任务" />
     </section>

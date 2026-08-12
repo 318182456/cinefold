@@ -113,6 +113,46 @@ def cancel(body: SubscribeRequest, current_user: str = Depends(get_current_user)
     return ResponseEntity.ok(message=f"已取消订阅 {code}")
 
 
+class CodesRequest(BaseModel):
+    codes: list[str] = []
+
+
+@router.post("/codes/sub/batch")
+def sub_batch(body: CodesRequest, current_user: str = Depends(get_current_user)):
+    """按选中的番号批量订阅。"""
+    from app import services
+
+    codes = [get_true_code(c) or c for c in body.codes if c and c.strip()]
+    if not codes:
+        return ResponseEntity.fail("没有选中任何番号", code=400)
+
+    result = services.subscribe_codes(codes)
+    done = len(result["subscribed"])
+    skipped = len(result["filtered"])
+    message = f"已订阅 {done} 个"
+    if skipped:
+        message += f"，{skipped} 个被过滤规则拦下"
+    return ResponseEntity.ok(result, message=message)
+
+
+@router.post("/codes/cancel/batch")
+def cancel_batch(body: CodesRequest, current_user: str = Depends(get_current_user)):
+    """按选中的番号批量取消订阅。"""
+    from app import services
+
+    codes = [get_true_code(c) or c for c in body.codes if c and c.strip()]
+    if not codes:
+        return ResponseEntity.fail("没有选中任何番号", code=400)
+
+    result = services.cancel_subscribe_codes(codes)
+    done = len(result["cancelled"])
+    missing = len(result["missing"])
+    message = f"已取消订阅 {done} 个"
+    if missing:
+        message += f"，{missing} 个不在库中"
+    return ResponseEntity.ok(result, message=message)
+
+
 class BulkCancelRequest(BaseModel):
     # 只取消这个日期之前发行的
     before_date: str = ""

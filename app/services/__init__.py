@@ -477,6 +477,39 @@ def cancel_subscribe(code: str) -> bool:
     return True
 
 
+def cancel_subscribe_codes(codes: list[str]) -> dict:
+    """按番号列表批量取消订阅。返回真正改动的番号与未命中的。
+
+    列表页多选用这个入口，一次事务提交，比前端循环打 N 个请求快得多。
+    """
+    wanted = [c for c in dict.fromkeys(codes) if c]
+    if not wanted:
+        return {"cancelled": [], "missing": []}
+
+    with session_scope() as session:
+        rows = session.scalars(select(Code).where(Code.code.in_(wanted))).all()
+        found = {row.code for row in rows}
+        for row in rows:
+            row.status = CodeStatus.NONE
+
+    missing = [c for c in wanted if c not in found]
+    logger.info(f"批量取消订阅 {len(found)} 个番号，{len(missing)} 个不存在")
+    return {"cancelled": sorted(found), "missing": missing}
+
+
+def subscribe_codes(codes: list[str]) -> dict:
+    """按番号列表批量订阅。被过滤规则拦下的单独列出。"""
+    wanted = [c for c in dict.fromkeys(codes) if c]
+    subscribed: list[str] = []
+    filtered: list[str] = []
+    for code in wanted:
+        if subscribe_code(code):
+            subscribed.append(code)
+        else:
+            filtered.append(code)
+    return {"subscribed": subscribed, "filtered": filtered}
+
+
 def bulk_cancel_subscribe(
     before_date: str = "",
     only_vr: bool = False,

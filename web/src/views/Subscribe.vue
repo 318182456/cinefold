@@ -2,9 +2,11 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { listCodes } from '@/api'
 import { useToast } from '@/composables/useToast'
+import { useCodeSelection } from '@/composables/useCodeSelection'
 import CodeCard from '@/components/CodeCard.vue'
 import EmptyState from '@/components/EmptyState.vue'
 import LoadingBlock from '@/components/LoadingBlock.vue'
+import SelectionBar from '@/components/SelectionBar.vue'
 
 const toast = useToast()
 const items = ref([])
@@ -40,8 +42,11 @@ async function load() {
   }
 }
 
+const sel = useCodeSelection(items, load)
+
 watch(status, () => {
   page.value = 1
+  sel.clear()
   load()
 })
 watch(page, load)
@@ -62,11 +67,21 @@ onMounted(load)
       </button>
     </div>
 
+    <SelectionBar v-if="items.length" :sel="sel" action="cancel" />
+
     <LoadingBlock v-if="loading" :rows="4" />
 
     <template v-else-if="items.length">
       <div class="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-        <CodeCard v-for="item in items" :key="item.code" :item="item" @changed="load" />
+        <CodeCard
+          v-for="item in items"
+          :key="item.code"
+          :item="item"
+          :selectable="sel.active.value"
+          :selected="sel.isSelected(item.code)"
+          @toggle-select="sel.toggle"
+          @changed="load"
+        />
       </div>
 
       <div v-if="pages > 1" class="flex items-center justify-center gap-3 pt-2">

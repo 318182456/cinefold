@@ -7,6 +7,7 @@ webhook 的同一条 dry_run 路径。
 from __future__ import annotations
 
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from fastapi import APIRouter, Depends
@@ -68,9 +69,14 @@ def _invalidate(*paths: str) -> None:
 
 
 # 全量失效统计的缓存。stats 和 missing_only 都要扫全表做探测，
-# 是这个页面最贵的一步，单独缓存一份共用
-_STATS_TTL = 60.0
+# 是这个页面最贵的一步，单独缓存一份共用。
+# 探测本身是网络 IO，一轮下来分钟级都有可能，TTL 短了等于每次访问都重扫
+_STATS_TTL = 600.0
 _missing_cache: tuple[float, set[str]] | None = None
+
+# 探测全是 IO 等待，并发跑能把 NAS 往返时间叠起来。不宜再高，
+# 群晖这类设备并发请求太多反而会退化
+_PROBE_WORKERS = 16
 
 
 def _missing_links(force: bool = False) -> set[str]:
@@ -89,9 +95,14 @@ def _missing_links(force: bool = False) -> set[str]:
             select(MediaLink.link_path, MediaLink.source_path)
         ).all()
 
+    # 同一路径可能被多条记录共用（源文件对多个硬链接），去重后再探测
+    paths = list({p for link, source in rows for p in (link, source)})
+    with ThreadPoolExecutor(max_workers=_PROBE_WORKERS) as pool:
+        probed = dict(zip(paths, pool.map(_exists_cached, paths)))
+
     missing = {
         link for link, source in rows
-        if not _exists_cached(link) or not _exists_cached(source)
+        if not probed[link] or not probed[source]
     }
     _missing_cache = (now, missing)
     return missing

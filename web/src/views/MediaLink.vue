@@ -19,6 +19,9 @@ const keyword = ref('')
 const missingOnly = ref(false)
 const loading = ref(false)
 const stats = ref(null)
+// 失效数要全表探测磁盘，NAS 上可能几十秒，跟总数分开请求单独渲染
+const missing = ref(null)
+const missingLoading = ref(false)
 const deleteEnabled = ref(false)
 const libraryPath = ref('')
 
@@ -78,12 +81,30 @@ async function load() {
   }
 }
 
+// 纯 SQL 聚合，立刻返回
 async function loadStats() {
   try {
-    stats.value = await getMediaLinkStats()
+    stats.value = await getMediaLinkStats(false)
   } catch {
     // 概览拿不到不影响列表
   }
+}
+
+// 全表磁盘探测，慢。单独跑，让前三个数先出来
+async function loadMissing() {
+  missingLoading.value = true
+  try {
+    missing.value = (await getMediaLinkStats(true)).missing
+  } catch {
+    missing.value = null
+  } finally {
+    missingLoading.value = false
+  }
+}
+
+// 增删之后两份都要刷新
+function reloadStats() {
+  return Promise.all([loadStats(), loadMissing()])
 }
 
 function search() {
@@ -128,7 +149,7 @@ async function submitRegister() {
     toast.success(`已登记 ${(data.links || []).length} 条`)
     registerOpen.value = false
     registerDraft.value = { code: '', source_path: '', link_path: '' }
-    await Promise.all([load(), loadStats()])
+    await Promise.all([load(), reloadStats()])
   } catch (err) {
     toast.error(err.message)
   } finally {
@@ -173,7 +194,7 @@ async function confirmDelete() {
     }
     if ((data.errors || []).length) toast.error(data.errors.join('; '))
     confirming.value = null
-    await Promise.all([load(), loadStats()])
+    await Promise.all([load(), reloadStats()])
   } catch (err) {
     toast.error(err.message)
   } finally {
@@ -185,7 +206,7 @@ async function dropRecord(item) {
   try {
     await dropMediaLinkRecord(item.link_path)
     toast.success('已删除记录')
-    await Promise.all([load(), loadStats()])
+    await Promise.all([load(), reloadStats()])
   } catch (err) {
     toast.error(err.message)
   }
@@ -195,7 +216,7 @@ async function prune() {
   try {
     const data = await pruneMediaLinks()
     toast.success(`已清理 ${(data.removed || []).length} 条失效记录`)
-    await Promise.all([load(), loadStats()])
+    await Promise.all([load(), reloadStats()])
   } catch (err) {
     toast.error(err.message)
   }
@@ -204,6 +225,7 @@ async function prune() {
 onMounted(() => {
   load()
   loadStats()
+  loadMissing()
 })
 </script>
 
@@ -221,11 +243,14 @@ onMounted(() => {
       </div>
       <div class="card">
         <p class="text-xs text-gray-500">文件已丢失</p>
+        <!-- 探测中显示占位，别让用户以为是 0 -->
+        <p v-if="missingLoading" class="mt-1 text-xl font-semibold text-gray-500">检测中…</p>
         <p
+          v-else
           class="mt-1 text-xl font-semibold"
-          :class="stats?.missing ? 'text-amber-400' : 'text-gray-200'"
+          :class="missing ? 'text-amber-400' : 'text-gray-200'"
         >
-          {{ stats?.missing ?? '—' }}
+          {{ missing ?? '—' }}
         </p>
       </div>
       <div class="card">
