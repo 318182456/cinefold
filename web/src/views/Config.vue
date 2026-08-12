@@ -494,6 +494,10 @@ const GROUPS = [
         fields: [
           { k: 'github_token', label: 'GitHub Token', t: 'password',
             hint: '公开仓库可留空；配上能把 API 限额从 60 次/小时抬到 5000' },
+          { k: 'github_proxy', label: 'GitHub 代理', ph: 'https://edgeone.gh-proxy.org/',
+            hint: '直连 GitHub 不通时填，留空走直连' },
+          { k: 'github_proxy_send_token', label: '代理携带 Token', t: 'bool',
+            hint: '默认不发，代理是第三方机器。但私有仓库不带 Token 一律 404，那就必须打开' },
           { k: 'auto_update_enabled', label: '自动更新', t: 'bool',
             hint: '检测到带更新包的新版本时自动安装并重启。会打断正在跑的任务' },
           { k: 'update_check_interval', label: '检查间隔（分钟）',
@@ -730,7 +734,7 @@ async function checkRelease(refresh = false) {
   try {
     release.value = await checkVersion(refresh)
     if (refresh) {
-      if (!release.value?.checked) toast.error('查询失败，检查网络或代理配置')
+      if (!release.value?.checked) toast.error(release.value?.error || '查询失败，检查网络或代理配置')
       else if (release.value.has_update) toast.success(`发现新版本 ${release.value.latest}`)
       else toast.success('已是最新版本')
     }
@@ -1145,7 +1149,7 @@ onUnmounted(stopUpgradePoll)
                 </span>
               </p>
               <p v-else-if="release" class="text-gray-600">
-                查不到最新版本，检查网络或代理配置
+                {{ release.error || '查不到最新版本，检查网络或代理配置' }}
               </p>
               <p v-if="upgrade?.backup_version" class="text-gray-600">
                 可回退到 {{ upgrade.backup_version }}

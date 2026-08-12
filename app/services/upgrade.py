@@ -37,6 +37,11 @@ from app.core.version import APP_VERSION
 GITHUB_REPO = "318182456/cinefold"
 RELEASE_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 
+# 走加速代理的域名。别的地址（比如自建分发）原样透传，不套前缀
+GITHUB_HOSTS = ("https://api.github.com/", "https://github.com/",
+                "https://objects.githubusercontent.com/",
+                "https://raw.githubusercontent.com/")
+
 # 单包体积上限，防止下到异常大的文件把磁盘写满
 MAX_PACKAGE_BYTES = 300 * 1024 * 1024
 
@@ -105,32 +110,104 @@ def _client() -> httpx.Client:
     )
 
 
-def _api_headers() -> dict:
-    """GitHub API 请求头。带 token 能把匿名的 60 次/小时抬到 5000。"""
+def _proxied(url: str) -> str:
+    """给 GitHub 地址套上加速代理前缀，其余地址原样返回。
+
+    gh-proxy 这类服务的用法是把完整 URL 直接拼在后面：
+        https://edgeone.gh-proxy.org/https://github.com/owner/repo/...
+    所以这里只做拼接，不改 URL 本身。
+    """
+    proxy = (get_settings().github_proxy or "").strip()
+    if not proxy or not url.startswith(GITHUB_HOSTS):
+        return url
+    return proxy.rstrip("/") + "/" + url
+
+
+def _api_headers(url: str = "") -> dict:
+    """GitHub API 请求头。带 token 能把匿名的 60 次/小时抬到 5000。
+
+    默认只把 token 发给 github.com 自己，走代理时不发 —— 中间那台机器
+    不该看到凭证。但私有仓库匿名访问是 404，不发 token 等于代理白配，
+    所以留了 github_proxy_send_token 开关让人显式选择。
+    """
+    settings = get_settings()
     headers = {"Accept": "application/vnd.github+json"}
-    token = get_settings().github_token
-    if token:
+    token = settings.github_token
+    if not token:
+        return headers
+
+    direct = not url or url.startswith(GITHUB_HOSTS)
+    if direct or settings.github_proxy_send_token:
         headers["Authorization"] = f"Bearer {token}"
     return headers
 
 
+# 上一次版本检测的失败原因，给前端显示。成功时清空
+_last_error = ""
+
+
+def _fail(reason: str) -> dict:
+    """记下失败原因并返回空 dict。
+
+    以前这里只 logger.debug，界面上永远是一句"查询失败"，代理连不上
+    还是被限流全看不出来，只能去翻容器日志。
+    """
+    global _last_error
+    _last_error = reason
+    logger.warning(f"版本检测失败：{reason}")
+    return {}
+
+
+def _explain(exc: Exception) -> str:
+    """把 httpx 的异常翻成能指导下一步操作的话。"""
+    text = str(exc) or exc.__class__.__name__
+    if isinstance(exc, httpx.ProxyError):
+        return f"代理连不上（{text}）。检查「网络 → HTTP/SOCKS 代理」的地址和账号密码"
+    if isinstance(exc, httpx.ConnectTimeout):
+        return f"连接超时（{text}）。代理没通，或需要填「GitHub 代理」走加速"
+    if isinstance(exc, httpx.ConnectError):
+        return f"连不上（{text}）。DNS 或网络不通，检查代理配置"
+    return f"{exc.__class__.__name__}: {text}"
+
+
+def _explain_404(url: str) -> str:
+    """404 分三种情况，给出的建议完全不同，得说清是哪一种。"""
+    settings = get_settings()
+    if not settings.github_token:
+        return (f"仓库或 release 不存在（404）。{GITHUB_REPO} 是私有仓库的话，"
+                "需要在上面配 GitHub Token")
+    if settings.github_proxy and not settings.github_proxy_send_token:
+        return ("404：走 GitHub 代理时默认不发 Token，私有仓库因此查不到。"
+                "打开「代理携带 Token」，或清空 GitHub 代理改走直连")
+    return f"仓库或 release 不存在（404）。检查 Token 权限，或确认 {GITHUB_REPO} 已发过 release"
+
+
 def fetch_latest_release() -> dict:
-    """取最新 release 的版本号与产物列表，失败返回空 dict。"""
+    """取最新 release 的版本号与产物列表，失败返回空 dict。
+
+    失败原因写进 _last_error，check_update 会把它带给前端。
+    """
+    global _last_error
+    api = _proxied(RELEASE_API)
     try:
         with _client() as client:
-            response = client.get(RELEASE_API, headers=_api_headers())
+            response = client.get(api, headers=_api_headers(api))
+            if response.status_code == 403 and "rate limit" in response.text.lower():
+                return _fail("GitHub API 限流（匿名 60 次/小时）。配 GitHub Token 或稍后再试")
+            if response.status_code in (401, 404):
+                # 私有仓库对没有凭证的请求一律回 404，不会说"你没权限"
+                return _fail(_explain_404(api))
             if response.status_code != 200:
-                logger.debug(f"读取 release 失败({response.status_code})")
-                return {}
+                return _fail(f"HTTP {response.status_code}，请求的是 {api}")
             data = response.json()
     except Exception as exc:
-        logger.debug(f"版本检测失败: {exc}")
-        return {}
+        return _fail(_explain(exc))
 
     tag = (data.get("tag_name") or "").strip()
     if not overlay.parse_version(tag):
-        logger.debug(f"release 标签 {tag!r} 不是语义化版本，忽略")
-        return {}
+        return _fail(f"release 标签 {tag!r} 不是语义化版本")
+
+    _last_error = ""
 
     assets = {a.get("name"): a.get("browser_download_url") for a in data.get("assets") or []}
     return {
@@ -162,10 +239,10 @@ def _write_cache(payload: dict) -> None:
 def check_update(use_cache: bool = True) -> dict:
     """对比当前版本与最新 release。
 
-    返回 {current, latest, has_update, checked, can_upgrade, notes, assets}。
-    checked 为 False 表示这次没查到（网络不通、限流等），前端不显示红点。
-    can_upgrade 额外要求两个 zip 都挂上去了 —— 只发了镜像没发 zip 的版本
-    能提示但不能一键装。
+    返回 {current, latest, has_update, checked, can_upgrade, notes, error}。
+    checked 为 False 表示这次没查到（网络不通、限流等），前端不显示红点，
+    error 里是具体原因。can_upgrade 额外要求两个 zip 都挂上去了 ——
+    只发了镜像没发 zip 的版本能提示但不能一键装。
     """
     release = _read_cache() if use_cache else {}
     if not release:
@@ -184,6 +261,7 @@ def check_update(use_cache: bool = True) -> dict:
         "can_upgrade": False,
         "notes": release.get("notes", ""),
         "published_at": release.get("published_at", ""),
+        "error": "" if latest else _last_error,
     }
 
     current_parsed = overlay.parse_version(APP_VERSION)
@@ -203,8 +281,9 @@ def _download(client: httpx.Client, url: str, dest: Path, label: str, base_perce
     """流式下载并实时报进度。超过体积上限直接中断。"""
     dest.parent.mkdir(parents=True, exist_ok=True)
     downloaded = 0
+    url = _proxied(url)
 
-    with client.stream("GET", url, headers=_api_headers()) as response:
+    with client.stream("GET", url, headers=_api_headers(url)) as response:
         if response.status_code != 200:
             raise RuntimeError(f"{label} 下载失败，HTTP {response.status_code}")
 
@@ -372,8 +451,9 @@ def _fetch_manifest(client: httpx.Client, assets: dict, version: str) -> dict:
     url = assets.get("manifest.json")
     if not url:
         return {}
+    url = _proxied(url)
     try:
-        response = client.get(url, headers=_api_headers())
+        response = client.get(url, headers=_api_headers(url))
         if response.status_code != 200:
             return {}
         data = response.json()
@@ -477,7 +557,7 @@ def start_upgrade(target: str = "") -> tuple[bool, str]:
 
     release = fetch_latest_release()
     if not release:
-        return False, "查询新版本失败，检查网络或代理配置"
+        return False, f"查询新版本失败：{_last_error or '检查网络或代理配置'}"
 
     latest = release["version"]
     if target and target != latest:

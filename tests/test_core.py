@@ -1,4 +1,5 @@
 """核心逻辑测试：番号识别、过滤、排序。"""
+import os
 import sys
 from pathlib import Path
 
@@ -268,6 +269,144 @@ class TestUpdateCheck:
         started, message = upgrade.start_upgrade()
         assert started is False
         assert "未提供更新包" in message
+
+
+class TestGithubProxy:
+    """GitHub 加速代理。直连不通的环境全靠它，套错了更新就彻底不可用。"""
+
+    @staticmethod
+    def _settings(monkeypatch, proxy="", token="", send_token=False):
+        from app.core import config as config_module
+
+        settings = config_module.get_settings()
+        monkeypatch.setattr(settings, "github_proxy", proxy)
+        monkeypatch.setattr(settings, "github_token", token)
+        monkeypatch.setattr(settings, "github_proxy_send_token", send_token)
+        return settings
+
+    def test_no_proxy_keeps_url(self, monkeypatch):
+        from app.services import upgrade
+
+        self._settings(monkeypatch)
+        assert upgrade._proxied(upgrade.RELEASE_API) == upgrade.RELEASE_API
+
+    def test_prefix_is_prepended(self, monkeypatch):
+        from app.services import upgrade
+
+        self._settings(monkeypatch, proxy="https://edgeone.gh-proxy.org/")
+        url = "https://github.com/owner/repo/releases/download/v1/backend-1.zip"
+        assert upgrade._proxied(url) == "https://edgeone.gh-proxy.org/" + url
+
+    def test_trailing_slash_not_doubled(self, monkeypatch):
+        """填不填结尾斜杠都得出同一个地址，用户不该为这个纠结。"""
+        from app.services import upgrade
+
+        with_slash = "https://edgeone.gh-proxy.org/"
+        self._settings(monkeypatch, proxy=with_slash)
+        expected = upgrade._proxied(upgrade.RELEASE_API)
+
+        self._settings(monkeypatch, proxy=with_slash.rstrip("/"))
+        assert upgrade._proxied(upgrade.RELEASE_API) == expected
+        assert "//https" not in expected.removeprefix(with_slash)
+
+    def test_non_github_url_untouched(self, monkeypatch):
+        """自建分发的地址不该被套前缀，代理只管 GitHub。"""
+        from app.services import upgrade
+
+        self._settings(monkeypatch, proxy="https://edgeone.gh-proxy.org/")
+        url = "https://mirror.example.com/backend-1.zip"
+        assert upgrade._proxied(url) == url
+
+    def test_token_withheld_from_proxy(self, monkeypatch):
+        """凭证不能交给第三方代理，宁可掉回匿名限额。"""
+        from app.services import upgrade
+
+        self._settings(monkeypatch, proxy="https://edgeone.gh-proxy.org/", token="ghp_x")
+        proxied = upgrade._proxied(upgrade.RELEASE_API)
+        assert "Authorization" not in upgrade._api_headers(proxied)
+
+    def test_token_sent_on_direct_connection(self, monkeypatch):
+        from app.services import upgrade
+
+        self._settings(monkeypatch, token="ghp_x")
+        headers = upgrade._api_headers(upgrade._proxied(upgrade.RELEASE_API))
+        assert headers["Authorization"] == "Bearer ghp_x"
+
+    def test_token_sent_to_proxy_when_opted_in(self, monkeypatch):
+        """私有仓库不带 token 就是 404，代理等于白配，得能显式打开。"""
+        from app.services import upgrade
+
+        self._settings(
+            monkeypatch, proxy="https://edgeone.gh-proxy.org/",
+            token="ghp_x", send_token=True,
+        )
+        proxied = upgrade._proxied(upgrade.RELEASE_API)
+        assert upgrade._api_headers(proxied)["Authorization"] == "Bearer ghp_x"
+
+    def test_404_without_token_blames_missing_token(self, monkeypatch):
+        """私有仓库对匿名请求回 404 而不是 401，提示必须点破这一点。"""
+        from app.services import upgrade
+
+        self._settings(monkeypatch)
+        assert "Token" in upgrade._explain_404(upgrade.RELEASE_API)
+
+    def test_404_behind_proxy_blames_withheld_token(self, monkeypatch):
+        from app.services import upgrade
+
+        self._settings(
+            monkeypatch, proxy="https://edgeone.gh-proxy.org/", token="ghp_x"
+        )
+        assert "代理携带 Token" in upgrade._explain_404(upgrade.RELEASE_API)
+
+
+class TestLanNoProxy:
+    """内网地址绕过代理。下载器和媒体库通常就在同一个局域网里。"""
+
+    def test_lan_appended_when_proxy_set(self, monkeypatch):
+        from app.core.config import _protect_lan_from_proxy
+
+        monkeypatch.setenv("HTTP_PROXY", "socks5://192.168.3.12:7890")
+        monkeypatch.delenv("NO_PROXY", raising=False)
+        monkeypatch.delenv("no_proxy", raising=False)
+
+        _protect_lan_from_proxy()
+        assert "192.168.*" in os.environ["NO_PROXY"]
+        assert "127.0.0.1" in os.environ["NO_PROXY"]
+
+    def test_untouched_without_proxy(self, monkeypatch):
+        """没配代理就别去动环境变量。"""
+        from app.core.config import _protect_lan_from_proxy
+
+        for key in ("HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy",
+                    "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy"):
+            monkeypatch.delenv(key, raising=False)
+
+        _protect_lan_from_proxy()
+        assert "NO_PROXY" not in os.environ
+
+    def test_user_entries_preserved(self, monkeypatch):
+        """用户自己写的 NO_PROXY 不能被覆盖掉。"""
+        from app.core.config import _protect_lan_from_proxy
+
+        monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:7890")
+        monkeypatch.setenv("NO_PROXY", "example.com")
+
+        _protect_lan_from_proxy()
+        entries = os.environ["NO_PROXY"].split(",")
+        assert entries[0] == "example.com"
+        assert "10.*" in entries
+
+    def test_idempotent(self, monkeypatch):
+        """get_settings 会被反复调用，不能每次都往里堆重复项。"""
+        from app.core.config import _protect_lan_from_proxy
+
+        monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:7890")
+        monkeypatch.delenv("NO_PROXY", raising=False)
+
+        _protect_lan_from_proxy()
+        first = os.environ["NO_PROXY"]
+        _protect_lan_from_proxy()
+        assert os.environ["NO_PROXY"] == first
 
 
 class TestOverlay:

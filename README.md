@@ -291,6 +291,27 @@ GitHub Releases 下载 `backend-x.y.z.zip` 与 `frontend-x.y.z.zip`，校验 sha
 配 `GITHUB_TOKEN` 可把 GitHub API 的匿名限额（60 次/小时）抬到 5000，公开
 仓库不配也能用。
 
+### 走代理
+
+直连 GitHub 不通时，在设置页填「GitHub 代理」（或 `GITHUB_PROXY`），比如
+`https://edgeone.gh-proxy.org/`。检查更新和下载更新包都会把 GitHub 的地址
+套上这个前缀，其他地址不受影响。
+
+代理是别人的机器，所以默认不会把 `GITHUB_TOKEN` 发出去 —— 限额掉回匿名的
+60 次/小时，但凭证不经手第三方。
+
+**私有仓库例外**：GitHub 对没有凭证的请求一律回 404（不是 401），不带 Token
+就永远查不到版本，代理等于白配。这种情况下要打开「代理携带 Token」
+（`GITHUB_PROXY_SEND_TOKEN=true`），前提是你信得过那台代理。不想把 Token
+交出去的话，就别配 GitHub 代理，改用 `PROXY` 走自己的 HTTP/SOCKS 代理。
+
+### 内网地址不走代理
+
+配了 `HTTP_PROXY` 之后，requests 和 httpx 会把内网请求也往代理送 ——
+qBittorrent、Emby 这些通常就在同一个局域网里，转出去必然超时，报错还长得
+像「下载器挂了」。启动时程序会自动把 `127.*`、`10.*`、`172.16-31.*`、
+`192.168.*` 追加进 `NO_PROXY`，你自己写的条目会保留。
+
 ### 发版
 
 推 `v0.0.8` 这样的 tag 触发两条流水线：`docker-build.yml` 出镜像，

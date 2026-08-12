@@ -306,6 +306,14 @@ class Settings:
     # 检测新版本用。公开仓库可留空；配上能把 GitHub API 的匿名限额
     # （60 次/小时）抬到 5000，也是私有镜像拉标签的凭证
     github_token: str = ""
+    # GitHub 加速代理，形如 https://edgeone.gh-proxy.org/。填了之后检查更新与
+    # 下载更新包都会把 github.com / api.github.com 的地址套上这个前缀，
+    # 国内直连 GitHub 不通时用。留空走直连
+    github_proxy: str = ""
+    # 走 GitHub 代理时是否把 Token 一并发出去。默认不发 —— 代理是第三方的
+    # 机器，不该看到凭证。但私有仓库不带 token 就是 404，代理等于白配，
+    # 这种情况下只能打开它，前提是你信任那台代理
+    github_proxy_send_token: bool = False
 
     # --- 更新 ---
     # 打开后，检测到带更新包的新版本会自动下载安装并重启。
@@ -499,6 +507,8 @@ def load_settings() -> Settings:
         javdb_host=_env("JAVDB_HOST", "https://javdb.com"),
         secret_key=_env("SECRET_KEY"),
         github_token=_env("GITHUB_TOKEN"),
+        github_proxy=_env("GITHUB_PROXY"),
+        github_proxy_send_token=_env_bool("GITHUB_PROXY_SEND_TOKEN", False),
 
         auto_update_enabled=_env_bool("AUTO_UPDATE_ENABLED", False),
         update_check_interval=_env_int("UPDATE_CHECK_INTERVAL", 360),
@@ -509,7 +519,38 @@ def load_settings() -> Settings:
         s.secret_key = generate_secure_random_string()
         save_setting("SECRET_KEY", s.secret_key)
 
+    _protect_lan_from_proxy()
     return s
+
+
+# 私有网段与本机，这些地址永远不该走代理
+_LAN_NO_PROXY = (
+    "localhost", "127.0.0.1", "::1",
+    "10.*", "172.16.*", "172.17.*", "172.18.*", "172.19.*",
+    "172.20.*", "172.21.*", "172.22.*", "172.23.*", "172.24.*",
+    "172.25.*", "172.26.*", "172.27.*", "172.28.*", "172.29.*",
+    "172.30.*", "172.31.*", "192.168.*",
+)
+
+
+def _protect_lan_from_proxy() -> None:
+    """把私有网段追加进 NO_PROXY。
+
+    配了 HTTP_PROXY 之后，requests / httpx 会连内网请求一起往代理送 ——
+    qBittorrent、Emby 这些通常就在同一个局域网里，转出去必然超时，
+    报错还长得像"下载器挂了"，很难往代理上想。
+
+    只追加不覆盖：用户自己写的 NO_PROXY 保留在前面。
+    """
+    if not any(os.environ.get(k) for k in
+               ("HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy",
+                "ALL_PROXY", "all_proxy")):
+        return
+
+    for key in ("NO_PROXY", "no_proxy"):
+        existing = [x.strip() for x in os.environ.get(key, "").split(",") if x.strip()]
+        merged = existing + [h for h in _LAN_NO_PROXY if h not in existing]
+        os.environ[key] = ",".join(merged)
 
 
 def save_setting(key: str, value: str) -> None:
