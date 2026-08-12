@@ -55,8 +55,16 @@ const PHASE_LABELS = {
   done: '已完成',
 }
 
+// 直通模式不建硬链接，只登记 —— 沿用通用文案会跟规则卡片上的
+// 「同源目录（不建链接）」对不上
+const PASSTHROUGH_PHASE_LABELS = {
+  ...PHASE_LABELS,
+  linking: '登记影片',
+}
+
 function phaseLabel(item) {
-  return PHASE_LABELS[item.phase] || item.phase || ''
+  const labels = item.passthrough ? PASSTHROUGH_PHASE_LABELS : PHASE_LABELS
+  return labels[item.phase] || item.phase || ''
 }
 
 async function loadProgress() {
@@ -759,7 +767,9 @@ onUnmounted(stopProgressPoll)
             </div>
 
             <div v-if="(syncResult.linked || []).length" class="space-y-1">
-              <p class="text-[11px] text-emerald-400">将建立硬链接</p>
+              <p class="text-[11px] text-emerald-400">
+                {{ confirmingRule?.passthrough ? '将登记影片（不建链接）' : '将建立硬链接' }}
+              </p>
               <p
                 v-for="p in syncResult.linked.slice(0, 8)"
                 :key="p"

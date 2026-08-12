@@ -363,7 +363,10 @@ def sync_rule(rule_id: int, dry_run: bool = False) -> SyncResult:
     # 进度覆盖掉 —— 用户点演练时后台可能正跑着定时对账
     track = not dry_run
     if track:
-        progress.start(rule_id, rule.name or rule.source_dir, 0)
+        progress.start(
+            rule_id, rule.name or rule.source_dir, 0,
+            passthrough=rule.passthrough,
+        )
         progress.update(rule_id, phase="scanning", message="正在扫描源目录…")
 
     videos = _scan_videos(source_root, rule.recursive)
@@ -459,9 +462,10 @@ def sync_rule(rule_id: int, dry_run: bool = False) -> SyncResult:
             todo = [(t, s) for t, s in todo if t not in claimed]
 
     if track:
+        pending = "个待登记" if rule.passthrough else "个待建链接"
         progress.update(
             rule_id, phase="linking", total=len(todo), done=0,
-            message=f"共 {len(videos)} 个文件，{len(todo)} 个待建链接",
+            message=f"共 {len(videos)} 个文件，{len(todo)} {pending}",
         )
 
     for index, (target_str, source) in enumerate(todo, start=1):

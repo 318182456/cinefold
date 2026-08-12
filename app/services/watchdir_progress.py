@@ -23,12 +23,19 @@ _lock = threading.Lock()
 _state: dict[int, dict] = {}
 
 
-def start(rule_id: int, name: str, total: int) -> None:
-    """开始一轮同步。total 是这轮要检查的文件数。"""
+def start(
+    rule_id: int, name: str, total: int, passthrough: bool = False,
+) -> None:
+    """开始一轮同步。total 是这轮要检查的文件数。
+
+    passthrough 只为前端文案服务：直通模式不建硬链接，阶段名照写「建立硬链接」
+    会跟规则列表里的「同源目录（不建链接）」自相矛盾。
+    """
     with _lock:
         _state[rule_id] = {
             "rule_id": rule_id,
             "name": name,
+            "passthrough": passthrough,
             "running": True,
             "phase": "scanning",
             "total": total,
