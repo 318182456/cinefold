@@ -265,6 +265,19 @@ def save_image(url: str, target: str = "") -> str:
         return ""
 
 
+def auto_update() -> int:
+    """自动更新。开关关着时立即返回，不产生任何网络请求。
+
+    真升级会重启进程，所以这个任务的返回值多半没机会被记下来。
+    """
+    try:
+        from app.services.upgrade import auto_upgrade
+        return auto_upgrade()
+    except Exception as exc:
+        logger.warning(f"[任务] 自动更新检查失败: {exc}")
+        return 0
+
+
 def _run_ladysite_task(func_name: str, label: str) -> int:
     """资源站任务的统一入口，模块未接入时静默跳过。"""
     try:
@@ -309,6 +322,11 @@ INTERVAL_JOBS: dict[str, dict] = {
     "sync_watch_dirs": {
         "func": sync_watch_dirs, "name": "监控目录对账", "minutes": 30,
         "interval_key": "watchdir_sync_interval",
+    },
+    # 开关（AUTO_UPDATE_ENABLED）关着时直接返回，不打 API
+    "auto_update": {
+        "func": auto_update, "name": "自动更新", "minutes": 360,
+        "interval_key": "update_check_interval",
     },
 }
 

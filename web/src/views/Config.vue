@@ -1,9 +1,10 @@
 <script setup>
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import {
-  deletePasskey, deleteTelegramWebhook, getConfig, getOidcRedirectUri,
-  getTelegramReceive, listPasskeys, listPtSites, passkeyRegisterBegin,
-  passkeyRegisterFinish, saveConfig, setTelegramWebhook, testConnection, testOidc,
+  checkVersion, deletePasskey, deleteTelegramWebhook, getConfig, getOidcRedirectUri,
+  getTelegramReceive, getUpgradeStatus, listPasskeys, listPtSites, passkeyRegisterBegin,
+  passkeyRegisterFinish, rollbackUpgrade, saveConfig, setTelegramWebhook, startUpgrade,
+  testConnection, testOidc,
 } from '@/api'
 import { PasskeyCancelled, createCredential, isSupported } from '@/utils/webauthn'
 import { useToast } from '@/composables/useToast'
@@ -487,10 +488,16 @@ const GROUPS = [
         ],
       },
       {
-        title: '版本检测',
+        title: '版本与更新',
+        hint: '更新包从 GitHub Releases 下载，装到 /data 挂载卷，重建容器不会丢',
+        panel: 'upgrade',
         fields: [
           { k: 'github_token', label: 'GitHub Token', t: 'password',
-            hint: '镜像公开时可留空；私有镜像需 read:packages 权限' },
+            hint: '公开仓库可留空；配上能把 API 限额从 60 次/小时抬到 5000' },
+          { k: 'auto_update_enabled', label: '自动更新', t: 'bool',
+            hint: '检测到带更新包的新版本时自动安装并重启。会打断正在跑的任务' },
+          { k: 'update_check_interval', label: '检查间隔（分钟）',
+            hint: '自动更新开启时生效，默认 360' },
         ],
       },
     ],
@@ -675,12 +682,109 @@ async function test(target) {
   }
 }
 
+// ---------------------------------------------------------------- 更新
+const upgrade = ref(null)      // 安装情况：镜像版本 / overlay 版本 / 能否回退
+const release = ref(null)      // 最新 release 的检测结果
+const upgradeBusy = ref('')    // check / install / rollback
+let upgradeTimer = null
+// 重启期间接口会连不上，这一段不当成失败，只显示"重启中"
+const restarting = ref(false)
+
+const progress = computed(() => upgrade.value?.progress || null)
+const upgradeRunning = computed(() => !!progress.value?.running)
+
+async function loadUpgrade() {
+  try {
+    upgrade.value = await getUpgradeStatus()
+    if (restarting.value) {
+      // 能拿到响应说明后端起来了，刷新一次配置让版本号跟上
+      restarting.value = false
+      toast.success(`已更新到 ${upgrade.value?.running_version || '新版本'}`)
+      await load()
+      checkRelease()
+    }
+    if (!upgradeRunning.value) stopUpgradePoll()
+  } catch {
+    // 升级到重启这一步接口必然断一会儿，正在跑就继续等
+    if (upgradeRunning.value || upgradeBusy.value === 'install' || upgradeBusy.value === 'rollback') {
+      restarting.value = true
+    }
+  }
+}
+
+function startUpgradePoll() {
+  stopUpgradePoll()
+  upgradeTimer = setInterval(loadUpgrade, 2000)
+}
+
+function stopUpgradePoll() {
+  if (upgradeTimer) {
+    clearInterval(upgradeTimer)
+    upgradeTimer = null
+  }
+  upgradeBusy.value = ''
+}
+
+async function checkRelease(refresh = false) {
+  upgradeBusy.value = 'check'
+  try {
+    release.value = await checkVersion(refresh)
+    if (refresh) {
+      if (!release.value?.checked) toast.error('查询失败，检查网络或代理配置')
+      else if (release.value.has_update) toast.success(`发现新版本 ${release.value.latest}`)
+      else toast.success('已是最新版本')
+    }
+  } catch (err) {
+    if (refresh) toast.error(err.message || '检查更新失败')
+  } finally {
+    upgradeBusy.value = ''
+  }
+}
+
+async function doUpgrade() {
+  if (!confirm(
+    `将下载并安装 ${release.value?.latest}，安装完成后程序会自动重启，`
+    + '正在运行的任务会被中断。继续？'
+  )) return
+
+  upgradeBusy.value = 'install'
+  try {
+    const res = await startUpgrade()
+    toast.success(res?.message || '已开始升级')
+    startUpgradePoll()
+  } catch (err) {
+    toast.error(err.message || '启动升级失败')
+    upgradeBusy.value = ''
+  }
+}
+
+async function doRollback() {
+  const target = upgrade.value?.backup_version
+    || `镜像版本 ${upgrade.value?.image_version || ''}`
+  if (!confirm(`将回退到 ${target} 并重启程序。继续？`)) return
+
+  upgradeBusy.value = 'rollback'
+  try {
+    const res = await rollbackUpgrade()
+    toast.success(res?.message || '正在回退')
+    restarting.value = true
+    startUpgradePoll()
+  } catch (err) {
+    toast.error(err.message || '回退失败')
+    upgradeBusy.value = ''
+  }
+}
+
 onMounted(async () => {
   await load()
   loadPtSites()
   loadTgReceive()
   loadAuthExtras()
+  loadUpgrade()
+  checkRelease()
 })
+
+onUnmounted(stopUpgradePoll)
 </script>
 
 <template>
@@ -1010,6 +1114,98 @@ onMounted(async () => {
             <p class="text-[11px] text-gray-600">
               Webhook 需公网 HTTPS，端口限 443/80/88/8443；两种方式互斥，
               切到 polling 会自动删除 webhook
+            </p>
+          </template>
+
+          <!-- 版本与更新 -->
+          <template v-if="section.panel === 'upgrade'">
+            <div class="flex items-center justify-between border-t border-gray-800 pt-3">
+              <p class="text-xs font-medium text-gray-400">版本</p>
+              <button
+                class="btn-ghost px-2 py-1 text-[11px]"
+                :disabled="upgradeBusy === 'check' || upgradeRunning"
+                @click="checkRelease(true)"
+              >
+                {{ upgradeBusy === 'check' ? '检查中…' : '检查更新' }}
+              </button>
+            </div>
+
+            <div class="space-y-1 text-xs text-gray-400">
+              <p>
+                当前运行：<span class="text-gray-200">{{ upgrade?.running_version || '—' }}</span>
+                <span v-if="upgrade?.overlay_version" class="ml-1 text-gray-600">
+                  （热更新装的，镜像自带 {{ upgrade.image_version }}）
+                </span>
+              </p>
+              <p v-if="release?.checked">
+                最新版本：<span class="text-gray-200">{{ release.latest }}</span>
+                <span v-if="!release.has_update" class="ml-1 text-emerald-400">已是最新</span>
+                <span v-else-if="!release.can_upgrade" class="ml-1 text-amber-400">
+                  该版本未提供更新包，需在宿主机执行 docker compose pull
+                </span>
+              </p>
+              <p v-else-if="release" class="text-gray-600">
+                查不到最新版本，检查网络或代理配置
+              </p>
+              <p v-if="upgrade?.backup_version" class="text-gray-600">
+                可回退到 {{ upgrade.backup_version }}
+              </p>
+            </div>
+
+            <!-- 更新说明 -->
+            <details v-if="release?.has_update && release.notes" class="text-xs">
+              <summary class="cursor-pointer text-gray-500 hover:text-gray-300">
+                更新说明
+              </summary>
+              <pre class="mt-2 max-h-48 overflow-auto whitespace-pre-wrap rounded bg-gray-950 p-2 text-[11px] text-gray-400">{{ release.notes }}</pre>
+            </details>
+
+            <!-- 进度 -->
+            <div v-if="upgradeRunning || restarting || progress?.stage === 'failed'" class="space-y-1.5">
+              <div class="h-1.5 overflow-hidden rounded-full bg-gray-800">
+                <div
+                  class="h-full transition-all duration-300"
+                  :class="progress?.stage === 'failed' ? 'bg-red-500' : 'bg-brand'"
+                  :style="{ width: `${restarting ? 98 : progress?.percent || 0}%` }"
+                />
+              </div>
+              <p
+                class="text-xs"
+                :class="progress?.stage === 'failed' ? 'text-red-400' : 'text-gray-400'"
+              >
+                {{ restarting ? '程序重启中，稍候会自动刷新…' : progress?.message || '准备中…' }}
+              </p>
+              <details v-if="progress?.logs?.length" class="text-[11px]">
+                <summary class="cursor-pointer text-gray-600 hover:text-gray-400">
+                  详细日志
+                </summary>
+                <pre class="mt-1 max-h-40 overflow-auto rounded bg-gray-950 p-2 text-gray-500">{{ progress.logs.join('\n') }}</pre>
+              </details>
+            </div>
+
+            <div class="flex flex-wrap gap-2">
+              <button
+                v-if="release?.has_update && release.can_upgrade"
+                class="btn bg-brand px-3 py-1.5 text-xs text-white"
+                :disabled="upgradeBusy === 'install' || upgradeRunning || restarting"
+                @click="doUpgrade"
+              >
+                {{ upgradeRunning || restarting ? '升级中…' : `更新到 ${release.latest}` }}
+              </button>
+              <button
+                v-if="upgrade?.can_rollback"
+                class="btn-ghost px-3 py-1.5 text-xs"
+                :disabled="upgradeBusy === 'rollback' || upgradeRunning || restarting"
+                @click="doRollback"
+              >
+                {{ upgradeBusy === 'rollback' ? '回退中…' : '回退上一版' }}
+              </button>
+            </div>
+
+            <p class="text-[11px] text-gray-600">
+              更新包解压到 {{ upgrade?.update_dir || '/data/updates' }}，
+              装完自动重启。装出问题可以回退，回退后仍有问题就在宿主机跑
+              docker compose pull 回到镜像版本
             </p>
           </template>
         </div>

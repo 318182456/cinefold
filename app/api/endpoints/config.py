@@ -88,9 +88,45 @@ def get_version():
 def check_version(
     refresh: bool = False, current_user: str = Depends(get_current_user)
 ):
-    """对比镜像仓库里的最新版本。查不到时 checked 为 False，前端不提示。"""
-    from app.utils.updatecheck import check_update
+    """对比 GitHub Releases 上的最新版本。查不到时 checked 为 False，前端不提示。"""
+    from app.services.upgrade import check_update
     return ResponseEntity.ok(check_update(use_cache=not refresh))
+
+
+@router.get("/upgrade/status")
+def upgrade_status(current_user: str = Depends(get_current_user)):
+    """升级进度 + 当前安装情况。
+
+    进程重启后内存里的进度会归零，前端看到 running 为 False 且版本号
+    变了，就知道装完了。
+    """
+    from app.services.upgrade import get_state, upgrade_info
+    return ResponseEntity.ok({**upgrade_info(), "progress": get_state()})
+
+
+@router.post("/upgrade")
+def start_upgrade_api(
+    version: str = "", current_user: str = Depends(get_current_user)
+):
+    """下载并安装新版本，装完自动重启。
+
+    立即返回，进度去 /upgrade/status 轮询。
+    """
+    from app.services.upgrade import start_upgrade
+    started, message = start_upgrade(version)
+    if not started:
+        return ResponseEntity.fail(message)
+    return ResponseEntity.ok(message=message)
+
+
+@router.post("/upgrade/rollback")
+def rollback_upgrade(current_user: str = Depends(get_current_user)):
+    """回退到上一版并重启。没有上一版时退回镜像自带的版本。"""
+    from app.services.upgrade import rollback
+    done, message = rollback()
+    if not done:
+        return ResponseEntity.fail(message)
+    return ResponseEntity.ok(message=message)
 
 
 @router.get("/logs")

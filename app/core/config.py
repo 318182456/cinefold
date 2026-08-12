@@ -303,8 +303,18 @@ class Settings:
     # --- 其他 ---
     javdb_host: str = "https://javdb.com"
     secret_key: str = ""
-    # 检测新版本用。公开镜像可留空；私有镜像需要带 read:packages 权限的 token
+    # 检测新版本用。公开仓库可留空；配上能把 GitHub API 的匿名限额
+    # （60 次/小时）抬到 5000，也是私有镜像拉标签的凭证
     github_token: str = ""
+
+    # --- 更新 ---
+    # 打开后，检测到带更新包的新版本会自动下载安装并重启。
+    # 默认关闭：热更新会重启进程，正在跑的任务会被打断，
+    # 什么时候更新该由人来定
+    auto_update_enabled: bool = False
+    # 自动检查新版本的间隔（分钟）。开关关着时这个任务空转即返回，
+    # 手动点检查不受它限制
+    update_check_interval: int = 360
 
     def to_safe_dict(self) -> dict:
         """返回给前端的配置，敏感字段打码。"""
@@ -489,6 +499,9 @@ def load_settings() -> Settings:
         javdb_host=_env("JAVDB_HOST", "https://javdb.com"),
         secret_key=_env("SECRET_KEY"),
         github_token=_env("GITHUB_TOKEN"),
+
+        auto_update_enabled=_env_bool("AUTO_UPDATE_ENABLED", False),
+        update_check_interval=_env_int("UPDATE_CHECK_INTERVAL", 360),
     )
 
     # SECRET_KEY 为空时生成并回写，保证重启后 JWT 仍然有效

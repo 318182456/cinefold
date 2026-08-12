@@ -1,0 +1,139 @@
+name: Build Release Packages
+
+# 热更新用的 zip。程序在运行中下载它们替换自身代码，
+# 镜像构建（docker-build.yml）是另一条独立的路径，互不依赖。
+on:
+  push:
+    tags:
+      - 'v*'
+  # 手动补发某个版本的包
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '版本号（留空则读 VERSION 文件）'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 确定版本号
+        id: version
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            VALUE="${{ github.event.inputs.version }}"
+          elif [ "${{ github.ref_type }}" = "tag" ]; then
+            VALUE="${GITHUB_REF_NAME#v}"
+          else
+            VALUE=$(cat VERSION | tr -d '[:space:]')
+          fi
+          VALUE="${VALUE#v}"
+
+          # 包名、manifest、程序里的比对全靠这个版本号对齐，
+          # 格式不对就不该往下走
+          if ! echo "$VALUE" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "版本号 '$VALUE' 不是 x.y.z 格式" >&2
+            exit 1
+          fi
+
+          # tag 与 VERSION 文件不一致时，装上去的 overlay 会被程序判为
+          # 版本不符而拒绝，不如在这里就拦下
+          FILE_VERSION=$(cat VERSION | tr -d '[:space:]')
+          if [ "$VALUE" != "$FILE_VERSION" ]; then
+            echo "tag 版本 $VALUE 与 VERSION 文件里的 $FILE_VERSION 不一致" >&2
+            exit 1
+          fi
+
+          echo "value=$VALUE" >> "$GITHUB_OUTPUT"
+          echo "打包版本 $VALUE"
+
+      - name: 安装 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: 构建前端
+        run: |
+          cd web
+          npm ci
+          npm run build
+
+      - name: 打包
+        id: pack
+        env:
+          VERSION: ${{ steps.version.outputs.value }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+
+          # --- 后端 ---
+          # 程序解压后按 <root>/app、<root>/VERSION 找文件，所以 zip 里
+          # 就是这个平铺结构，不带顶层目录
+          BACKEND="dist/backend-${VERSION}.zip"
+          zip -qr "$BACKEND" \
+            app main.py VERSION requirements.txt \
+            -x '*__pycache__*' '*.pyc' '*.pyo' '*/.pytest_cache/*'
+
+          # --- 前端 ---
+          # web/dist 的内容直接铺到 zip 根，nginx 的 root 指向解压目录
+          FRONTEND="dist/frontend-${VERSION}.zip"
+          (cd web/dist && zip -qr "../../$FRONTEND" .)
+
+          # --- 校验清单 ---
+          # 程序下载完先比对 sha256 才装，防止半截包或中间篡改
+          BACKEND_SHA=$(sha256sum "$BACKEND" | cut -d' ' -f1)
+          FRONTEND_SHA=$(sha256sum "$FRONTEND" | cut -d' ' -f1)
+          BACKEND_SIZE=$(stat -c%s "$BACKEND")
+          FRONTEND_SIZE=$(stat -c%s "$FRONTEND")
+
+          cat > dist/manifest.json <<EOF
+          {
+            "version": "${VERSION}",
+            "files": {
+              "backend-${VERSION}.zip": {
+                "sha256": "${BACKEND_SHA}",
+                "size": ${BACKEND_SIZE}
+              },
+              "frontend-${VERSION}.zip": {
+                "sha256": "${FRONTEND_SHA}",
+                "size": ${FRONTEND_SIZE}
+              }
+            }
+          }
+          EOF
+
+          # 前端包漏掉 index.html 的话装上去是白屏，这里先确认
+          unzip -l "$FRONTEND" | grep -q ' index.html$' \
+            || { echo "前端包缺少 index.html" >&2; exit 1; }
+
+          {
+            echo "### 更新包"
+            echo '```'
+            ls -lh dist/
+            echo '```'
+            echo "backend  sha256: ${BACKEND_SHA}"
+            echo "frontend sha256: ${FRONTEND_SHA}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 发布到 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.value }}
+          name: v${{ steps.version.outputs.value }}
+          # 手动补发时 tag 可能还不存在，让 action 顺手建一个
+          target_commitish: ${{ github.sha }}
+          generate_release_notes: true
+          files: |
+            dist/backend-${{ steps.version.outputs.value }}.zip
+            dist/frontend-${{ steps.version.outputs.value }}.zip
+            dist/manifest.json

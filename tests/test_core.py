@@ -137,7 +137,7 @@ class TestUpdateCheck:
     """版本比对。查不到最新版时必须静默，不能误报红点。"""
 
     def test_parse_version(self):
-        from app.utils.updatecheck import parse_version
+        from app.core.overlay import parse_version
         assert parse_version("2.0.4") == (2, 0, 4)
         assert parse_version("v2.0.4") == (2, 0, 4)
         assert parse_version("latest") is None
@@ -145,21 +145,90 @@ class TestUpdateCheck:
         assert parse_version("2.0") is None
         assert parse_version("") is None
 
-    def test_picks_highest_semver_tag(self, monkeypatch):
-        from app.utils import updatecheck
+    @staticmethod
+    def _release(version, with_assets=True):
+        assets = {}
+        if with_assets:
+            assets = {
+                f"backend-{version}.zip": f"https://x/backend-{version}.zip",
+                f"frontend-{version}.zip": f"https://x/frontend-{version}.zip",
+            }
+        return {"version": version, "assets": assets, "notes": "", "published_at": ""}
 
-        # 数字序比字符串序：2.0.10 应该大于 2.0.9
-        tags = ["latest", "sha-deadbee", "2.0.9", "2.0.10", "1.9.9"]
+    def test_has_update_true(self, monkeypatch):
+        from app.services import upgrade
+
+        monkeypatch.setattr(upgrade, "APP_VERSION", "2.0.3")
         monkeypatch.setattr(
-            updatecheck, "_fetch_token", lambda client: "tok"
+            upgrade, "fetch_latest_release", lambda: self._release("2.0.4")
         )
+        result = upgrade.check_update(use_cache=False)
+        assert result["has_update"] is True
+        assert result["checked"] is True
+        assert result["can_upgrade"] is True
+
+    def test_no_update_when_same(self, monkeypatch):
+        from app.services import upgrade
+
+        monkeypatch.setattr(upgrade, "APP_VERSION", "2.0.4")
+        monkeypatch.setattr(
+            upgrade, "fetch_latest_release", lambda: self._release("2.0.4")
+        )
+        assert upgrade.check_update(use_cache=False)["has_update"] is False
+
+    def test_local_newer_is_not_an_update(self, monkeypatch):
+        """本地构建版本领先于发布版时不该提示。"""
+        from app.services import upgrade
+
+        monkeypatch.setattr(upgrade, "APP_VERSION", "2.1.0")
+        monkeypatch.setattr(
+            upgrade, "fetch_latest_release", lambda: self._release("2.0.4")
+        )
+        assert upgrade.check_update(use_cache=False)["has_update"] is False
+
+    def test_unreachable_stays_silent(self, monkeypatch):
+        """查不到时 checked=False，前端据此不显示红点。"""
+        from app.services import upgrade
+
+        monkeypatch.setattr(upgrade, "fetch_latest_release", lambda: {})
+        result = upgrade.check_update(use_cache=False)
+        assert result["checked"] is False
+        assert result["has_update"] is False
+
+    def test_unknown_local_version_stays_silent(self, monkeypatch):
+        """读不到 VERSION 文件时不该把它当成"有新版"。"""
+        from app.services import upgrade
+
+        monkeypatch.setattr(upgrade, "APP_VERSION", "UNKNOWN")
+        monkeypatch.setattr(
+            upgrade, "fetch_latest_release", lambda: self._release("2.0.4")
+        )
+        assert upgrade.check_update(use_cache=False)["has_update"] is False
+
+    def test_no_assets_can_not_upgrade(self, monkeypatch):
+        """只发了镜像没挂 zip 的版本：提示有更新，但不给点安装。"""
+        from app.services import upgrade
+
+        monkeypatch.setattr(upgrade, "APP_VERSION", "2.0.3")
+        monkeypatch.setattr(
+            upgrade,
+            "fetch_latest_release",
+            lambda: self._release("2.0.4", with_assets=False),
+        )
+        result = upgrade.check_update(use_cache=False)
+        assert result["has_update"] is True
+        assert result["can_upgrade"] is False
+
+    def test_non_semver_tag_ignored(self, monkeypatch):
+        """release 打了 nightly 这类标签时当作没查到，而不是拿它去比。"""
+        from app.services import upgrade
 
         class _Response:
             status_code = 200
 
             @staticmethod
             def json():
-                return {"tags": tags}
+                return {"tag_name": "nightly", "assets": []}
 
         class _Client:
             def __enter__(self):
@@ -171,65 +240,213 @@ class TestUpdateCheck:
             def get(self, *args, **kwargs):
                 return _Response()
 
-        monkeypatch.setattr(updatecheck, "_client", lambda: _Client())
-        assert updatecheck.fetch_latest_version() == "2.0.10"
+        monkeypatch.setattr(upgrade, "_client", lambda: _Client())
+        assert upgrade.fetch_latest_release() == {}
 
-    def test_has_update_true(self, monkeypatch):
-        from app.utils import updatecheck
+    def test_upgrade_refused_when_already_latest(self, monkeypatch):
+        """当前已是最新时不该启动升级线程。"""
+        from app.services import upgrade
 
-        monkeypatch.setattr(updatecheck, "APP_VERSION", "2.0.3")
-        monkeypatch.setattr(updatecheck, "fetch_latest_version", lambda: "2.0.4")
-        result = updatecheck.check_update(use_cache=False)
-        assert result["has_update"] is True
-        assert result["checked"] is True
+        monkeypatch.setattr(upgrade, "APP_VERSION", "2.0.4")
+        monkeypatch.setattr(
+            upgrade, "fetch_latest_release", lambda: self._release("2.0.4")
+        )
+        started, message = upgrade.start_upgrade()
+        assert started is False
+        assert "无需更新" in message
 
-    def test_no_update_when_same(self, monkeypatch):
-        from app.utils import updatecheck
+    def test_upgrade_refused_without_packages(self, monkeypatch):
+        """没挂 zip 的版本点安装要给出明确原因，而不是下到一半才失败。"""
+        from app.services import upgrade
 
-        monkeypatch.setattr(updatecheck, "APP_VERSION", "2.0.4")
-        monkeypatch.setattr(updatecheck, "fetch_latest_version", lambda: "2.0.4")
-        assert updatecheck.check_update(use_cache=False)["has_update"] is False
+        monkeypatch.setattr(upgrade, "APP_VERSION", "2.0.3")
+        monkeypatch.setattr(
+            upgrade,
+            "fetch_latest_release",
+            lambda: self._release("2.0.4", with_assets=False),
+        )
+        started, message = upgrade.start_upgrade()
+        assert started is False
+        assert "未提供更新包" in message
 
-    def test_local_newer_is_not_an_update(self, monkeypatch):
-        """本地构建版本领先于镜像时不该提示。"""
-        from app.utils import updatecheck
 
-        monkeypatch.setattr(updatecheck, "APP_VERSION", "2.1.0")
-        monkeypatch.setattr(updatecheck, "fetch_latest_version", lambda: "2.0.4")
-        assert updatecheck.check_update(use_cache=False)["has_update"] is False
+class TestOverlay:
+    """热更新代码的挂载判定。装错版本比不装更糟，判定必须严格。"""
 
-    def test_unreachable_registry_stays_silent(self, monkeypatch):
-        """查不到时 checked=False，前端据此不显示红点。"""
-        from app.utils import updatecheck
+    @staticmethod
+    def _make(root, version, with_app=True):
+        root.mkdir(parents=True, exist_ok=True)
+        if version is not None:
+            (root / "VERSION").write_text(version, encoding="utf-8")
+        if with_app:
+            (root / "app").mkdir(exist_ok=True)
+        return root
 
-        monkeypatch.setattr(updatecheck, "fetch_latest_version", lambda: "")
-        result = updatecheck.check_update(use_cache=False)
-        assert result["checked"] is False
-        assert result["has_update"] is False
+    def test_newer_overlay_wins(self, tmp_path):
+        from app.core.overlay import _should_use
 
-    def test_unknown_local_version_stays_silent(self, monkeypatch):
-        """读不到 VERSION 文件时不该把 0.0.0 当成"有新版"。"""
-        from app.utils import updatecheck
+        image = self._make(tmp_path / "image", "0.0.7")
+        overlay = self._make(tmp_path / "overlay", "0.0.8")
+        assert _should_use(overlay, image)[0] is True
 
-        monkeypatch.setattr(updatecheck, "APP_VERSION", "UNKNOWN")
-        monkeypatch.setattr(updatecheck, "fetch_latest_version", lambda: "2.0.4")
-        assert updatecheck.check_update(use_cache=False)["has_update"] is False
+    def test_same_version_uses_image(self, tmp_path):
+        """镜像被 pull 到与 overlay 同版本后，overlay 就该退场。"""
+        from app.core.overlay import _should_use
 
-    def test_missing_token_returns_empty(self, monkeypatch):
-        """私有镜像未配 token 时静默返回空串，而不是抛异常。"""
-        from app.utils import updatecheck
+        image = self._make(tmp_path / "image", "0.0.8")
+        overlay = self._make(tmp_path / "overlay", "0.0.8")
+        assert _should_use(overlay, image)[0] is False
 
-        monkeypatch.setattr(updatecheck, "_fetch_token", lambda client: "")
+    def test_older_overlay_ignored(self, tmp_path):
+        """镜像反超 overlay：新镜像不能被旧代码盖住。"""
+        from app.core.overlay import _should_use
 
-        class _Client:
-            def __enter__(self):
-                return self
+        image = self._make(tmp_path / "image", "0.1.0")
+        overlay = self._make(tmp_path / "overlay", "0.0.8")
+        assert _should_use(overlay, image)[0] is False
 
-            def __exit__(self, *args):
-                return False
+    def test_missing_app_dir_ignored(self, tmp_path):
+        """解压到一半留下的残骸不能被当成可用 overlay。"""
+        from app.core.overlay import _should_use
 
-        monkeypatch.setattr(updatecheck, "_client", lambda: _Client())
-        assert updatecheck.fetch_latest_version() == ""
+        image = self._make(tmp_path / "image", "0.0.7")
+        overlay = self._make(tmp_path / "overlay", "0.0.8", with_app=False)
+        assert _should_use(overlay, image)[0] is False
+
+    def test_unreadable_overlay_version_ignored(self, tmp_path):
+        from app.core.overlay import _should_use
+
+        image = self._make(tmp_path / "image", "0.0.7")
+        overlay = self._make(tmp_path / "overlay", None)
+        assert _should_use(overlay, image)[0] is False
+
+    def test_unreadable_image_version_lets_overlay_through(self, tmp_path):
+        """镜像没带 VERSION（如源码直跑）时放行，否则热更新永远失效。"""
+        from app.core.overlay import _should_use
+
+        image = self._make(tmp_path / "image", None)
+        overlay = self._make(tmp_path / "overlay", "0.0.8")
+        assert _should_use(overlay, image)[0] is True
+
+
+class TestSafeExtract:
+    """解压来自网络的 zip，路径必须当作不可信输入。"""
+
+    def test_extracts_normal_zip(self, tmp_path):
+        import zipfile
+        from app.services.upgrade import _safe_extract
+
+        archive = tmp_path / "ok.zip"
+        with zipfile.ZipFile(archive, "w") as zf:
+            zf.writestr("VERSION", "0.0.8")
+            zf.writestr("app/core/x.py", "print(1)")
+
+        dest = tmp_path / "out"
+        _safe_extract(archive, dest)
+        assert (dest / "VERSION").read_text() == "0.0.8"
+        assert (dest / "app" / "core" / "x.py").is_file()
+
+    def test_rejects_parent_traversal(self, tmp_path):
+        import zipfile
+        import pytest as _pytest
+        from app.services.upgrade import _safe_extract
+
+        archive = tmp_path / "evil.zip"
+        with zipfile.ZipFile(archive, "w") as zf:
+            zf.writestr("../escaped.txt", "pwned")
+
+        with _pytest.raises(RuntimeError, match="越界"):
+            _safe_extract(archive, tmp_path / "out")
+        assert not (tmp_path / "escaped.txt").exists()
+
+    def test_rejects_absolute_path(self, tmp_path):
+        import zipfile
+        import pytest as _pytest
+        from app.services.upgrade import _safe_extract
+
+        archive = tmp_path / "abs.zip"
+        with zipfile.ZipFile(archive, "w") as zf:
+            # zipfile 会剥掉开头的 /，用 Windows 盘符形式测绝对路径
+            zf.writestr("../../../etc/passwd", "x")
+
+        with _pytest.raises(RuntimeError, match="越界"):
+            _safe_extract(archive, tmp_path / "out")
+
+    def test_rejects_zip_bomb(self, tmp_path, monkeypatch):
+        import zipfile
+        import pytest as _pytest
+        from app.services import upgrade
+
+        monkeypatch.setattr(upgrade, "MAX_EXTRACT_BYTES", 1024)
+        archive = tmp_path / "bomb.zip"
+        with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("big.bin", b"\0" * (4 * 1024))
+
+        with _pytest.raises(RuntimeError, match="解压体积"):
+            upgrade._safe_extract(archive, tmp_path / "out")
+
+
+class TestVerify:
+    """sha256 校验。包被截断或掉包时必须拦下。"""
+
+    def test_matching_hash_passes(self, tmp_path):
+        import hashlib
+        from app.services.upgrade import _verify
+
+        blob = tmp_path / "a.zip"
+        blob.write_bytes(b"hello")
+        digest = hashlib.sha256(b"hello").hexdigest()
+        _verify(blob, digest, "测试包")  # 不抛即通过
+
+    def test_mismatched_hash_raises(self, tmp_path):
+        import pytest as _pytest
+        from app.services.upgrade import _verify
+
+        blob = tmp_path / "a.zip"
+        blob.write_bytes(b"hello")
+        with _pytest.raises(RuntimeError, match="校验失败"):
+            _verify(blob, "0" * 64, "测试包")
+
+    def test_empty_expected_skips(self, tmp_path):
+        """manifest 缺失时降级放行，不能因此完全装不了。"""
+        from app.services.upgrade import _verify
+
+        blob = tmp_path / "a.zip"
+        blob.write_bytes(b"hello")
+        _verify(blob, "", "测试包")
+
+
+class TestReplaceDir:
+    """安装与回滚的目录搬运。"""
+
+    def test_moves_backup_and_installs(self, tmp_path):
+        from app.services.upgrade import _replace_dir
+
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        (staging / "VERSION").write_text("0.0.9")
+
+        current = tmp_path / "current"
+        current.mkdir()
+        (current / "VERSION").write_text("0.0.8")
+
+        backup = tmp_path / "backup"
+
+        _replace_dir(staging, current, backup)
+        assert (current / "VERSION").read_text() == "0.0.9"
+        assert (backup / "VERSION").read_text() == "0.0.8"
+        assert not staging.exists()
+
+    def test_installs_when_no_current(self, tmp_path):
+        from app.services.upgrade import _replace_dir
+
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        (staging / "VERSION").write_text("0.0.9")
+
+        current = tmp_path / "current"
+        _replace_dir(staging, current, tmp_path / "backup")
+        assert (current / "VERSION").read_text() == "0.0.9"
 
 
 class TestTitleAttributes:

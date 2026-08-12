@@ -255,6 +255,53 @@ curl -X POST "http://host:3750/api/v1/webhook/emby?dry_run=1" \
 
 ---
 
+## 更新
+
+两条路，各管各的：
+
+| 方式 | 更新范围 | 场景 |
+| --- | --- | --- |
+| 设置页一键更新 | 应用代码（前端 + 后端） | 日常，不用碰宿主机 |
+| `docker compose pull` | 整个镜像，含系统依赖 | 换 Python 版本、加系统包等 |
+
+### 一键更新
+
+设置页「其他 → 版本与更新」显示当前版本与最新版本，点更新即可。程序会从
+GitHub Releases 下载 `backend-x.y.z.zip` 与 `frontend-x.y.z.zip`，校验 sha256、
+补 Python 依赖、拿新代码试跑一次导入，全部通过才写入并重启。任何一步失败都
+不会动生效目录，跑的还是旧版本。
+
+更新包装在 `${DATA_DIR}/updates/`（容器内 `/data/updates`），是挂载卷 ——
+`docker compose pull` 重建容器之后它还在。启动时程序会比较两个版本：
+
+- overlay 更新 → 用 overlay
+- 镜像追平或反超 → 用镜像，并顺手删掉过期的 overlay
+
+所以拉了新镜像不会被旧的热更新代码盖住，两条路不打架。
+
+更新后出问题点「回退上一版」，退回上次热更新前的版本并重启。第一次热更新
+之前跑的是镜像自带代码，此时回退等于删掉 overlay 退回镜像版本。
+
+### 自动更新
+
+设置页打开「自动更新」（或 `AUTO_UPDATE_ENABLED=true`），检测到带更新包的
+新版本就自动装并重启，间隔由 `UPDATE_CHECK_INTERVAL` 控制（分钟，默认 360）。
+**默认关闭** —— 重启会打断正在跑的抓取和下载任务。
+
+配 `GITHUB_TOKEN` 可把 GitHub API 的匿名限额（60 次/小时）抬到 5000，公开
+仓库不配也能用。
+
+### 发版
+
+推 `v0.0.8` 这样的 tag 触发两条流水线：`docker-build.yml` 出镜像，
+`release.yml` 出 zip 并挂到 Release。tag 版本号必须与 `VERSION` 文件一致，
+否则 CI 直接失败 —— 版本对不上的包装上去会被程序拒绝。
+
+只发了镜像没挂 zip 的版本，界面会提示有更新但不给点安装，需要在宿主机
+`docker compose pull`。
+
+---
+
 ## API
 
 除登录外均需鉴权，支持两种方式：
@@ -277,7 +324,7 @@ curl http://host:3750/api/v1/dashboard -H 'Authorization: Bearer <token>'
 
 ```bash
 # 后端
-.venv/bin/python -m pytest tests/ -q      # 437 项测试
+.venv/bin/python -m pytest tests/ -q      # 455 项测试
 .venv/bin/python -m uvicorn app.api:app --port 56168 --reload
 
 # 前端

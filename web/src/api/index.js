@@ -68,6 +68,10 @@ export const getDashboard = () => http.get('/dashboard')
 export const getVersion = () => http.get('/version')
 export const checkVersion = (refresh = false) =>
   http.get('/version/check', { params: { refresh } })
+export const getUpgradeStatus = () => http.get('/upgrade/status')
+export const startUpgrade = (version = '') =>
+  http.post('/upgrade', null, { params: { version } })
+export const rollbackUpgrade = () => http.post('/upgrade/rollback')
 
 // ---------------------------------------------------------------- 番号
 export const listCodes = (params) => http.get('/codes/list', { params })
