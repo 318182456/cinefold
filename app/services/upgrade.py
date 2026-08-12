@@ -273,7 +273,7 @@ def _write_cache(payload: dict) -> None:
         logger.debug(f"写入版本缓存失败: {exc}")
 
 
-def _installed_version() -> str:
+def _installed_version(assets: dict | None = None, latest: str = "") -> str:
     """当前实际装到哪一版了，取前后端里较旧的那个。
 
     前后端分开发包后，两侧版本可能不一致：只发了后端包的版本装完，前端还是
@@ -282,10 +282,21 @@ def _installed_version() -> str:
 
     前端从没装过 overlay（一直用镜像自带的）时不参与比较 —— 那种情况下
     前端跟着镜像走，与热更新无关。
+
+    但"取较旧的那侧"只在那一侧**能**装上时才成立。传了 assets 就据此排除
+    目标版本没发包的一侧：只发后端包的版本（如 0.0.8-7）装完之后，前端
+    永远停在上一版，若仍按前端算已装版本，就会一直判成"有更新"，点下去
+    又把后端重装一遍、红点照旧 —— 死循环，且自动更新会按间隔反复重启。
+
+    没发包不等于没装上，这种情况下那一侧就是已经到位了。
     """
     backend = APP_VERSION
     web = overlay.web_version()
     if not web:
+        return backend
+
+    # 目标版本没发前端包 → 前端无从更新，不该拖低已装版本
+    if assets is not None and latest and not assets.get(f"frontend-{latest}.zip"):
         return backend
 
     backend_parsed = overlay.parse_version(backend)
@@ -323,7 +334,10 @@ def check_update(use_cache: bool = True) -> dict:
         "error": "" if latest else _last_error,
     }
 
-    current_parsed = overlay.parse_version(_installed_version())
+    installed = _installed_version(assets, latest)
+    result["current"] = installed
+
+    current_parsed = overlay.parse_version(installed)
     latest_parsed = overlay.parse_version(latest)
     if current_parsed and latest_parsed and latest_parsed > current_parsed:
         result["has_update"] = True
@@ -655,8 +669,9 @@ def start_upgrade(target: str = "") -> tuple[bool, str]:
         return False, f"只能升级到最新版 {latest}"
 
     # 与 check_update 用同一个判据：只更新了前端的版本，APP_VERSION 没变，
-    # 按它比会误判成"已是最新"而拒装
-    installed = _installed_version()
+    # 按它比会误判成"已是最新"而拒装。传 assets 是为了排除本版没发包的一侧，
+    # 否则会把已经装好的那一侧反复重装（见 _installed_version）
+    installed = _installed_version(release.get("assets") or {}, latest)
     current_parsed = overlay.parse_version(installed)
     latest_parsed = overlay.parse_version(latest)
     if not latest_parsed:

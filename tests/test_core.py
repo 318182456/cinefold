@@ -134,6 +134,15 @@ class TestCodeFilter:
         assert extract_subscribable_codes("你好") == ([], [])
 
 
+def _unexpected_thread(*args, **kwargs):
+    """替掉 threading.Thread，用在"断言不该真的开始安装"的用例里。
+
+    真起线程会把 _state.running 留成 True，后面的用例全被"已有升级任务在
+    进行中"挡掉 —— 失败信息还会指向无辜的用例。
+    """
+    raise AssertionError("不该启动升级线程")
+
+
 class TestUpdateCheck:
     """版本比对。查不到最新版时必须静默，不能误报红点。"""
 
@@ -270,6 +279,71 @@ class TestUpdateCheck:
         result = upgrade.check_update(use_cache=False)
         assert result["has_update"] is True
         assert result["can_upgrade"] is False
+
+    def test_backend_only_release_does_not_loop_forever(self, monkeypatch):
+        """只发后端包的版本装完后，不能因为前端 overlay 落后而一直提示有更新。
+
+        0.0.8-7 只挂了 backend zip：后端装到 0.0.8-7，前端 overlay 没包可装，
+        仍停在 0.0.8-6。若按落后的前端算已装版本，就会永远判成"有更新"，
+        点下去又把后端重装一遍、红点照旧 —— 自动更新还会按间隔反复重启。
+        """
+        from app.core import overlay
+        from app.services import upgrade
+
+        monkeypatch.setattr(upgrade, "APP_VERSION", "0.0.8-7")
+        monkeypatch.setattr(overlay, "web_version", lambda: "0.0.8-6")
+        monkeypatch.setattr(
+            upgrade,
+            "fetch_latest_release",
+            lambda: self._release("0.0.8-7", sides=("backend",)),
+        )
+
+        result = upgrade.check_update(use_cache=False)
+        assert result["has_update"] is False
+        # 界面上的"当前运行"要和判定同源，不能一边说已是最新一边挂红点
+        assert result["current"] == "0.0.8-7"
+
+    def test_frontend_only_release_still_detected(self, monkeypatch):
+        """反向要保住：本版发了前端包而前端落后，仍然要提示能更新。
+
+        这是 _installed_version 取较低值的初衷，不能被上面那个修复弄丢。
+        """
+        from app.core import overlay
+        from app.services import upgrade
+
+        monkeypatch.setattr(upgrade, "APP_VERSION", "0.0.8-7")
+        monkeypatch.setattr(overlay, "web_version", lambda: "0.0.8-6")
+        monkeypatch.setattr(
+            upgrade,
+            "fetch_latest_release",
+            lambda: self._release("0.0.8-7", sides=("frontend",)),
+        )
+
+        result = upgrade.check_update(use_cache=False)
+        assert result["has_update"] is True
+        assert result["can_upgrade"] is True
+        assert result["current"] == "0.0.8-6"
+
+    def test_backend_only_release_refuses_reinstall(self, monkeypatch):
+        """同一情形下手动点安装也该被拒，而不是白装一遍再重启。"""
+        from app.core import overlay
+        from app.services import upgrade
+
+        monkeypatch.setattr(upgrade, "APP_VERSION", "0.0.8-7")
+        monkeypatch.setattr(overlay, "web_version", lambda: "0.0.8-6")
+        monkeypatch.setattr(
+            upgrade,
+            "fetch_latest_release",
+            lambda: self._release("0.0.8-7", sides=("backend",)),
+        )
+        # 真装起来会起后台线程并留下 running 状态，污染后面的用例
+        monkeypatch.setattr(
+            upgrade.threading, "Thread", _unexpected_thread
+        )
+
+        started, message = upgrade.start_upgrade()
+        assert started is False
+        assert "无需更新" in message
 
     def test_non_semver_tag_ignored(self, monkeypatch):
         """release 打了 nightly 这类标签时当作没查到，而不是拿它去比。"""
