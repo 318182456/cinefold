@@ -13,6 +13,10 @@ from pyquery import PyQuery
 # 不然 22 个日期页每个都要等满超时
 UNREACHABLE_THRESHOLD = 3
 
+# 厂牌官网响应普遍偏慢，默认 15s 会在索引页就超时。抓取由定时任务驱动，
+# 多等几秒换取拿到数据是划算的
+REQUEST_TIMEOUT = 25.0
+
 from app.modules.ladysite.base import CodeInfo, SiteClient, join_list
 from app.utils import get_true_code
 
@@ -53,7 +57,9 @@ class Brands:
     def __init__(self, brand: str = "s1"):
         self.brand = (brand or "s1").lower()
         host = BRANDS.get(self.brand, BRANDS["s1"])
-        self.client = SiteClient(host, interval=1.5)
+        # 这些官网对非日本出口普遍是静默丢包或 502/504，而不是返回挑战页，
+        # 因此撞不出 403 也就触发不了"被拦才降级"。配了 bypass 就直接走它
+        self.client = SiteClient(host, interval=1.5, bypass_first=True)
 
     def list_dates(self) -> list[str] | None:
         """取官网挂出的全部发行日期。
@@ -64,7 +70,7 @@ class Brands:
 
         返回 None 表示请求失败，空列表表示页面上一个日期都没有。
         """
-        html = self.client.get("/works/date")
+        html = self.client.get("/works/date", timeout=REQUEST_TIMEOUT)
         if not html:
             return None
 
@@ -88,7 +94,7 @@ class Brands:
         调用方要能区分，否则站点不可达会被当成"没有作品"。
         """
         day = target or date.today().strftime("%Y-%m-%d")
-        html = self.client.get(f"/works/list/date/{day}")
+        html = self.client.get(f"/works/list/date/{day}", timeout=REQUEST_TIMEOUT)
         if not html:
             return None
         return self.crawling_date(html)
@@ -112,7 +118,7 @@ class Brands:
     def get_detail(self, code: str) -> CodeInfo | None:
         """抓取厂牌页的作品详情。"""
         raw = (code or "").replace("-", "")
-        html = self.client.get(f"/works/detail/{raw}/")
+        html = self.client.get(f"/works/detail/{raw}/", timeout=REQUEST_TIMEOUT)
         if not html:
             return None
 

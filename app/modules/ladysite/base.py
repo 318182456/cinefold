@@ -212,13 +212,19 @@ class SiteClient:
                     return response.text
             except httpx.HTTPStatusError as exc:
                 status = exc.response.status_code
-                if status in (403, 503):
+                # 403/503 是典型的挑战页；502/504 多半是站点前面的防护层
+                # 掐了直连。两类都值得让 bypass 服务再试一次
+                if status in (403, 503) or status >= 500:
                     logger.info(f"{url} 返回 {status}，尝试通过 bypass 服务获取")
                     return fetch_via_bypass(url, params, timeout)
                 logger.warning(f"请求 {url} 失败: {status}")
                 return ""
             except httpx.TimeoutException as exc:
-                # 超时不重试：站点本来就慢，再等一轮只会拖住后面的站点
+                # 超时不重试直连：站点本来就慢，再等一轮只会拖住后面的站点。
+                # 但部分站点是对直连静默丢包而非返回挑战页，配了 bypass 就交给它
+                if settings.bypass_url:
+                    logger.info(f"{url} 直连超时，尝试通过 bypass 服务获取")
+                    return fetch_via_bypass(url, params, timeout)
                 logger.warning(f"请求 {url} 超时: {exc}")
                 return ""
             except (httpx.TransportError, ssl.SSLError) as exc:
