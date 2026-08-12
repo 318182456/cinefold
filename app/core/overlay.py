@@ -141,12 +141,31 @@ def activate() -> str:
 
     path = str(overlay)
     # 已经在最前面就不重复插
-    if sys.path and sys.path[0] == path:
-        return read_version(overlay)
-    while path in sys.path:
-        sys.path.remove(path)
-    sys.path.insert(0, path)
+    if not (sys.path and sys.path[0] == path):
+        while path in sys.path:
+            sys.path.remove(path)
+        sys.path.insert(0, path)
+
+    _evict_app_modules()
     return read_version(overlay)
+
+
+def _evict_app_modules() -> None:
+    """把已经导入的 app.* 从 sys.modules 里清掉，让后续导入落到 overlay。
+
+    调用方为了拿到这个模块，必须先 import app.core.overlay —— 那一步会把
+    镜像里的 app 和 app.core 包注册进 sys.modules，它们的 __path__ 就此
+    钉死在镜像目录上。sys.path 只在查找顶层包时起作用，对已经在 sys.modules
+    里的包无效，所以后面 import app.api 仍然走 __path__ 命中镜像代码 ——
+    overlay 插了等于没插，热更新装完版本号也不会变，界面上表现为
+    "更新成功但还提示有新版本"。
+
+    清掉之后 app 会被重新查找，此时 sys.path[0] 是 overlay，拿到的就是新代码。
+    本模块自己也在清理范围内：调用方持有的是模块对象引用，清 sys.modules
+    不影响它继续用；下次谁再 import app.core.overlay，拿到 overlay 那份才是对的。
+    """
+    for name in [n for n in sys.modules if n == "app" or n.startswith("app.")]:
+        del sys.modules[name]
 
 
 def active_root() -> Path:

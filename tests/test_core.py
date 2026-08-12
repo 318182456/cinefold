@@ -743,6 +743,68 @@ class TestOverlay:
         assert _should_use(overlay, image)[0] is True
 
 
+class TestOverlayActivate:
+    """activate() 之后 import app.* 必须真的拿到 overlay 的代码。
+
+    光判 _should_use 是不够的：调用方为了拿到 overlay 模块必须先
+    import app.core.overlay，这一步把镜像的 app 包钉进 sys.modules，
+    之后 sys.path 再怎么插也换不掉它。曾经因此 overlay 完全不生效，
+    热更新装完 APP_VERSION 不变，界面上反复提示同一个新版本。
+    """
+
+    @staticmethod
+    def _build(tmp_path):
+        """搭一份镜像 + 一份更新的 overlay，两边 APP_VERSION 取值不同。"""
+        import shutil
+
+        image = tmp_path / "image"
+        (image / "app" / "core").mkdir(parents=True)
+        (image / "app" / "__init__.py").touch()
+        (image / "app" / "core" / "__init__.py").touch()
+        (image / "VERSION").write_text("0.0.8-5", encoding="utf-8")
+        (image / "app" / "core" / "version.py").write_text(
+            'APP_VERSION = "IMAGE"\n', encoding="utf-8"
+        )
+        shutil.copy(
+            Path(__file__).resolve().parents[1] / "app" / "core" / "overlay.py",
+            image / "app" / "core" / "overlay.py",
+        )
+
+        current = tmp_path / "data" / "updates" / "backend" / "current"
+        current.parent.mkdir(parents=True)
+        shutil.copytree(image, current)
+        (current / "VERSION").write_text("0.0.8-6", encoding="utf-8")
+        (current / "app" / "core" / "version.py").write_text(
+            'APP_VERSION = "OVERLAY"\n', encoding="utf-8"
+        )
+        return image, tmp_path / "data"
+
+    def test_overlay_code_actually_wins(self, tmp_path):
+        """跑在子进程里：activate() 会清 sys.modules，在测试进程内会拆掉 pytest 的 app.*。"""
+        import subprocess
+        import sys
+
+        image, data = self._build(tmp_path)
+        script = (
+            "from app.core import overlay\n"
+            "overlay.activate()\n"
+            "from app.core.version import APP_VERSION\n"
+            "print(APP_VERSION)\n"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=str(image),
+            env={**os.environ, "DATA_DIR": str(data), "PYTHONPATH": ""},
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == "OVERLAY", (
+            f"overlay 未生效，APP_VERSION={result.stdout.strip()!r}"
+        )
+
+
 class TestSafeExtract:
     """解压来自网络的 zip，路径必须当作不可信输入。"""
 
