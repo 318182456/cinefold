@@ -185,6 +185,18 @@ const GROUPS = [
             hint: '删除不可逆。建议先用下方演练确认反查结果无误再开启' },
         ],
       },
+      {
+        title: '监控目录',
+        hint: '源目录里的文件自动硬链接到目标目录。实时监听靠 inotify，NAS 与 Docker 绑定挂载上事件常丢，定时对账才是兜底',
+        fields: [
+          { k: 'watchdir_auto_sync', label: '自动同步', t: 'bool',
+            hint: '关闭后定时对账与实时监听都不运行，只能在监控目录页手动同步' },
+          { k: 'watchdir_sync_interval', label: '对账间隔（分钟）', t: 'number', ph: '30',
+            hint: '实时监听收不到事件时，靠这个兜底。每轮要扫源目录并逐条比对，目录很大时别设太小' },
+          { k: 'watchdir_delete_grace', label: '删除宽限期（秒）', t: 'number', ph: '1800',
+            hint: '文件消失后先观察这么久再删，期间若同 inode 文件在别处出现则判定为移动。0 表示发现即删' },
+        ],
+      },
     ],
     tests: ['emby', 'jellyfin', 'plex'],
   },

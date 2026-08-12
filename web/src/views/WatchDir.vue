@@ -1,8 +1,9 @@
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import {
   backfillWatchDirTorrents, cancelWatchDirHold, createWatchDir, deleteWatchDir,
-  listWatchDirHolds, listWatchDirs, syncAllWatchDirs, syncWatchDir, updateWatchDir,
+  getWatchDirProgress, listWatchDirHolds, listWatchDirs, syncAllWatchDirs,
+  syncWatchDir, updateWatchDir,
 } from '@/api'
 import { useToast } from '@/composables/useToast'
 import LoadingBlock from '@/components/LoadingBlock.vue'
@@ -15,6 +16,9 @@ const libraryPath = ref('')
 const libraryExists = ref(false)
 const deleteEnabled = ref(false)
 const watching = ref(false)
+// 定时对账间隔（分钟）与自动同步总开关，供提示文案使用
+const syncInterval = ref(30)
+const autoSync = ref(true)
 
 // 扣留中的删除
 const holds = ref([])
@@ -30,6 +34,57 @@ const saving = ref(false)
 const syncResult = ref(null)
 const syncing = ref(false)
 const confirmingRule = ref(null)
+
+// 同步进度。真同步走后台线程，靠轮询这个接口看它跑到哪了 ——
+// 每个新文件都要等写入稳定（最多 6 秒），没有进度就完全是黑盒
+const progress = ref([])
+let progressTimer = null
+
+const runningProgress = computed(() => progress.value.filter((p) => p.running))
+
+function progressPercent(item) {
+  if (!item.total) return 0
+  return Math.min(100, Math.round((item.done / item.total) * 100))
+}
+
+const PHASE_LABELS = {
+  scanning: '扫描源目录',
+  claiming: '核对已有链接',
+  linking: '建立硬链接',
+  checking: '核对删除',
+  done: '已完成',
+}
+
+function phaseLabel(item) {
+  return PHASE_LABELS[item.phase] || item.phase || ''
+}
+
+async function loadProgress() {
+  try {
+    const data = await getWatchDirProgress()
+    progress.value = data.items || []
+    // 跑完了就停轮询，并刷新列表拿到最终结果
+    if (!data.running && progressTimer) {
+      stopProgressPoll()
+      await Promise.all([load(), loadHolds()])
+    }
+  } catch {
+    // 进度拿不到不影响别的，下一轮再试
+  }
+}
+
+function startProgressPoll() {
+  if (progressTimer) return
+  loadProgress()
+  progressTimer = setInterval(loadProgress, 2000)
+}
+
+function stopProgressPoll() {
+  if (progressTimer) {
+    clearInterval(progressTimer)
+    progressTimer = null
+  }
+}
 
 function blankDraft() {
   return {
@@ -84,6 +139,8 @@ async function load() {
     libraryExists.value = !!data.library_exists
     deleteEnabled.value = !!data.delete_enabled
     watching.value = !!data.watching
+    syncInterval.value = data.sync_interval || 30
+    autoSync.value = data.auto_sync !== false
   } catch (err) {
     toast.error(err.message)
   } finally {
@@ -183,25 +240,15 @@ async function preview(item) {
   }
 }
 
+// 真同步走后台：每个新文件要等写入稳定（最多 6 秒），同步等待必然超时
 async function runSync() {
   const item = confirmingRule.value
   syncing.value = true
   try {
-    const data = await syncWatchDir(item.id, false)
-    const n = (data.linked || []).length
-    const d = (data.unlinked || []).length
-    const m = (data.moved || []).length
-    const h = (data.held || []).length
-    const r = (data.reverse_deleted || []).length
-    toast.success(
-      `新建 ${n}，删除 ${d}` +
-        (m ? `，移动 ${m}` : '') +
-        (h ? `，扣留 ${h}` : '') +
-        (r ? `，反向清理 ${r}` : ''),
-    )
-    if ((data.errors || []).length) toast.error(data.errors.slice(0, 2).join('; '))
+    await syncWatchDir(item.id, false, true)
+    toast.success('已在后台开始同步')
     confirmingRule.value = null
-    await Promise.all([load(), loadHolds()])
+    startProgressPoll()
   } catch (err) {
     toast.error(err.message)
   } finally {
@@ -212,9 +259,9 @@ async function runSync() {
 async function syncEverything() {
   syncing.value = true
   try {
-    const data = await syncAllWatchDirs(false)
-    toast.success(`已对账 ${data.count || 0} 条规则`)
-    await Promise.all([load(), loadHolds()])
+    await syncAllWatchDirs(false, true)
+    toast.success('已在后台开始全量对账')
+    startProgressPoll()
   } catch (err) {
     toast.error(err.message)
   } finally {
@@ -246,10 +293,16 @@ async function cancelHold(hold) {
   }
 }
 
-onMounted(() => {
+onMounted(async () => {
   load()
   loadHolds()
+  // 进来时可能正好有定时对账在跑（或上次离开页面时后台还没跑完），
+  // 先查一次，有在跑的就接着轮询
+  await loadProgress()
+  if (progress.value.some((p) => p.running)) startProgressPoll()
 })
+
+onUnmounted(stopProgressPoll)
 </script>
 
 <template>
@@ -295,10 +348,69 @@ onMounted(() => {
     >
       媒体库根目录不存在或不可读：{{ libraryPath }}。填了目标目录的规则不受影响。
     </p>
-    <p v-if="!watching" class="rounded-lg bg-gray-800/60 px-3 py-2 text-xs text-gray-400">
-      实时监听未运行，同步依赖每 30 分钟的定时对账。可能是未安装 watchdog、
-      没有启用的规则，或源目录不可读。
+    <p v-if="!autoSync" class="rounded-lg bg-amber-950/40 px-3 py-2 text-xs text-amber-300">
+      自动同步已关闭（WATCHDIR_AUTO_SYNC=false）。定时对账与实时监听都不会运行，
+      只有手动点「全部对账」或单条规则的「同步」才会执行。
     </p>
+    <p
+      v-else-if="!watching"
+      class="rounded-lg bg-gray-800/60 px-3 py-2 text-xs text-gray-400"
+    >
+      实时监听未运行，同步依赖定时对账（每 {{ syncInterval }} 分钟）。可能是未安装
+      watchdog、没有启用的规则，或源目录不可读。
+      NAS / Docker 绑定挂载上 inotify 事件常收不到，属正常现象 ——
+      需要立刻生效请点「全部对账」。
+    </p>
+
+    <!-- 同步进度。后台跑的时候这里实时显示到哪一步了 -->
+    <div v-if="progress.length" class="card space-y-2">
+      <div class="flex items-center gap-2">
+        <p class="text-xs font-medium text-gray-300">同步进度</p>
+        <span
+          v-if="runningProgress.length"
+          class="badge bg-emerald-950/60 text-emerald-400"
+        >
+          {{ runningProgress.length }} 条进行中
+        </span>
+      </div>
+
+      <div
+        v-for="p in progress"
+        :key="p.rule_id"
+        class="space-y-1 rounded-lg bg-gray-900/60 px-3 py-2"
+      >
+        <div class="flex flex-wrap items-center gap-2">
+          <span class="text-xs text-gray-300">{{ p.name }}</span>
+          <span
+            class="badge"
+            :class="p.running ? 'bg-emerald-950/60 text-emerald-400' : 'bg-gray-800 text-gray-500'"
+          >
+            {{ p.running ? phaseLabel(p) : '已完成' }}
+          </span>
+          <span v-if="p.total" class="text-[11px] text-gray-500">
+            {{ p.done }} / {{ p.total }}
+          </span>
+          <span class="ml-auto text-[11px] text-gray-600">
+            {{ p.finished_at || p.started_at }}
+          </span>
+        </div>
+
+        <!-- 进度条只在建链接阶段有意义，其余阶段没有可数的分母 -->
+        <div v-if="p.running && p.total" class="h-1 overflow-hidden rounded bg-gray-800">
+          <div
+            class="h-full bg-emerald-500 transition-all duration-300"
+            :style="{ width: `${progressPercent(p)}%` }"
+          />
+        </div>
+
+        <p v-if="p.current" class="truncate text-[11px] text-gray-500" :title="p.current">
+          正在处理：{{ p.current }}
+        </p>
+        <p v-if="p.message" class="truncate text-[11px] text-gray-600">
+          {{ p.message }}
+        </p>
+      </div>
+    </div>
 
     <!-- 工具条 -->
     <div class="flex flex-wrap items-center gap-2">
@@ -580,10 +692,30 @@ onMounted(() => {
           <div class="space-y-2 text-xs">
             <p class="text-gray-400">
               新建 {{ (syncResult.linked || []).length }} ·
+              认领 {{ (syncResult.claimed || []).length }} ·
               删除 {{ (syncResult.unlinked || []).length }} ·
               移动 {{ (syncResult.moved || []).length }} ·
               反向清理 {{ (syncResult.reverse_deleted || []).length }}
             </p>
+
+            <!-- 认领：目标目录里已经有指向同一份数据的硬链接（多为刮削工具建的），
+                 只补登记，不会新建文件，也不会产生重复 -->
+            <div v-if="(syncResult.claimed || []).length" class="space-y-1">
+              <p class="text-[11px] text-sky-400">
+                将认领已有硬链接（只登记，不新建文件）
+              </p>
+              <p
+                v-for="c in syncResult.claimed.slice(0, 8)"
+                :key="c.link_path"
+                class="truncate text-[11px] text-gray-500"
+                :title="`${c.source_path} → ${c.link_path}`"
+              >
+                {{ c.link_path }}
+              </p>
+              <p v-if="syncResult.claimed.length > 8" class="text-[11px] text-gray-600">
+                还有 {{ syncResult.claimed.length - 8 }} 条…
+              </p>
+            </div>
 
             <div v-if="(syncResult.linked || []).length" class="space-y-1">
               <p class="text-[11px] text-emerald-400">将建立硬链接</p>

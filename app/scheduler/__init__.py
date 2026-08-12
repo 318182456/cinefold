@@ -191,6 +191,10 @@ def sync_watch_dirs() -> int:
 
     返回处理的规则数。
     """
+    if not get_settings().watchdir_auto_sync:
+        logger.debug("[任务] 自动同步已关闭（WATCHDIR_AUTO_SYNC=false），跳过对账")
+        return 0
+
     from app.services.watchdir import backfill_torrents, sync_all
 
     results = sync_all()
@@ -299,8 +303,13 @@ INTERVAL_JOBS: dict[str, dict] = {
     "pt_wait": {"func": pt_wait, "name": "同步下载状态", "minutes": 5},
     "translate_titles": {"func": translate_titles, "name": "翻译标题", "minutes": 30},
     "cache_photos": {"func": cache_photos, "name": "缓存封面", "minutes": 20},
-    # watchdog 实时监听的兜底，间隔可以放宽 —— 正常情况下事件已经处理完了
-    "sync_watch_dirs": {"func": sync_watch_dirs, "name": "监控目录对账", "minutes": 30},
+    # watchdog 实时监听的兜底。NAS / Docker 绑定挂载上 inotify 事件经常收不到，
+    # 那种环境下这个兜底才是实际起作用的路径，所以间隔做成可配置
+    # （WATCHDIR_SYNC_INTERVAL），minutes 只是没配置时的默认值
+    "sync_watch_dirs": {
+        "func": sync_watch_dirs, "name": "监控目录对账", "minutes": 30,
+        "interval_key": "watchdir_sync_interval",
+    },
 }
 
 
@@ -374,10 +383,24 @@ def start_scheduler() -> BackgroundScheduler:
             logger.error(f"任务 {job_id} 的 cron 表达式非法 ({cron}): {exc}")
 
     for job_id, meta in INTERVAL_JOBS.items():
+        minutes = meta["minutes"]
+        # 配了 interval_key 的任务，间隔取设置里的值。非正数一律退回默认 ——
+        # 0 会让 APScheduler 疯狂触发，负数直接报错
+        key = meta.get("interval_key")
+        if key:
+            configured = getattr(settings, key, 0)
+            if isinstance(configured, int) and configured > 0:
+                minutes = configured
+            elif configured:
+                logger.warning(
+                    f"任务 {job_id} 的间隔配置非法（{key}={configured}），"
+                    f"退回默认 {minutes} 分钟"
+                )
+
         _scheduler.add_job(
             meta["func"],
             "interval",
-            minutes=meta["minutes"],
+            minutes=minutes,
             id=job_id,
             name=meta["name"],
             replace_existing=True,

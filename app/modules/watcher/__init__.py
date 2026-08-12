@@ -107,6 +107,12 @@ def start_watching() -> bool:
     if _observer is not None:
         return True
 
+    # 自动同步总开关关掉时，实时监听也不起 —— 否则文件一动就同步了，
+    # 「关掉自动同步」这个意图落不到实处
+    if not get_settings().watchdir_auto_sync:
+        logger.info("[监听] 自动同步已关闭（WATCHDIR_AUTO_SYNC=false），不启动监听")
+        return False
+
     handler_cls = _build_handler()
     if handler_cls is None:
         logger.warning(

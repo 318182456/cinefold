@@ -901,3 +901,146 @@ def test_sync_all_survives_one_bad_rule(rule, tmp_path):
     assert len(results) == 2
     assert (library / "sv" / "a.mp4").exists()
     assert any(r.errors for r in results)
+
+
+# ----------------------------------------------------------------------
+# 认领已有硬链接
+# ----------------------------------------------------------------------
+def test_claims_existing_hardlink_instead_of_duplicating(rule):
+    """目标目录里已有同 inode 的硬链接时，只登记，不再建一份。
+
+    刮削工具（MDCng 之类）早就把源文件链接进媒体库了，路径按它自己的规则
+    组织，与我们算出来的对不上。不认领就会重复建，媒体库里凭空多出一部
+    同样的片子。
+    """
+    rule_id, source_dir, library = rule
+    source = source_dir / "ofku-232.mp4"
+    source.write_bytes(b"DATA")
+
+    # 刮削工具建的链接：路径完全是它自己的命名规则
+    scraped = library / "sv" / "一条美绪" / "OFKU-232 一条美绪" / "OFKU-232-有码.mp4"
+    scraped.parent.mkdir(parents=True)
+    os.link(source, scraped)
+
+    result = watchdir.sync_rule(rule_id)
+
+    # 认领了那条，没有新建
+    assert len(result.claimed) == 1
+    assert result.claimed[0]["link_path"] == str(scraped)
+    assert result.linked == []
+
+    # 规则本来会算出这个路径，认领之后不该存在
+    assert not (library / "sv" / "ofku-232.mp4").exists()
+
+    # 记录指向真实存在的那个文件
+    links = _links()
+    assert list(links) == [str(scraped)]
+    assert links[str(scraped)] == "SV-ofku-232"
+
+
+def test_claim_is_idempotent(rule):
+    """认领过的链接，再对账一次不该重复处理。"""
+    rule_id, source_dir, library = rule
+    source = source_dir / "a.mp4"
+    source.write_bytes(b"A")
+    scraped = library / "sv" / "custom" / "renamed.mp4"
+    scraped.parent.mkdir(parents=True)
+    os.link(source, scraped)
+
+    watchdir.sync_rule(rule_id)
+    second = watchdir.sync_rule(rule_id)
+
+    # 第二轮无事可做：已登记且文件存在
+    assert second.claimed == []
+    assert second.linked == []
+    assert len(_links()) == 1
+
+
+def test_claim_skipped_when_no_existing_link(rule):
+    """目标目录里没有同 inode 的文件时，照常建链接。"""
+    rule_id, source_dir, library = rule
+    (source_dir / "a.mp4").write_bytes(b"A")
+
+    result = watchdir.sync_rule(rule_id)
+
+    assert result.claimed == []
+    assert result.linked == [str(library / "sv" / "a.mp4")]
+
+
+def test_claim_ignores_unrelated_file_with_same_name(rule):
+    """同名但不同 inode 的文件不算数 —— 那是另一份数据，不能认领。"""
+    rule_id, source_dir, library = rule
+    source = source_dir / "a.mp4"
+    source.write_bytes(b"A")
+
+    # 目标位置上有个同名文件，但内容是独立的（不是硬链接）
+    other = library / "sv" / "elsewhere" / "a.mp4"
+    other.parent.mkdir(parents=True)
+    other.write_bytes(b"DIFFERENT")
+
+    result = watchdir.sync_rule(rule_id)
+
+    # 没认领，正常建链接
+    assert result.claimed == []
+    assert result.linked == [str(library / "sv" / "a.mp4")]
+    # 那个无关文件原样保留
+    assert other.read_bytes() == b"DIFFERENT"
+
+
+def test_claim_dry_run_reports_without_writing(rule):
+    """演练只报告认领，不写库。"""
+    rule_id, source_dir, library = rule
+    source = source_dir / "a.mp4"
+    source.write_bytes(b"A")
+    scraped = library / "sv" / "custom" / "renamed.mp4"
+    scraped.parent.mkdir(parents=True)
+    os.link(source, scraped)
+
+    result = watchdir.sync_rule(rule_id, dry_run=True)
+
+    assert len(result.claimed) == 1
+    assert _links() == {}
+
+
+def test_claimed_link_deleted_in_library_triggers_reverse(rule):
+    """认领来的链接在媒体库侧被删掉，同样要触发反向删除。
+
+    认领的 link_path 由刮削工具决定，不等于规则算出的目标路径。反向删除的
+    判定不能只认后者，否则「在 Emby 里删掉刮削建的那份」永远不会联动。
+    """
+    rule_id, source_dir, library = rule
+    source = source_dir / "a.mp4"
+    source.write_bytes(b"A")
+    scraped = library / "sv" / "custom" / "renamed.mp4"
+    scraped.parent.mkdir(parents=True)
+    os.link(source, scraped)
+
+    watchdir.sync_rule(rule_id)
+    assert list(_links()) == [str(scraped)]
+
+    # 用户在媒体库里删掉了这个链接
+    scraped.unlink()
+
+    result = watchdir.sync_rule(rule_id)
+
+    # 源文件应该被反向删除
+    assert result.reverse_deleted, "认领的链接被删后没有触发反向删除"
+    assert not source.exists()
+    assert _links() == {}
+
+
+def test_claimed_link_not_rebuilt_after_library_delete(rule):
+    """媒体库侧删掉认领的链接后，不该又建一份出来。"""
+    rule_id, source_dir, library = rule
+    source = source_dir / "a.mp4"
+    source.write_bytes(b"A")
+    scraped = library / "sv" / "custom" / "renamed.mp4"
+    scraped.parent.mkdir(parents=True)
+    os.link(source, scraped)
+
+    watchdir.sync_rule(rule_id)
+    scraped.unlink()
+    watchdir.sync_rule(rule_id)
+
+    # 规则算出的那个路径也不该冒出来
+    assert not (library / "sv" / "a.mp4").exists()

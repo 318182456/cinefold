@@ -33,6 +33,7 @@ from sqlalchemy import select
 from app.core.config import get_settings
 from app.database.models import History, MediaLink, PendingDelete, WatchDir
 from app.database.session import session_scope
+from app.services import watchdir_progress as progress
 from app.services.medialink import VIDEO_SUFFIXES, handle_media_deleted
 
 # 文件刚出现时可能还在写入（下载中、拷贝中）。连续两次 stat 大小不变才认为
@@ -56,6 +57,9 @@ class SyncResult:
     dry_run: bool = False
     linked: list[str] = field(default_factory=list)
     unlinked: list[str] = field(default_factory=list)
+    # 认领的已有硬链接：目标目录里本来就存在（多为刮削工具建的），
+    # 只补登记，没有新建文件。[{link_path, source_path}]
+    claimed: list[dict] = field(default_factory=list)
     # 判定为移动/改名的，只改了记录路径，没动文件。[{from, to}]
     moved: list[dict] = field(default_factory=list)
     # 扣留观察中的（消失了但宽限期未满）。[{link_path, source_path, waited_seconds}]
@@ -72,6 +76,7 @@ class SyncResult:
             "dry_run": self.dry_run,
             "linked": self.linked,
             "unlinked": self.unlinked,
+            "claimed": self.claimed,
             "moved": self.moved,
             "held": self.held,
             "reverse_deleted": self.reverse_deleted,
@@ -337,6 +342,13 @@ def sync_rule(rule_id: int, dry_run: bool = False) -> SyncResult:
         _record_error(rule_id, msg)
         return result
 
+    # 演练不上报进度：它不做 _wait_stable，跑得很快，而且不该把真实同步的
+    # 进度覆盖掉 —— 用户点演练时后台可能正跑着定时对账
+    track = not dry_run
+    if track:
+        progress.start(rule_id, rule.name or rule.source_dir, 0)
+        progress.update(rule_id, phase="scanning", message="正在扫描源目录…")
+
     videos = _scan_videos(source_root, rule.recursive)
     linked_records = _existing_links(rule, base)
 
@@ -363,26 +375,74 @@ def sync_rule(rule_id: int, dry_run: bool = False) -> SyncResult:
 
     # 「媒体库侧被删」必须在建链接之前判定：有记录、源文件还在、链接却没了，
     # 只可能是媒体库那侧被删掉的。等到建完链接再看就分辨不出来了 ——
-    # 那时链接又存在，跟从没删过一样，反向删除永远不会触发
+    # 那时链接又存在，跟从没删过一样，反向删除永远不会触发。
+    #
+    # 按记录遍历而不是按 expected：认领来的链接，其 link_path 由刮削工具决定，
+    # 不等于规则算出的目标路径，在 expected 里根本找不到。只认 expected 的话，
+    # 「在 Emby 里删掉刮削建的那份」不但不联动，下一轮还会按规则路径重建一份
+    scanned_sources = {str(s) for s in expected.values()}
     media_deleted = {
-        target_str for target_str in expected
-        if target_str in linked_records and not Path(target_str).exists()
+        link_path for link_path, record in linked_records.items()
+        if record.source_path in scanned_sources
+        and not Path(link_path).exists()
+    }
+
+    # 链接已被删的那些源文件，本轮不能再为它们建链接 —— 那是在跟用户的删除
+    # 操作对着干，而且下一轮又会被删掉，来回拉锯
+    deleted_sources = {
+        linked_records[p].source_path for p in media_deleted
+        if p in linked_records
+    }
+
+    # 已经登记且链接还在的源文件，既不必建也不必认领。
+    # 按源文件而不是按目标路径判断：认领的 link_path 与规则算出来的对不上，
+    # 只看目标路径的话每轮都会重扫一遍目标目录，大库上就是每轮几分钟白跑
+    settled_sources = {
+        r.source_path for r in linked_records.values()
+        if r.source_path and Path(r.link_path).exists()
     }
 
     # --- 1) 源有、库无：建链接 ---
-    for target_str, source in expected.items():
-        target = Path(target_str)
-        if target_str in linked_records and target.exists():
-            continue  # 已建且记录在，无事可做
+    # 只统计真正要处理的，已建好的不算进度分母 —— 否则一个几千文件的目录
+    # 每轮都显示「0/5000」跑到「5000/5000」，看不出实际有几个新文件
+    todo = [
+        (t, s) for t, s in expected.items()
+        if str(s) not in settled_sources
+        and str(s) not in deleted_sources
+    ]
 
-        # 媒体库侧删掉的不能重建 —— 那是用户在 Emby 里删的，重建等于抗命，
-        # 而且下一轮又会被删，来回拉锯。交给第 3 步处理
-        if target_str in media_deleted:
-            continue
+    # 建之前先认领：目标目录里可能已经有指向同一份数据的硬链接了（刮削工具
+    # 建的，路径按它的规则组织，与我们算出来的对不上）。不认领就会重复建，
+    # 媒体库里凭空多出一部同样的片子。
+    # 只在确实有待建链接时才扫 —— 全量 rglob 在大库上是分钟级的
+    if todo:
+        if track:
+            progress.update(
+                rule_id, phase="claiming",
+                message="正在核对目标目录中已有的硬链接…",
+            )
+        claimed = _claim_existing(rule, todo, base, result, dry_run)
+        if claimed:
+            todo = [(t, s) for t, s in todo if t not in claimed]
+
+    if track:
+        progress.update(
+            rule_id, phase="linking", total=len(todo), done=0,
+            message=f"共 {len(videos)} 个文件，{len(todo)} 个待建链接",
+        )
+
+    for index, (target_str, source) in enumerate(todo, start=1):
+        target = Path(target_str)
 
         if dry_run:
             result.linked.append(target_str)
             continue
+
+        if track:
+            progress.update(
+                rule_id, done=index - 1, current=source.name,
+                message="等待文件写入完成…",
+            )
 
         if not _wait_stable(source):
             result.skipped.append(f"文件仍在写入，本轮跳过: {source}")
@@ -399,11 +459,27 @@ def sync_rule(rule_id: int, dry_run: bool = False) -> SyncResult:
         # 种子信息趁现在存下来 —— 删除时下载器里可能已经没有这个种子了
         _record_torrents(code, str(source))
         result.linked.append(target_str)
+        if track:
+            progress.update(rule_id, done=index, linked=len(result.linked))
         logger.info(f"[{code}] 已建硬链接 {source} → {target}")
 
+    if track:
+        progress.update(
+            rule_id, phase="checking", current="",
+            message="正在核对已删除的文件…",
+        )
+
     # --- 2) 源无、库有：可能是移动，可能是真删除 ---
+    # 认领来的链接，其 link_path 是刮削工具定的，不等于规则算出的目标路径，
+    # 所以不能只看 target_str 在不在 expected 里 —— 那样每轮都会把它们判成
+    # 「不在监控范围」并刷一条无意义的跳过。按源文件判断才准
+    scanned_sources = {str(s) for s in expected.values()}
+
     for target_str, record in linked_records.items():
         if target_str in expected:
+            continue
+        # 源文件仍在本轮扫描结果里，说明这条关联好好的（认领的链接走这条）
+        if record.source_path in scanned_sources and Path(target_str).exists():
             continue
 
         source_gone = not Path(record.source_path).exists()
@@ -513,10 +589,22 @@ def sync_rule(rule_id: int, dry_run: bool = False) -> SyncResult:
         # 否则表会越积越多，且下次可能按过期的信息误删
         _prune_holds(rule_id, linked_records.keys())
 
+    if track:
+        progress.update(
+            rule_id, linked=len(result.linked), unlinked=len(result.unlinked)
+        )
+        progress.finish(
+            rule_id,
+            f"新建 {len(result.linked)}，认领 {len(result.claimed)}，"
+            f"删除 {len(result.unlinked)}，移动 {len(result.moved)}，"
+            f"扣留 {len(result.held)}",
+        )
+
     logger.info(
         f"[监控目录 {rule.name or rule.source_dir}] 同步完成"
         f"{'（演练）' if dry_run else ''} —— "
-        f"新建 {len(result.linked)}，删除 {len(result.unlinked)}，"
+        f"新建 {len(result.linked)}，认领 {len(result.claimed)}，"
+        f"删除 {len(result.unlinked)}，"
         f"移动 {len(result.moved)}，扣留 {len(result.held)}，"
         f"反向清理 {len(result.reverse_deleted)}，"
         f"跳过 {len(result.skipped)}，错误 {len(result.errors)}"
@@ -551,6 +639,97 @@ def _match_moved(
     if str(hit) == record.source_path:
         return None  # 路径没变，不是移动
     return hit
+
+
+def _library_inode_index(base: Path) -> dict[tuple[int, int], Path]:
+    """扫目标目录，建 (inode, device) → 文件路径 的索引。
+
+    用来认领「已经存在但没登记」的硬链接。典型场景：刮削工具（MDCng 之类）
+    早就把源文件链接进媒体库了，路径按它自己的规则组织 ——
+
+        源文件  /downloads/日本AV/ofku-232/ofku-232.mp4
+        刮削链接 /media/日本AV/一条美绪/OFKU-232 一条美绪/OFKU-232-有码.mp4
+
+    而规则按源目录结构算出来的目标是 /media/日本AV/ofku-232/ofku-232.mp4，
+    两者对不上。不认领的话规则会再建一份，同一个 inode 出现两个路径、
+    两条记录 —— 媒体库里凭空多出一部重复的片子。
+
+    认 inode 而不认文件名：硬链接共享 inode 是文件系统的保证，刮削工具怎么
+    重命名都不影响。文件名匹配则完全依赖对方的命名规则，改一次就失准。
+
+    整个目标目录扫一遍，大库上不便宜，所以只在确实有待建链接时才调用。
+    """
+    index: dict[tuple[int, int], Path] = {}
+    try:
+        for path in base.rglob("*"):
+            try:
+                if path.suffix.lower() not in VIDEO_SUFFIXES or not path.is_file():
+                    continue
+                st = path.stat()
+            except OSError:
+                continue
+            if not st.st_ino:
+                continue
+            key = (st.st_ino, st.st_dev)
+            # 同一 inode 有多个链接时保留第一个 —— 认领只需要一个代表
+            index.setdefault(key, path)
+    except OSError as exc:
+        logger.warning(f"扫描目标目录建立 inode 索引失败 {base}: {exc}")
+    return index
+
+
+def _claim_existing(
+    rule: WatchDir, todo: list[tuple[str, Path]], base: Path,
+    result: SyncResult, dry_run: bool,
+) -> set[str]:
+    """认领目标目录里已经存在的硬链接，返回被认领的目标路径集合。
+
+    「已存在」指目标目录下有文件与源文件同 inode —— 那就是同一份数据，
+    只是路径不是我们算出来的那个。这种链接多半是刮削工具建的，本来就该
+    归入管理，而不是再建一份重复的。
+
+    认领只写 media_link 记录，不动任何文件。登记的 link_path 是那个已有的
+    路径（刮削建的），不是规则算出来的路径 —— 记录必须指向磁盘上真实存在的
+    那个文件，否则后续的存在性检查、反向删除全会错位。
+
+    返回的集合从 todo 里剔除，这些不再走建链接流程。
+    """
+    index = _library_inode_index(base)
+    if not index:
+        return set()
+
+    claimed: set[str] = set()
+    for target_str, source in todo:
+        try:
+            st = source.stat()
+        except OSError:
+            continue
+        if not st.st_ino:
+            continue  # Windows 上取不到 inode，认领无从谈起
+
+        hit = index.get((st.st_ino, st.st_dev))
+        if hit is None:
+            continue
+
+        link_path = str(hit)
+        code = make_code(rule, source)
+        claimed.add(target_str)
+        result.claimed.append({
+            "link_path": link_path,
+            "source_path": str(source),
+        })
+
+        if dry_run:
+            continue
+
+        _register(code, str(source), link_path)
+        # 认领的链接同样要记种子 —— 反向删除时才有据可依
+        _record_torrents(code, str(source))
+        logger.info(
+            f"[{code}] 认领已有硬链接（未新建）: {source} → {link_path}"
+        )
+
+    return claimed
 
 
 def _find_in_library(record: MediaLink, base: Path) -> Path | None:
@@ -934,6 +1113,8 @@ def sync_all(dry_run: bool = False) -> list[SyncResult]:
         except Exception as exc:
             # 单条规则出错不该影响其余规则
             logger.exception(f"[任务] 监控目录 {rule_id} 同步异常: {exc}")
+            # 进度还停在 running 上，收个尾，否则页面会一直显示"同步中"
+            progress.finish(rule_id, f"同步异常: {exc}")
             failed = SyncResult(watch_id=rule_id, dry_run=dry_run)
             failed.errors.append(str(exc))
             results.append(failed)

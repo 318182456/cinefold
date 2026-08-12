@@ -67,6 +67,15 @@ def save_config(body: ConfigRequest, current_user: str = Depends(get_current_use
     from app.modules.auth.oidc import reset_discovery_cache
     reset_discovery_cache()
 
+    # 自动同步开关或媒体库路径可能改了，重建目录监听。
+    # 关掉开关时 start_watching 会自行跳过，这里不必分情况处理
+    try:
+        from app.modules.watcher import restart_watching
+        restart_watching()
+    except Exception as exc:
+        from loguru import logger
+        logger.warning(f"重建目录监听失败: {exc}")
+
     return ResponseEntity.ok(message=f"已更新 {len(updates)} 项配置")
 
 

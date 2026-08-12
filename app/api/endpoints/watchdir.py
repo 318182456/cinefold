@@ -51,6 +51,30 @@ class WatchDirUpdate(BaseModel):
     code_prefix: str | None = None
 
 
+def _sync_in_background(rule_id: int, dry_run: bool = False) -> bool:
+    """后台跑一次同步。返回是否真的启动了（已在跑则不重复启动）。
+
+    同步对每个新文件都要等它写入稳定（最多 6 秒），目录大时同步执行必然把
+    HTTP 请求拖到超时。进度走 /watchdirs/progress。
+    """
+    import threading
+
+    from app.services import watchdir_progress
+
+    if watchdir_progress.is_running(rule_id):
+        return False
+
+    def run() -> None:
+        try:
+            sync_rule(rule_id, dry_run=dry_run)
+        except Exception as exc:
+            logger.exception(f"后台同步规则 {rule_id} 异常: {exc}")
+            watchdir_progress.finish(rule_id, f"同步异常: {exc}")
+
+    threading.Thread(target=run, daemon=True).start()
+    return True
+
+
 def _reload_watcher() -> None:
     """规则变更后重建监听。失败不影响接口返回 —— 定时对账仍会工作。"""
     try:
@@ -121,6 +145,9 @@ def list_watchdirs(current_user: str = Depends(get_current_user)):
         "library_exists": bool(library) and Path(library).is_dir(),
         "delete_enabled": settings.medialink_delete_enabled,
         "watching": is_watching(),
+        # 页面据此说明「没有实时监听时多久才会对账一次」
+        "auto_sync": settings.watchdir_auto_sync,
+        "sync_interval": settings.watchdir_sync_interval,
     })
 
 
@@ -156,7 +183,7 @@ def create_watchdir(
         if existing is not None:
             return ResponseEntity.fail("该源目录已配置", code=400)
 
-        session.add(WatchDir(
+        row = WatchDir(
             source_dir=source_dir,
             target_dir=target_dir,
             target_subdir=target_subdir,
@@ -165,23 +192,77 @@ def create_watchdir(
             recursive=body.recursive,
             reverse_delete=body.reverse_delete,
             code_prefix=(body.code_prefix or "").strip(),
-        ))
+        )
+        session.add(row)
+        session.flush()  # 拿到自增 id，下面要用
+        new_id = row.id
 
     _reload_watcher()
-    return ResponseEntity.ok(message="已添加监控目录")
+
+    # 立刻跑一次同步，别让用户干等下一轮定时对账（默认 30 分钟）——
+    # 新建规则后什么都不发生，看起来就像配置没生效。
+    # 放后台线程：目录大时同步执行会把这个请求拖到超时
+    if body.enabled:
+        _sync_in_background(new_id)
+
+    return ResponseEntity.ok(
+        {"id": new_id},
+        message="已添加监控目录，正在后台首次同步" if body.enabled else "已添加监控目录",
+    )
 
 
 # 固定路径的路由必须声明在 /{rule_id} 之前 —— FastAPI 按声明顺序匹配，
 # 否则 /watchdirs/holds 会先命中 /{rule_id} 并因 int 解析失败返回 422
 @router.post("/sync")
 def sync_every(
-    dry_run: bool = True, current_user: str = Depends(get_current_user)
+    dry_run: bool = True,
+    background: bool = False,
+    current_user: str = Depends(get_current_user),
 ):
-    """同步全部启用的规则。"""
+    """同步全部启用的规则。
+
+    background=true 时丢到后台线程，立刻返回，页面靠 /progress 看进度 ——
+    真实同步对每个新文件都要等它写完（最多 6 秒），文件一多 HTTP 必然超时。
+    演练很快，默认仍然同步返回，让页面能直接拿到结果。
+    """
+    if background:
+        import threading
+
+        def run() -> None:
+            try:
+                sync_all(dry_run=dry_run)
+            except Exception as exc:
+                logger.exception(f"后台全量同步异常: {exc}")
+
+        threading.Thread(target=run, daemon=True).start()
+        return ResponseEntity.ok(
+            {"results": [], "count": 0, "background": True},
+            message="已在后台开始同步，可在页面查看进度",
+        )
+
     results = sync_all(dry_run=dry_run)
     return ResponseEntity.ok({
         "results": [r.as_dict() for r in results],
         "count": len(results),
+        "background": False,
+    })
+
+
+@router.get("/progress")
+def sync_progress(
+    watch_id: int = 0, current_user: str = Depends(get_current_user)
+):
+    """同步进度。页面在同步期间轮询这个接口。
+
+    进度只存内存，重启后清空 —— 它本来就是瞬时状态。跑完的记录会保留，
+    页面据此显示上一轮的结果摘要。
+    """
+    from app.services import watchdir_progress
+
+    items = watchdir_progress.snapshot(watch_id)
+    return ResponseEntity.ok({
+        "items": items,
+        "running": any(i["running"] for i in items),
     })
 
 
@@ -321,14 +402,25 @@ def delete_watchdir(
 
 @router.post("/{rule_id}/sync")
 def sync_one(
-    rule_id: int, dry_run: bool = True,
+    rule_id: int, dry_run: bool = True, background: bool = False,
     current_user: str = Depends(get_current_user),
 ):
-    """手动同步一条规则。dry_run 默认为真，只报会做什么。"""
+    """手动同步一条规则。dry_run 默认为真，只报会做什么。
+
+    background=true 时后台执行并立刻返回，进度走 /progress —— 真实同步
+    对每个新文件要等它写完，文件多时会把 HTTP 拖到超时。
+    """
     if rule_id == 0:
         return ResponseEntity.fail(
             "刮削输出目录由刮削工具与 webhook 联动维护，没有可同步的监控规则",
             code=400,
+        )
+
+    if background:
+        if not _sync_in_background(rule_id, dry_run=dry_run):
+            return ResponseEntity.fail("该规则正在同步中，请等待完成", code=409)
+        return ResponseEntity.ok(
+            {"background": True}, message="已在后台开始同步"
         )
 
     result = sync_rule(rule_id, dry_run=dry_run)

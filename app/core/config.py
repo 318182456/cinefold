@@ -128,6 +128,13 @@ class Settings:
     # 移动而非删除，只改记录不动文件。也能挡住网络存储瞬时不可达导致的误删。
     # 默认 30 分钟；设为 0 则发现即删
     watchdir_delete_grace: int = 1800
+    # 自动同步总开关。关掉后定时对账与实时监听都不跑，只能手动点同步。
+    # 想先观察一段时间再让它自动动手时关掉
+    watchdir_auto_sync: bool = True
+    # 定时全量对账的间隔（分钟）。NAS / Docker 绑定挂载上 inotify 事件常丢，
+    # 这个兜底才是实际起作用的那条路径，间隔短一点响应更快。
+    # 每轮要扫源目录并逐条比对，目录很大时别设太小
+    watchdir_sync_interval: int = 30
 
     # --- 下载器 ---
     qbittorrent_url: str = ""
@@ -357,6 +364,8 @@ def load_settings() -> Settings:
         medialink_webhook_token=_env("MEDIALINK_WEBHOOK_TOKEN"),
 
         watchdir_delete_grace=_env_int("WATCHDIR_DELETE_GRACE", 1800),
+        watchdir_auto_sync=_env_bool("WATCHDIR_AUTO_SYNC", True),
+        watchdir_sync_interval=_env_int("WATCHDIR_SYNC_INTERVAL", 30),
 
         qbittorrent_url=_env("QBITTORRENT_URL"),
         qbittorrent_username=_env("QBITTORRENT_USERNAME"),

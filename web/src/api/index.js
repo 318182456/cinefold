@@ -108,10 +108,17 @@ export const createWatchDir = (payload) => http.post('/watchdirs', payload)
 export const updateWatchDir = (id, payload) => http.put(`/watchdirs/${id}`, payload)
 export const deleteWatchDir = (id) => http.delete(`/watchdirs/${id}`)
 // dry_run 默认为真，只报会做什么
-export const syncWatchDir = (id, dryRun = true) =>
-  http.post(`/watchdirs/${id}/sync`, null, { params: { dry_run: dryRun } })
-export const syncAllWatchDirs = (dryRun = true) =>
-  http.post('/watchdirs/sync', null, { params: { dry_run: dryRun } })
+// background=true 时后台执行，立刻返回，进度走 getWatchDirProgress
+export const syncWatchDir = (id, dryRun = true, background = false) =>
+  http.post(`/watchdirs/${id}/sync`, null, {
+    params: { dry_run: dryRun, background },
+  })
+export const syncAllWatchDirs = (dryRun = true, background = false) =>
+  http.post('/watchdirs/sync', null, {
+    params: { dry_run: dryRun, background },
+  })
+export const getWatchDirProgress = (watchId = 0) =>
+  http.get('/watchdirs/progress', { params: { watch_id: watchId } })
 // 给还没登记种子的关联补查下载器
 export const backfillWatchDirTorrents = (watchId = 0) =>
   http.post('/watchdirs/backfill', null, { params: { watch_id: watchId } })
