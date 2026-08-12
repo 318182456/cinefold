@@ -230,3 +230,153 @@ class TestSiteClientFallback:
 
         assert client.get("/search") == ""
         assert called["bypass"] is False
+
+    def test_quick_mode_uses_shorter_timeout(self, monkeypatch):
+        """连通性测试有人在页面上等，且过盾请求串行，不能用 90s。"""
+        from app.core import config as config_module
+        from app.modules.ladysite import base
+
+        settings = config_module.get_settings()
+        monkeypatch.setattr(settings, "bypass_url", "http://127.0.0.1:8191/v1")
+        captured = {}
+
+        def fake_post(self, url, **kwargs):
+            captured["max_timeout"] = kwargs["json"]["maxTimeout"]
+            return httpx.Response(
+                200, json={"status": "ok", "solution": {"response": "x"}},
+                request=httpx.Request("POST", url),
+            )
+
+        monkeypatch.setattr(httpx.Client, "post", fake_post)
+        base.fetch_via_bypass("https://javdb.com", quick=True)
+        # 要留在前端 60s 超时以内
+        assert captured["max_timeout"] < 60000
+
+
+class TestCheckSource:
+    """测试按钮必须和抓取链路走同一条路，否则报的"不通"是假的。"""
+
+    @pytest.fixture(autouse=True)
+    def _no_db_write(self, monkeypatch):
+        """check_source 末尾要写库，测试里不关心，直接短路。"""
+        import contextlib
+
+        from app.modules.ladysite import sources
+
+        @contextlib.contextmanager
+        def fake_scope():
+            class _Session:
+                def scalar(self, *a, **kw):
+                    return None
+            yield _Session()
+
+        monkeypatch.setattr(sources, "session_scope", fake_scope)
+
+    def test_bypass_first_source_skips_direct(self, monkeypatch):
+        """javlibrary 这类站直连必 403，配了过盾就该直接走过盾。"""
+        from app.core import config as config_module
+        from app.modules.ladysite import base, sources
+
+        settings = config_module.get_settings()
+        monkeypatch.setattr(settings, "bypass_url", "http://127.0.0.1:8191/v1")
+        monkeypatch.setattr(sources, "get_source", lambda key: {
+            "key": key, "host": "https://www.javlibrary.com/cn",
+            "enabled": True, "bypass_first": True,
+        })
+
+        def no_direct(self, url, **kwargs):
+            raise AssertionError("bypass_first 的源不该直连")
+
+        monkeypatch.setattr(httpx.Client, "get", no_direct)
+        monkeypatch.setattr(base, "fetch_via_bypass",
+                            lambda url, params=None, timeout=60.0, quick=False: "<html>real</html>")
+
+        result = sources.check_source("javlibrary")
+        assert result["status"] == "ok"
+
+    def test_direct_403_retries_via_bypass(self, monkeypatch):
+        """直连被拦时抓取链路会改走过盾，测试也要跟上。"""
+        from app.core import config as config_module
+        from app.modules.ladysite import base, sources
+
+        settings = config_module.get_settings()
+        monkeypatch.setattr(settings, "bypass_url", "http://127.0.0.1:8191/v1")
+        monkeypatch.setattr(sources, "get_source", lambda key: {
+            "key": key, "host": "https://javdb.com",
+            "enabled": True, "bypass_first": False,
+        })
+        monkeypatch.setattr(httpx.Client, "get", lambda self, url, **kw: httpx.Response(
+            403, text="denied", request=httpx.Request("GET", url)))
+        monkeypatch.setattr(base, "fetch_via_bypass",
+                            lambda url, params=None, timeout=60.0, quick=False: "<html>real</html>")
+
+        result = sources.check_source("javdb")
+        assert result["status"] == "ok"
+
+    def test_no_bypass_configured_says_so(self, monkeypatch):
+        """没配过盾服务时才该提示去配，不能反过来污蔑服务没运行。"""
+        from app.core import config as config_module
+        from app.modules.ladysite import sources
+
+        settings = config_module.get_settings()
+        monkeypatch.setattr(settings, "bypass_url", "")
+        monkeypatch.setattr(sources, "get_source", lambda key: {
+            "key": key, "host": "https://www.javlibrary.com/cn",
+            "enabled": True, "bypass_first": True,
+        })
+        monkeypatch.setattr(httpx.Client, "get", lambda self, url, **kw: httpx.Response(
+            403, text="denied", request=httpx.Request("GET", url)))
+
+        result = sources.check_source("javlibrary")
+        assert result["status"] == "blocked"
+        assert "需配置反爬绕过服务" in result["message"]
+
+    def test_bypass_returning_verify_page_is_blocked(self, monkeypatch):
+        """过盾服务可能拿回 200 的校验页，那不算通。"""
+        from app.core import config as config_module
+        from app.modules.ladysite import base, sources
+
+        settings = config_module.get_settings()
+        monkeypatch.setattr(settings, "bypass_url", "http://127.0.0.1:8191/v1")
+        monkeypatch.setattr(sources, "get_source", lambda key: {
+            "key": key, "host": "https://missav123.com",
+            "enabled": True, "bypass_first": True,
+        })
+        monkeypatch.setattr(
+            base, "fetch_via_bypass",
+            lambda url, params=None, timeout=60.0, quick=False: "<html>age-check</html>")
+
+        assert sources.check_source("missav")["status"] == "blocked"
+
+    def test_javbus_probes_detail_page(self, monkeypatch):
+        """javbus 首页固定跳 driver-verify，测首页等于永远不可用。"""
+        from app.modules.ladysite import sources
+
+        captured = {}
+
+        def fake_get(self, url, **kwargs):
+            captured["url"] = url
+            return httpx.Response(200, text="ok", request=httpx.Request("GET", url))
+
+        monkeypatch.setattr(sources, "get_source", lambda key: {
+            "key": key, "host": "https://www.javbus.com",
+            "enabled": True, "bypass_first": False,
+        })
+        monkeypatch.setattr(httpx.Client, "get", fake_get)
+
+        result = sources.check_source("javbus")
+        assert result["status"] == "ok"
+        assert captured["url"] != "https://www.javbus.com"
+
+    def test_detail_probe_not_reported_as_redirect(self, monkeypatch):
+        """探针路径不能被当成"跳转"，那是正常落地。"""
+        from app.modules.ladysite import sources
+
+        monkeypatch.setattr(sources, "get_source", lambda key: {
+            "key": key, "host": "https://www.javbus.com",
+            "enabled": True, "bypass_first": False,
+        })
+        monkeypatch.setattr(httpx.Client, "get", lambda self, url, **kw: httpx.Response(
+            200, text="ok", request=httpx.Request("GET", url)))
+
+        assert sources.check_source("javbus")["message"] == ""

@@ -22,6 +22,10 @@ _BYPASS_KIND: dict[str, bool] = {}
 # 解 Cloudflare 挑战要跑一个真实浏览器，给足时间（毫秒）
 BYPASS_SOLVE_TIMEOUT_MS = 90000
 
+# 连通性测试用的较短上限。测试是人在页面上等结果，且 _BYPASS_LOCK 会让
+# 多个源串行，沿用 90s 会直接顶穿前端 60s 超时。
+BYPASS_CHECK_TIMEOUT_MS = 20000
+
 # 连接类异常（SSL EOF、连接重置）的额外重试次数
 CONNECT_RETRIES = 1
 
@@ -229,7 +233,12 @@ class SiteClient:
         return ""
 
 
-def fetch_via_bypass(url: str, params: dict | None = None, timeout: float = 60.0) -> str:
+def fetch_via_bypass(
+    url: str,
+    params: dict | None = None,
+    timeout: float = 60.0,
+    quick: bool = False,
+) -> str:
     """通过用户自建的 bypass 服务抓取页面。
 
     兼容两类常见服务：
@@ -237,6 +246,7 @@ def fetch_via_bypass(url: str, params: dict | None = None, timeout: float = 60.0
     - cloudflare-bypass-for-scraping：GET /html?url=...
 
     通过 BYPASS_URL 配置服务地址；未配置时直接返回空串。
+    quick=True 用更短的过盾上限，供连通性测试这类有人在等的场景。
     """
     settings = get_settings()
     base = (settings.bypass_url or "").rstrip("/")
@@ -251,8 +261,8 @@ def fetch_via_bypass(url: str, params: dict | None = None, timeout: float = 60.0
 
     # 过盾需要启动浏览器并等待挑战完成，耗时远超普通请求，
     # 因此不沿用调用方的直连超时，改用独立的宽松上限。
-    solver_timeout = BYPASS_SOLVE_TIMEOUT_MS
-    client_timeout = BYPASS_SOLVE_TIMEOUT_MS / 1000 + 30
+    solver_timeout = BYPASS_CHECK_TIMEOUT_MS if quick else BYPASS_SOLVE_TIMEOUT_MS
+    client_timeout = solver_timeout / 1000 + 30
 
     try:
         with _BYPASS_LOCK, httpx.Client(

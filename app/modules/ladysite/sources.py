@@ -71,6 +71,16 @@ PARSERS: dict[str, str] = {
 # 没有可用数据源；停用可以，删除不行
 PROTECTED: frozenset[str] = frozenset({"javbus", "javdb", "javlibrary"})
 
+# 落到这些路径说明还停在前置校验页，没真正进站。
+# 过盾服务也可能返回 200 + 校验页（javbus 就是这样），因此直连与
+# 过盾两条路径都要查。
+VERIFY_MARKS: tuple[str, ...] = ("age_check", "age-check", "driver-verify")
+
+# 首页挂了前置校验、但内容页正常的源：测首页会误报不可用。
+# javbus 首页固定跳 /doc/driver-verify（过盾也一样），而详情页可直接抓，
+# 所以拿一个真实番号页当探针。
+CHECK_PATH: dict[str, str] = {"javbus": "/SSIS-001"}
+
 
 def is_builtin(key: str) -> bool:
     """是不是内置源。不在清单里的都是用户自己加的。"""
@@ -181,14 +191,77 @@ def get_source(key: str) -> dict | None:
     return {**item, "enabled": True, "cookie": "", "interval": item.get("interval", 0.0)}
 
 
+def _check_direct(url: str, timeout: float) -> tuple[str, str]:
+    """直连测一个地址，返回 (status, message)。"""
+    import httpx
+
+    from app.core.config import get_settings
+
+    settings = get_settings()
+    try:
+        with httpx.Client(
+            timeout=timeout,
+            follow_redirects=True,
+            proxy=settings.proxy or None,
+            verify=False,
+        ) as client:
+            response = client.get(url, headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/120.0.0.0 Safari/537.36"
+                ),
+            })
+    except httpx.TimeoutException:
+        return "fail", f"连接超时（{timeout:.0f}s）"
+    except Exception as exc:
+        return "fail", f"{type(exc).__name__}: {exc}"[:200]
+
+    code = response.status_code
+    if code in (403, 503):
+        return "blocked", f"HTTP {code}，被反爬拦截"
+    if code >= 400:
+        return "fail", f"HTTP {code}"
+
+    final = str(response.url)
+    if any(mark in final for mark in VERIFY_MARKS):
+        return "blocked", f"跳转到前置校验页：{final[:80]}"
+    if final.rstrip("/") != url.rstrip("/"):
+        return "ok", f"跳转到 {final[:80]}"
+    return "ok", ""
+
+
+def _check_via_bypass(url: str) -> tuple[str, str]:
+    """走过盾服务测一个地址，返回 (status, message)。
+
+    抓取链路对 bypass_first 的站就是这么取页面的，测试必须走同一条路，
+    否则页面上报的"不通"跟实际抓取能力对不上。
+    """
+    from app.modules.ladysite.base import fetch_via_bypass
+
+    try:
+        html = fetch_via_bypass(url, quick=True)
+    except Exception as exc:
+        return "fail", f"绕过服务异常：{type(exc).__name__}: {exc}"[:200]
+
+    if not html:
+        return "blocked", "绕过服务未返回内容，可能未运行或过盾失败"
+    # 过盾服务可能拿回 200 的校验页，内容里仍是人机验证
+    if any(mark in html for mark in VERIFY_MARKS):
+        return "blocked", "绕过服务返回前置校验页，未真正进站"
+    return "ok", "经绕过服务连通"
+
+
 def check_source(key: str, timeout: float = 12.0) -> dict:
     """测一个源的连通性，结果写回库供页面展示。
+
+    与抓取链路保持一致（见 base.SiteClient.get）：bypass_first 的站直接走
+    过盾服务，其余站直连；直连被拦时若配了过盾服务则再复测一次。
+    否则这些站测试永远显示被拦，而实际抓取是通的。
 
     区分"通"与"被盾拦"：Cloudflare 挑战页也是能连上的，
     只报连通会让用户以为可以抓，实际一条都拿不到。
     """
-    import httpx
-
     from app.core.config import get_settings
     from app.database.models import DataSource
     from datetime import datetime
@@ -201,44 +274,25 @@ def check_source(key: str, timeout: float = 12.0) -> dict:
     if not host:
         return {"key": key, "status": "fail", "message": "未配置地址"}
 
-    settings = get_settings()
-    status, message = "ok", ""
-    try:
-        with httpx.Client(
-            timeout=timeout,
-            follow_redirects=True,
-            proxy=settings.proxy or None,
-            verify=False,
-        ) as client:
-            response = client.get(host, headers={
-                "User-Agent": (
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/120.0.0.0 Safari/537.36"
-                ),
-            })
-        code = response.status_code
-        if code in (403, 503):
-            status = "blocked"
-            message = (
-                f"HTTP {code}，被反爬拦截。"
-                + ("需配置反爬绕过服务" if not settings.bypass_url else "绕过服务可能未运行")
-            )
-        elif code >= 400:
-            status = "fail"
-            message = f"HTTP {code}"
-        else:
-            final = str(response.url)
-            # 落到年龄确认/人机校验页说明还没真正进站
-            if any(mark in final for mark in ("age_check", "age-check", "driver-verify")):
-                status = "blocked"
-                message = f"跳转到前置校验页：{final[:80]}"
-            elif final.rstrip("/") != host:
-                message = f"跳转到 {final[:80]}"
-    except httpx.TimeoutException:
-        status, message = "fail", f"连接超时（{timeout:.0f}s）"
-    except Exception as exc:
-        status, message = "fail", f"{type(exc).__name__}: {exc}"[:200]
+    has_bypass = bool(get_settings().bypass_url)
+    # 首页有前置校验的源改探内容页，否则测的是校验页而非站点本身
+    url = f"{host}{CHECK_PATH.get(key, '')}"
+
+    if source.get("bypass_first") and has_bypass:
+        status, message = _check_via_bypass(url)
+    else:
+        status, message = _check_direct(url, timeout)
+        # 直连被拦，抓取链路此时会改走过盾服务，测试也照做
+        if status == "blocked":
+            if not has_bypass:
+                message = f"{message}。需配置反爬绕过服务"
+            else:
+                bypass_status, bypass_message = _check_via_bypass(url)
+                status = bypass_status
+                message = (
+                    bypass_message if bypass_status == "ok"
+                    else f"{message}；{bypass_message}"
+                )
 
     with session_scope() as session:
         row = session.scalar(select(DataSource).where(DataSource.key == key))
