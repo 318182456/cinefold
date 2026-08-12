@@ -38,9 +38,10 @@ jobs:
           VALUE="${VALUE#v}"
 
           # 包名、manifest、程序里的比对全靠这个版本号对齐，
-          # 格式不对就不该往下走
-          if ! echo "$VALUE" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
-            echo "版本号 '$VALUE' 不是 x.y.z 格式" >&2
+          # 格式不对就不该往下走。
+          # x.y.z-n 里的 -n 是修订号，比 x.y.z 新（见 app/core/overlay.py）
+          if ! echo "$VALUE" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9]+)?$'; then
+            echo "版本号 '$VALUE' 不是 x.y.z 或 x.y.z-n 格式" >&2
             exit 1
           fi
 

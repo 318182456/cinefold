@@ -19,18 +19,30 @@ import shutil
 import sys
 from pathlib import Path
 
-_SEMVER_RE = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)$")
+_SEMVER_RE = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)(?:-(\d+))?$")
 
 # 相对项目根的路径，overlay 与镜像共用这套布局
 _VERSION_FILE = "VERSION"
 
 
-def parse_version(text: str) -> tuple[int, int, int] | None:
-    """解析 x.y.z，不合法返回 None。"""
+def parse_version(text: str) -> tuple[int, int, int, int] | None:
+    """解析 x.y.z 或 x.y.z-n，不合法返回 None。
+
+    `-n` 是修订号，语义是"x.y.z 的第 n 次修订"，比 x.y.z 本身新：
+
+        0.0.8 < 0.0.8-1 < 0.0.8-2 < 0.0.9
+
+    注意这与标准 semver 相反 —— 那里 `-n` 是 prerelease，排在正式版
+    之前。这里按修订号处理是刻意的：装了 0.0.8-2 的机器不该被镜像里的
+    0.0.8 判成"有更新"而回退。
+
+    返回四元组，不带后缀时第四位是 0，直接用元组比较即可。
+    """
     match = _SEMVER_RE.match((text or "").strip())
     if not match:
         return None
-    return tuple(int(g) for g in match.groups())  # type: ignore[return-value]
+    major, minor, patch, revision = match.groups()
+    return (int(major), int(minor), int(patch), int(revision or 0))
 
 
 def data_dir() -> Path:

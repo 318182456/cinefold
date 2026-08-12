@@ -36,6 +36,8 @@ from app.core.version import APP_VERSION
 # GitHub Releases API。与镜像仓库同源，换自建分发时只改这里
 GITHUB_REPO = "318182456/cinefold"
 RELEASE_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+# 只在 latest 回 404 时用，区分"没发过 release"和"没权限"
+RELEASE_LIST_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases"
 
 # 走加速代理的域名。别的地址（比如自建分发）原样透传，不套前缀
 GITHUB_HOSTS = ("https://api.github.com/", "https://github.com/",
@@ -170,9 +172,36 @@ def _explain(exc: Exception) -> str:
     return f"{exc.__class__.__name__}: {text}"
 
 
-def _explain_404(url: str) -> str:
-    """404 分三种情况，给出的建议完全不同，得说清是哪一种。"""
+def _has_zero_releases(client: httpx.Client) -> bool:
+    """仓库可访问但一个 release 都没有？
+
+    /releases/latest 在"仓库不存在"、"没权限"、"还没发过 release"三种情况下
+    都回 404，光看它分不出来。但 /releases 在能访问的仓库上永远是 200 —— 没有
+    release 时返回空数组。拿这个当判据，把"没发过"从权限问题里摘出来。
+
+    判不出来时返回 False，让调用方退回到讲权限的兜底文案。
+    """
+    url = _proxied(RELEASE_LIST_API)
+    try:
+        response = client.get(url, headers=_api_headers(url))
+        if response.status_code != 200:
+            return False
+        return response.json() == []
+    except Exception as exc:
+        logger.debug(f"探测 release 列表失败: {exc}")
+        return False
+
+
+def _explain_404(url: str, client: httpx.Client | None = None) -> str:
+    """404 分几种情况，给出的建议完全不同，得说清是哪一种。"""
     settings = get_settings()
+
+    # 先问"是不是压根没发过"，这个能确定性地判出来，比猜权限准
+    if client is not None and _has_zero_releases(client):
+        return (f"{GITHUB_REPO} 还没有发过 release。推一个 v 开头的 tag "
+                "（如 git tag v0.0.9 && git push origin v0.0.9）触发打包，"
+                "或在 Actions 里手动跑 Build Release Packages")
+
     if not settings.github_token:
         return (f"仓库或 release 不存在（404）。{GITHUB_REPO} 是私有仓库的话，"
                 "需要在上面配 GitHub Token")
@@ -196,7 +225,7 @@ def fetch_latest_release() -> dict:
                 return _fail("GitHub API 限流（匿名 60 次/小时）。配 GitHub Token 或稍后再试")
             if response.status_code in (401, 404):
                 # 私有仓库对没有凭证的请求一律回 404，不会说"你没权限"
-                return _fail(_explain_404(api))
+                return _fail(_explain_404(api, client))
             if response.status_code != 200:
                 return _fail(f"HTTP {response.status_code}，请求的是 {api}")
             data = response.json()

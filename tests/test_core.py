@@ -139,12 +139,29 @@ class TestUpdateCheck:
 
     def test_parse_version(self):
         from app.core.overlay import parse_version
-        assert parse_version("2.0.4") == (2, 0, 4)
-        assert parse_version("v2.0.4") == (2, 0, 4)
+        assert parse_version("2.0.4") == (2, 0, 4, 0)
+        assert parse_version("v2.0.4") == (2, 0, 4, 0)
         assert parse_version("latest") is None
         assert parse_version("sha-abc123") is None
         assert parse_version("2.0") is None
         assert parse_version("") is None
+
+    def test_parse_version_revision(self):
+        """x.y.z-n 的 -n 是修订号。"""
+        from app.core.overlay import parse_version
+        assert parse_version("0.0.8-2") == (0, 0, 8, 2)
+        assert parse_version("v0.0.8-2") == (0, 0, 8, 2)
+        # 后缀必须是纯数字，semver 的 -alpha 这类仍然不收
+        assert parse_version("1.2.3-alpha") is None
+        assert parse_version("1.2.3-") is None
+        assert parse_version("1.2.3-2-3") is None
+
+    def test_revision_ordering(self):
+        """修订号比正式版新 —— 与标准 semver 的 prerelease 相反。"""
+        from app.core.overlay import parse_version as p
+        assert p("0.0.8") < p("0.0.8-1") < p("0.0.8-2") < p("0.0.9")
+        # 装了修订版的机器不该被镜像里的正式版判成"有更新"
+        assert not p("0.0.8") > p("0.0.8-2")
 
     @staticmethod
     def _release(version, with_assets=True):
@@ -206,6 +223,38 @@ class TestUpdateCheck:
         )
         assert upgrade.check_update(use_cache=False)["has_update"] is False
 
+    def test_revision_release_is_an_update(self, monkeypatch):
+        """0.0.8 → 0.0.8-2 是一次更新，包名带后缀也要能对上。"""
+        from app.services import upgrade
+
+        monkeypatch.setattr(upgrade, "APP_VERSION", "0.0.8")
+        monkeypatch.setattr(
+            upgrade, "fetch_latest_release", lambda: self._release("0.0.8-2")
+        )
+        result = upgrade.check_update(use_cache=False)
+        assert result["has_update"] is True
+        assert result["can_upgrade"] is True
+
+    def test_revision_not_downgraded_by_release(self, monkeypatch):
+        """装了 0.0.8-2 的机器不该被 0.0.8 判成有更新。"""
+        from app.services import upgrade
+
+        monkeypatch.setattr(upgrade, "APP_VERSION", "0.0.8-2")
+        monkeypatch.setattr(
+            upgrade, "fetch_latest_release", lambda: self._release("0.0.8")
+        )
+        assert upgrade.check_update(use_cache=False)["has_update"] is False
+
+    def test_next_minor_beats_revision(self, monkeypatch):
+        """0.0.8-2 → 0.0.9，不带后缀的正式版仍然更新。"""
+        from app.services import upgrade
+
+        monkeypatch.setattr(upgrade, "APP_VERSION", "0.0.8-2")
+        monkeypatch.setattr(
+            upgrade, "fetch_latest_release", lambda: self._release("0.0.9")
+        )
+        assert upgrade.check_update(use_cache=False)["has_update"] is True
+
     def test_no_assets_can_not_upgrade(self, monkeypatch):
         """只发了镜像没挂 zip 的版本：提示有更新，但不给点安装。"""
         from app.services import upgrade
@@ -243,6 +292,63 @@ class TestUpdateCheck:
 
         monkeypatch.setattr(upgrade, "_client", lambda: _Client())
         assert upgrade.fetch_latest_release() == {}
+
+    @staticmethod
+    def _client_404(list_status, list_body):
+        """latest 回 404、/releases 回给定结果的假 client。"""
+        class _Response:
+            def __init__(self, status, body):
+                self.status_code = status
+                self.text = ""
+                self._body = body
+
+            def json(self):
+                return self._body
+
+        class _Client:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def get(self, url, **kwargs):
+                if url.rstrip("/").endswith("/releases"):
+                    return _Response(list_status, list_body)
+                return _Response(404, {})
+
+        return _Client()
+
+    def test_404_with_zero_releases_says_so(self, monkeypatch):
+        """仓库能访问但没发过 release：文案要指向发布流程，不是权限。"""
+        from app.services import upgrade
+
+        monkeypatch.setattr(
+            upgrade, "_client", lambda: self._client_404(200, [])
+        )
+        assert upgrade.fetch_latest_release() == {}
+        assert "还没有发过 release" in upgrade._last_error
+
+    def test_404_with_existing_releases_blames_permission(self, monkeypatch):
+        """/releases 有内容却 latest 404，就不是"没发过"，回到权限文案。"""
+        from app.services import upgrade
+
+        monkeypatch.setattr(
+            upgrade, "_client", lambda: self._client_404(200, [{"tag_name": "v1.0.0"}])
+        )
+        assert upgrade.fetch_latest_release() == {}
+        assert "还没有发过 release" not in upgrade._last_error
+        assert "404" in upgrade._last_error
+
+    def test_404_probe_failure_falls_back(self, monkeypatch):
+        """探测请求本身失败时不能瞎猜，退回原来的兜底文案。"""
+        from app.services import upgrade
+
+        monkeypatch.setattr(
+            upgrade, "_client", lambda: self._client_404(403, {})
+        )
+        assert upgrade.fetch_latest_release() == {}
+        assert "还没有发过 release" not in upgrade._last_error
 
     def test_upgrade_refused_when_already_latest(self, monkeypatch):
         """当前已是最新时不该启动升级线程。"""
