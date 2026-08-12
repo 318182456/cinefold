@@ -41,6 +41,16 @@ from app.services.medialink import VIDEO_SUFFIXES, handle_media_deleted
 STABLE_CHECK_INTERVAL = 2.0
 STABLE_CHECK_ROUNDS = 3
 
+# mtime 早于这个秒数的文件直接判定为已写完，跳过 sleep 观测。
+#
+# 首轮全量登记要过一遍整个库（几千个文件），每个都 sleep 2s 起步就是几小时，
+# 而其中绝大多数是几个月前就躺在磁盘上的存量文件，等它们纯属白等。
+#
+# 60s 的余量对写入中的文件是安全的：还在下载/拷贝的文件 mtime 一直在刷新，
+# 不可能落到一分钟前。取值远大于 STABLE_CHECK_INTERVAL × ROUNDS，
+# 比原来的观测法更保守。
+STABLE_MTIME_AGE = 60.0
+
 # 正在下载的临时文件，不该建链接
 IGNORED_SUFFIXES = {".part", ".!qb", ".tmp", ".temp", ".downloading", ".aria2"}
 
@@ -226,11 +236,19 @@ def _wait_stable(path: Path) -> bool:
 
     STABLE_CHECK_ROUNDS 是「最多再观测几次」，不含第一次读取 —— 早就写完的
     文件（对账时的绝大多数）第二次观测就能确认，不必把轮数耗光。
+
+    mtime 已经足够老的文件连观测都免了，直接放行：见 STABLE_MTIME_AGE。
     """
     try:
-        last = path.stat().st_size
+        st = path.stat()
     except OSError:
         return False
+
+    # 快路径：文件很久没被动过，不可能正在写入
+    if time.time() - st.st_mtime >= STABLE_MTIME_AGE:
+        return True
+
+    last = st.st_size
 
     for _ in range(max(1, STABLE_CHECK_ROUNDS)):
         time.sleep(STABLE_CHECK_INTERVAL)

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import os
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -1202,3 +1203,56 @@ def test_passthrough_sync_is_idempotent(passthrough_rule):
     assert result.unlinked == []
     assert result.reverse_deleted == []
     assert len(_links()) == 1
+
+
+# ----------------------------------------------------------------------
+# 写入稳定性判定
+# ----------------------------------------------------------------------
+
+
+def test_wait_stable_skips_observation_for_old_files(tmp_path, monkeypatch):
+    """mtime 够老的文件直接放行，不进 sleep 观测。
+
+    首轮全量登记的性能全靠这条快路径：几千个存量文件逐个 sleep 2s
+    要跑几小时。
+    """
+    old = tmp_path / "old.mp4"
+    old.write_bytes(b"A" * 64)
+    # 把 mtime 推到快路径阈值之外
+    stale = time.time() - watchdir.STABLE_MTIME_AGE - 10
+    os.utime(old, (stale, stale))
+
+    def _no_sleep(_seconds):
+        raise AssertionError("mtime 够老的文件不该再 sleep 观测")
+
+    monkeypatch.setattr(watchdir.time, "sleep", _no_sleep)
+
+    assert watchdir._wait_stable(old) is True
+
+
+def test_wait_stable_still_observes_fresh_files(tmp_path, monkeypatch):
+    """刚写过的文件仍要走观测 —— 它可能还在写。"""
+    fresh = tmp_path / "fresh.mp4"
+    fresh.write_bytes(b"A" * 64)
+
+    slept = []
+    monkeypatch.setattr(watchdir.time, "sleep", lambda s: slept.append(s))
+
+    assert watchdir._wait_stable(fresh) is True
+    assert slept, "新文件应当至少观测一轮"
+
+
+def test_wait_stable_rejects_growing_file(tmp_path, monkeypatch):
+    """持续变大的文件判为未稳定，本轮跳过。"""
+    growing = tmp_path / "growing.mp4"
+    growing.write_bytes(b"A" * 64)
+
+    # 每次「睡醒」都让文件长大一点，模拟下载中
+    def _grow(_seconds):
+        with growing.open("ab") as fh:
+            fh.write(b"B" * 64)
+
+    monkeypatch.setattr(watchdir.time, "sleep", _grow)
+    monkeypatch.setattr(watchdir, "STABLE_CHECK_ROUNDS", 3)
+
+    assert watchdir._wait_stable(growing) is False
