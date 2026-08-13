@@ -434,7 +434,8 @@ class QBitTorrentClient:
                         bucket.append(t.hash)
 
         if out:
-            # 同 Transmission 版：辅种会让一个文件对应多个种子，去重后才是种子数
+            # 同 Transmission 版：文件与种子是多对多（辅种、合集），
+            # 对应关系数会超过种子数，两个都打出来
             pairs = sum(len(v) for v in out.values())
             uniq = len({h for hashes in out.values() for h in hashes})
             logger.info(

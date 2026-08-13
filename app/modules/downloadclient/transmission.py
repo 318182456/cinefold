@@ -292,8 +292,9 @@ class TransmissionClient:
                         bucket.append(t.hashString)
 
         if out:
-            # 一个文件可能被多个种子引用（辅种），去重后才是真正的种子数。
-            # 只报对应关系总数会让人误读成种子数，两个都打出来
+            # 文件与种子是多对多：一个文件可能被多个种子引用（辅种），一个种子
+            # 也可能含多个文件（合集）。两者都会让对应关系数超过种子数，
+            # 只报关系总数会被误读成种子数，所以两个都打出来
             pairs = sum(len(v) for v in out.values())
             uniq = len({h for hashes in out.values() for h in hashes})
             logger.info(
