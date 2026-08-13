@@ -67,6 +67,10 @@ def save_config(body: ConfigRequest, current_user: str = Depends(get_current_use
     from app.modules.auth.oidc import reset_discovery_cache
     reset_discovery_cache()
 
+    # 下载器地址或自愈参数可能改了，旧的失败计数与冷却不再适用
+    from app.services.qbwatchdog import reset_state
+    reset_state()
+
     # 自动同步开关或媒体库路径可能改了，重建目录监听。
     # 关掉开关时 start_watching 会自行跳过，这里不必分情况处理
     try:
@@ -159,6 +163,7 @@ def test_connection(target: str, current_user: str = Depends(get_current_user)):
     testers = {
         "qbittorrent": lambda: _import_client("qbittorrent", "QBitTorrentClient"),
         "transmission": lambda: _import_client("transmission", "TransmissionClient"),
+        "docker": lambda: _docker_tester(),
         "emby": lambda: _import_server("emby", "Emby"),
         "jellyfin": lambda: _import_server("jellyfin", "Jellyfin"),
         "plex": lambda: _import_server("plex", "Plex"),
@@ -188,6 +193,30 @@ def test_connection(target: str, current_user: str = Depends(get_current_user)):
         return ResponseEntity.ok({"success": ok, "message": message})
     except Exception as exc:
         return ResponseEntity.ok({"success": False, "message": str(exc)})
+
+
+@router.get("/qb/autoheal")
+def qb_autoheal_state(current_user: str = Depends(get_current_user)):
+    """qBittorrent 自愈的当前状态：攒了几次失败、是否在冷却期。"""
+    from app.services.qbwatchdog import get_state
+    return ResponseEntity.ok(get_state())
+
+
+@router.post("/qb/restart")
+def restart_qbittorrent_api(current_user: str = Depends(get_current_user)):
+    """手动重启 qBittorrent 容器。
+
+    不看开关也不看冷却期 —— 用户主动点的，意图明确。重启后清零计数，
+    否则手动处理完故障还得等自愈的冷却期过去。
+    """
+    from app.services.dockerctl import restart_qbittorrent
+    from app.services.qbwatchdog import reset_state
+
+    ok, message = restart_qbittorrent()
+    if ok:
+        reset_state()
+        return ResponseEntity.ok(message=message)
+    return ResponseEntity.fail(message)
 
 
 @router.get("/ptsites")
@@ -269,6 +298,12 @@ def delete_telegram_webhook(current_user: str = Depends(get_current_user)):
 
     ok, message = TelegramNotifier().delete_webhook()
     return ResponseEntity.ok({"success": ok, "message": message})
+
+
+def _docker_tester():
+    """Docker 连通性测试。dockerctl 是模块而非类，包一层凑成 test_connection 的形状。"""
+    from app.services import dockerctl
+    return dockerctl
 
 
 def _import_client(module: str, cls: str):

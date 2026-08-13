@@ -12,6 +12,10 @@
    和反复登录的问题。注意 API Key 打不通 /auth/login 与 /auth/logout，
    所以配了 key 就必须跳过登录，不能"先登录再带 key"。
 2. 用户名 + 密码换 SID Cookie（4.x / 5.0 / 5.1 以及未开 key 的场景）
+
+qb 偶发卡死（WebAPI 不响应但进程还在）时，所有请求都会 read timeout。
+这里把连接结果报给 qbwatchdog，由它按「连续失败 N 次」判断要不要重启
+qb 的容器 —— 见 app/services/qbwatchdog.py。
 """
 from __future__ import annotations
 
@@ -24,6 +28,24 @@ from loguru import logger
 
 from app.core.config import get_settings
 from app.utils import get_magnet_hash, get_protocol_and_domain, get_torrent_hash
+
+
+def _report_ok() -> None:
+    """qb 有正常响应，清零自愈计数。自愈模块出问题不能影响下载流程。"""
+    try:
+        from app.services import qbwatchdog
+        qbwatchdog.report_success()
+    except Exception:
+        pass
+
+
+def _report_error(exc: BaseException, context: str = "") -> None:
+    """把异常交给自愈模块判断。只有连接类故障会被计入，业务错误会被忽略。"""
+    try:
+        from app.services import qbwatchdog
+        qbwatchdog.report_failure(exc, context)
+    except Exception:
+        pass
 
 
 class QBitTorrentClient:
@@ -87,13 +109,18 @@ class QBitTorrentClient:
             else:
                 self._auth_log_in()
                 logger.info(f"qBittorrent 登录成功，版本 {self.client.app.version}")
+            _report_ok()
             return True
 
         except qbittorrentapi.LoginFailed as exc:
             logger.error(
                 f"qBittorrent 登录失败: {exc or '账号密码错误，或 HTTPS 证书校验未通过'}"
             )
+            # 证书校验失败也会被库包装成 LoginFailed，但那不是「连不上」，
+            # 交给 watchdog 自己判断
+            _report_error(exc, "登录")
         except (qbittorrentapi.Forbidden403Error, qbittorrentapi.Unauthorized401Error) as exc:
+            # 能返回 403/401 说明 qb 是活的，重启它解决不了鉴权配置问题
             if use_apikey:
                 logger.error(
                     f"qBittorrent 拒绝了 API Key，请确认 key 未被 Regenerate/Delete，"
@@ -106,8 +133,10 @@ class QBitTorrentClient:
                 )
         except qbittorrentapi.APIConnectionError as exc:
             logger.error(f"qBittorrent 连接失败，请检查地址是否可达: {exc}")
+            _report_error(exc, "登录")
         except Exception as exc:
             logger.exception(f"qBittorrent 登录异常: {exc}")
+            _report_error(exc, "登录")
 
         self.client = None
         return False
@@ -165,6 +194,21 @@ class QBitTorrentClient:
             return True
         return self.login_qb()
 
+    def _on_error(self, exc: BaseException, context: str) -> None:
+        """操作失败时的统一处理。
+
+        连接类故障要丢掉 client：qb 卡死或重启后，旧 session 里的 Cookie
+        可能已失效，留着它会让 `_ensure_client` 一直复用坏连接，永远不重新
+        登录。丢掉之后下一次调用会重新走 login_qb，qb 恢复了就能自动接上。
+        """
+        _report_error(exc, context)
+        try:
+            from app.services.qbwatchdog import is_connection_error
+            if is_connection_error(exc):
+                self.client = None
+        except Exception:
+            pass
+
     # ------------------------------------------------------------------
     def add_torrent(
         self, content: bytes, code: str = "", save_path: str = ""
@@ -183,9 +227,11 @@ class QBitTorrentClient:
                 is_paused=False,
             )
             logger.info(f"[{code}] 已推送种子到 qBittorrent，hash={torrent_hash}")
+            _report_ok()
             return torrent_hash
         except Exception as exc:
             logger.error(f"[{code}] 推送种子失败: {exc}")
+            self._on_error(exc, "推送种子")
             return None
 
     def add_torrent_by_magnet(
@@ -209,9 +255,11 @@ class QBitTorrentClient:
                 is_paused=False,
             )
             logger.info(f"[{code}] 已推送磁链到 qBittorrent，hash={torrent_hash}")
+            _report_ok()
             return torrent_hash
         except Exception as exc:
             logger.error(f"[{code}] 推送磁链失败: {exc}")
+            self._on_error(exc, "推送磁链")
             return None
 
     # ------------------------------------------------------------------
@@ -229,6 +277,7 @@ class QBitTorrentClient:
                 torrent_hashes=filter_hashes,
                 category=self.category or None,
             )
+            _report_ok()
             return [
                 {
                     "hash": t.hash,
@@ -242,6 +291,7 @@ class QBitTorrentClient:
             ]
         except Exception as exc:
             logger.error(f"查询 qBittorrent 任务状态失败: {exc}")
+            self._on_error(exc, "查询任务状态")
             return []
 
     def list_torrent_files(self, hashes: Sequence[str]) -> list[str]:
@@ -266,8 +316,10 @@ class QBitTorrentClient:
                 root = info[0].save_path
                 for f in self.client.torrents_files(torrent_hash=h):
                     paths.append(str(PurePath(root) / f.name))
+                _report_ok()
             except Exception as exc:
                 logger.warning(f"读取 qBittorrent 种子 {h} 的文件清单失败: {exc}")
+                self._on_error(exc, "读取文件清单")
         return paths
 
     def export_torrent(self, torrent_hash: str) -> bytes | None:
@@ -283,8 +335,10 @@ class QBitTorrentClient:
 
         try:
             content = self.client.torrents_export(torrent_hash=torrent_hash)
+            _report_ok()
         except Exception as exc:
             logger.warning(f"导出 qBittorrent 种子 {torrent_hash} 失败: {exc}")
+            self._on_error(exc, "导出种子")
             return None
 
         if not content:
@@ -303,8 +357,10 @@ class QBitTorrentClient:
 
         try:
             rows = self.client.torrents_info(torrent_hashes=[torrent_hash])
+            _report_ok()
         except Exception as exc:
             logger.warning(f"读取 qBittorrent 种子 {torrent_hash} 详情失败: {exc}")
+            self._on_error(exc, "读取种子详情")
             return None
 
         if not rows:
@@ -350,8 +406,10 @@ class QBitTorrentClient:
         out: dict[str, list[str]] = {}
         try:
             torrents = self.client.torrents_info()
+            _report_ok()
         except Exception as exc:
             logger.warning(f"读取 qBittorrent 种子列表失败: {exc}")
+            self._on_error(exc, "读取种子列表")
             return {}
 
         for t in torrents:
@@ -361,6 +419,9 @@ class QBitTorrentClient:
             except Exception as exc:
                 # 单个种子读不到不影响其余种子
                 logger.debug(f"读取 qBittorrent 种子 {t.hash} 文件清单失败: {exc}")
+                # 循环中途 qb 挂了的话，后面每一轮都会失败。这里照样上报，
+                # 否则整个方法只算作一次失败，攒不够阈值
+                self._on_error(exc, "读取文件清单")
                 continue
 
             for f in files:
@@ -415,9 +476,11 @@ class QBitTorrentClient:
                 f"已从 qBittorrent 删除 {len(hit)} 个种子"
                 f"（delete_files={delete_files}）: {', '.join(hit)}"
             )
+            _report_ok()
             return hit
         except Exception as exc:
             logger.error(f"删除 qBittorrent 种子失败: {exc}")
+            self._on_error(exc, "删除种子")
             return []
 
     def control_torrent(self, action: str, hashes: Sequence[str]) -> list[str]:
@@ -462,9 +525,11 @@ class QBitTorrentClient:
 
             method(torrent_hashes=hit)
             logger.info(f"qBittorrent {action} {len(hit)} 个种子: {', '.join(hit)}")
+            _report_ok()
             return hit
         except Exception as exc:
             logger.error(f"qBittorrent {action} 失败: {exc}")
+            self._on_error(exc, action)
             return []
 
     def test_connection(self) -> tuple[bool, str]:

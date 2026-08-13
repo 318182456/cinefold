@@ -440,8 +440,9 @@ curl http://host:3750/api/v1/dashboard -H 'Authorization: Bearer <token>'
 ## 开发
 
 ```bash
-# 后端
-.venv/bin/python -m pytest tests/ -q      # 578 项测试
+# 后端。跑测试需要 requirements-dev.txt（多一个 pytest，镜像里不装）
+.venv/bin/pip install -r requirements-dev.txt
+.venv/bin/python -m pytest tests/ -q      # 682 项测试
 .venv/bin/python -m uvicorn app.api:app --port 56168 --reload
 
 # 前端

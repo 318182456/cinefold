@@ -12,6 +12,10 @@ services:
       - ./data:/data
       # 下载路径需与 qBittorrent 中的路径保持一致，便于入库校验
       # - /volume3/h_video/Download:/downloads
+      # qBittorrent 连接自愈（QB_AUTOHEAL_ENABLED）要重启 qb 容器，需要 Docker
+      # socket。不能加 :ro —— 重启是写操作。qb 在别的机器上时不要挂这个，
+      # 改用 DOCKER_HOST_URL=tcp://IP:2375
+      # - /var/run/docker.sock:/var/run/docker.sock
     environment:
       TZ: Asia/Shanghai
       # 默认用 /data 下的 SQLite，无需下面两个服务。

@@ -179,6 +179,23 @@ class Settings:
     # 例：/downloads:/data/downloads
     seed_transfer_path_map: str = ""
 
+    # --- qBittorrent 连接自愈 ---
+    # qb 偶发卡死（WebAPI 不响应但进程还在）时，重启它的容器。
+    # 默认关闭：重启会让正在下载的任务断连重试，得用户确认过才好动手
+    qb_autoheal_enabled: bool = False
+    # 连续多少次连接失败才重启。业务错误不计数，一次成功即清零
+    qb_autoheal_failures: int = 3
+    # 两次重启之间的最短间隔（分钟）。qb 重启后要几十秒才能响应 WebAPI，
+    # 这期间的请求照样超时，没有冷却会连着重启好几轮
+    qb_autoheal_cooldown: int = 15
+    # 重启后推送通知
+    qb_autoheal_notify: bool = True
+    # Docker 地址。qb 与本容器在同一台机器时用 unix socket（需把
+    # /var/run/docker.sock 挂进来）；qb 在另一台机器上则填 tcp://IP:2375
+    docker_host: str = "unix:///var/run/docker.sock"
+    # qBittorrent 的容器名或容器 ID
+    docker_container_qbittorrent: str = ""
+
     # --- PT 站点 ---
     # Rousi 新站是前后端分离架构，用 Bearer token 而非 Cookie。
     # 填了用户名密码就会自动登录续期，token 可留空。
@@ -441,6 +458,13 @@ def load_settings() -> Settings:
         seed_transfer_tags=_env("SEED_TRANSFER_TAGS"),
         seed_transfer_label=_env("SEED_TRANSFER_LABEL", "cinefold-transfer"),
         seed_transfer_path_map=_env("SEED_TRANSFER_PATH_MAP"),
+
+        qb_autoheal_enabled=_env_bool("QB_AUTOHEAL_ENABLED", False),
+        qb_autoheal_failures=_env_int("QB_AUTOHEAL_FAILURES", 3),
+        qb_autoheal_cooldown=_env_int("QB_AUTOHEAL_COOLDOWN", 15),
+        qb_autoheal_notify=_env_bool("QB_AUTOHEAL_NOTIFY", True),
+        docker_host=_env("DOCKER_HOST_URL", "unix:///var/run/docker.sock"),
+        docker_container_qbittorrent=_env("DOCKER_CONTAINER_QBITTORRENT"),
 
         rousi_username=_env("ROUSI_USERNAME"),
         rousi_password=_env("ROUSI_PASSWORD"),

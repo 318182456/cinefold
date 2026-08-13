@@ -1,3 +1,8 @@
+# -*- coding: utf-8 -*-
+# NOTE: keep this file ASCII-only below the encoding line above.
+# pip decodes requirements files with locale.getpreferredencoding() unless a
+# PEP 263 header is present; hot update (services/upgrade.py) reinstalls from
+# this file on the user's machine, where the locale may be cp932/gbk/etc.
 fastapi~=0.115.0
 uvicorn[standard]~=0.32.0
 pydantic~=2.9.0
@@ -6,27 +11,22 @@ psycopg[binary]~=3.2.3
 redis~=5.2.0
 python-dotenv~=1.0.1
 httpx[socks]~=0.28.1
-curl_cffi~=0.7.3
-beautifulsoup4~=4.12.3
+# Site scraping goes through pyquery (lxml under the hood)
 pyquery~=2.0.0
 lxml~=5.3.0
-html5lib~=1.1
 apscheduler~=3.10.4
-# 监控目录的实时文件事件。缺失时功能退化为定时全量对账，不影响启动
+# Realtime file events for watched dirs; without it the feature degrades to
+# periodic full reconciliation, startup is unaffected
 watchdog~=6.0.0
 PyJWT~=2.9.0
 bcrypt~=4.2.0
-# Passkey（WebAuthn）签名验证
+# Passkey (WebAuthn) signature verification
 webauthn~=3.0.0
 loguru~=0.7.3
 torrentool~=1.2.0
 xmltodict~=0.14.0
 pycryptodome~=3.21.0
-python-dateutil~=2.9.0
-fake_useragent~=1.5.1
 
 qbittorrent-api~=2024.11.70
 transmission-rpc~=7.0.11
 PlexAPI~=4.15.16
-
-pytest~=8.3.0

@@ -89,6 +89,7 @@ id (autoincrement) / namespace / key / content / create_time
 | `GET  /logs` | 日志查询 |
 | `GET  /cron` | 定时任务列表 |
 | `POST /task` | 手动触发任务 |
+| `GET  /qb/autoheal` · `POST /qb/restart` | qB 自愈状态；手动重启 qB 容器（不看开关与冷却期） |
 | `GET  /search` | 番号搜索 |
 | `GET  /rank` | 排行榜 |
 | `GET  /hot` | 热门 |
@@ -171,6 +172,15 @@ id (autoincrement) / namespace / key / content / create_time
 换算保存路径后加进 tr 并触发校验；tr 确认接管后才动 qb 的源任务，且只删任务不删文件
 —— 两个下载器指向同一份文件。触发方式：定时任务 `transfer_seeds`，或 AI 助手的
 `transfer` 提案经用户确认。
+
+**qBittorrent 连接自愈 `services/qbwatchdog.py` + `services/dockerctl.py`** —
+qb 卡死（WebAPI 不响应但进程还在）时重启它的容器。`QBitTorrentClient` 的每个方法把
+成功/失败报给 `qbwatchdog`，只有连接类异常计数（403/404 这类业务错误说明 qb 活着，
+不计），连续 `QB_AUTOHEAL_FAILURES` 次才通过 Docker Engine API 重启
+`DOCKER_CONTAINER_QBITTORRENT`，两次重启之间有 `QB_AUTOHEAL_COOLDOWN` 分钟冷却。
+一次成功响应即清零；连接失败时还会丢掉 client 迫使下次重新登录。计数只在内存里。
+`dockerctl` 用 httpx 直连 Docker API（不引 docker SDK），`trust_env=False`
+以免配了 `PROXY` 后把内网请求送去代理。默认关闭 —— 重启会打断正在下载的任务。
 
 ## 7. 定时任务 `scheduler/`
 

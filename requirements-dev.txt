@@ -1,0 +1,7 @@
+# -*- coding: utf-8 -*-
+# Test-only deps. Not installed into the image: tests/ is excluded by
+# .dockerignore, so shipping pytest would be dead weight.
+# Keep ASCII-only, same reason as requirements.txt.
+-r requirements.txt
+
+pytest~=8.3.0
