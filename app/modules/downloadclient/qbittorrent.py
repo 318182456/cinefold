@@ -434,9 +434,12 @@ class QBitTorrentClient:
                         bucket.append(t.hash)
 
         if out:
-            total = sum(len(v) for v in out.values())
+            # 同 Transmission 版：辅种会让一个文件对应多个种子，去重后才是种子数
+            pairs = sum(len(v) for v in out.values())
+            uniq = len({h for hashes in out.values() for h in hashes})
             logger.info(
-                f"qBittorrent 按路径反查到 {total} 个种子，覆盖 {len(out)} 个文件"
+                f"qBittorrent 按路径反查：{len(out)} 个文件命中 {uniq} 个种子"
+                f"（共 {pairs} 条对应关系）"
             )
         return out
 

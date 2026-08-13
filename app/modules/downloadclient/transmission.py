@@ -261,7 +261,15 @@ class TransmissionClient:
 
         out: dict[str, list[str]] = {}
         try:
-            torrents = self.client.get_torrents()
+            # 显式列字段：不指定 arguments 会把 tracker、peer 等几十个字段一起
+            # 拉回来，种子上千时白等一百多秒。
+            # priorities 与 wanted 这里用不上，但 get_files() 内部要读它们，
+            # 少一个就抛 KeyError，反查会静默返回空表
+            torrents = self.client.get_torrents(
+                arguments=[
+                    "hashString", "downloadDir", "files", "priorities", "wanted",
+                ],
+            )
         except Exception as exc:
             logger.warning(f"读取 Transmission 种子列表失败: {exc}")
             return {}
@@ -284,9 +292,13 @@ class TransmissionClient:
                         bucket.append(t.hashString)
 
         if out:
-            total = sum(len(v) for v in out.values())
+            # 一个文件可能被多个种子引用（辅种），去重后才是真正的种子数。
+            # 只报对应关系总数会让人误读成种子数，两个都打出来
+            pairs = sum(len(v) for v in out.values())
+            uniq = len({h for hashes in out.values() for h in hashes})
             logger.info(
-                f"Transmission 按路径反查到 {total} 个种子，覆盖 {len(out)} 个文件"
+                f"Transmission 按路径反查：{len(out)} 个文件命中 {uniq} 个种子"
+                f"（共 {pairs} 条对应关系）"
             )
         return out
 
