@@ -407,10 +407,15 @@ class TestTransmissionPayload:
         def __init__(self):
             self.kwargs = None
             self.calls = []
+            self.label_sets = []
 
         def add_torrent(self, torrent, **kwargs):
             self.kwargs = {"torrent": torrent, **kwargs}
             return type("T", (), {"hashString": "NEW"})()
+
+        def change_torrent(self, ids=None, labels=None, **kwargs):
+            self.calls.append("set-labels")
+            self.label_sets.append((list(ids or []), list(labels or [])))
 
         def verify_torrent(self, ids=None):
             self.calls.append("verify")
@@ -446,7 +451,52 @@ class TestTransmissionPayload:
 
         self._client(rec).add_torrent_for_seeding(b"x", save_path="/downloads/x")
 
-        assert rec.calls == ["verify", "start"]
+        assert [c for c in rec.calls if c != "set-labels"] == ["verify", "start"]
+
+    def test_labels_set_after_add(self):
+        """加完要再补一次标签。
+
+        Transmission 3.x（RPC 16）的 torrent-add 会静默丢弃 labels，只有
+        torrent-set 认；不补这一刀，转过去的种子全是无标签的。
+        """
+        rec = self.Recorder()
+
+        self._client(rec).add_torrent_for_seeding(
+            b"x", save_path="/downloads/x", labels=["cinefold-transfer"]
+        )
+
+        assert rec.label_sets == [(["NEW"], ["cinefold-transfer"])]
+
+    def test_labels_use_default_when_not_given(self):
+        """没显式传标签时退回客户端自身的 label。"""
+        rec = self.Recorder()
+
+        self._client(rec).add_torrent_for_seeding(b"x", save_path="/downloads/x")
+
+        assert rec.label_sets == [(["NEW"], ["L"])]
+
+    def test_no_label_call_when_empty(self):
+        """标签为空时不必多发一次请求。"""
+        rec = self.Recorder()
+        client = self._client(rec)
+        client.label = ""
+
+        client.add_torrent_for_seeding(b"x", save_path="/downloads/x")
+
+        assert rec.label_sets == []
+
+    def test_label_failure_does_not_break_transfer(self):
+        """标签设不上不影响做种，不能让整次转移失败。"""
+        rec = self.Recorder()
+
+        def boom(ids=None, labels=None, **kwargs):
+            raise RuntimeError("tr 不认 labels")
+
+        rec.change_torrent = boom
+
+        assert self._client(rec).add_torrent_for_seeding(
+            b"x", save_path="/downloads/x"
+        ) == "NEW"
 
 
 class TestTransferOnComplete:

@@ -39,7 +39,9 @@ from app.database.session import (
     SessionLocal, insert_ignore_duplicate, session_scope,
 )
 from app.services import watchdir_progress as progress
-from app.services.medialink import VIDEO_SUFFIXES, handle_media_deleted
+from app.services.medialink import (
+    VIDEO_SUFFIXES, handle_media_deleted, mark_completed,
+)
 
 # 文件刚出现时可能还在写入（下载中、拷贝中）。连续两次 stat 大小不变才认为
 # 写完了，否则硬链接会指向一个残缺文件，Emby 扫进去是坏的
@@ -285,6 +287,20 @@ def is_hashed_code(code: str) -> bool:
     误认成哈希。
     """
     return code.rsplit("-", 1)[-1].startswith(CODE_HASH_MARK)
+
+
+def _mark_completed_if_real_code(
+    rule: WatchDir, code: str, session=None
+) -> None:
+    """入库成功后回写订阅状态，但只对能对上真番号的 code 做。
+
+    make_code 生成的 code 不保证是番号：配了 code_prefix 的是刻意与番号
+    隔离的，哈希 code 已经读不出原文件名。这两类拿去匹配 Code 表要么必然
+    落空，要么撞上同名的无辜番号，一律跳过。
+    """
+    if (rule.code_prefix or "").strip() or is_hashed_code(code):
+        return
+    mark_completed(code, session=session)
 
 
 def _looks_settled(path: Path) -> bool:
@@ -653,6 +669,7 @@ def sync_rule(rule_id: int, dry_run: bool = False) -> SyncResult:
             # 种子信息趁现在存下来 —— 删除时下载器里可能已经没有这个种子了。
             # 直通模式尤其依赖这一步：没有硬链接，删除时全靠这条记录找回种子
             _record_torrents(code, str(source), torrent_map, session=session)
+            _mark_completed_if_real_code(rule, code, session=session)
             batch.done()
             result.linked.append(target_str)
             if track:
@@ -950,6 +967,7 @@ def _claim_existing(
         _register(code, str(source), link_path)
         # 认领的链接同样要记种子 —— 反向删除时才有据可依
         _record_torrents(code, str(source), torrent_map)
+        _mark_completed_if_real_code(rule, code)
         logger.info(
             f"[{code}] 认领已有硬链接（未新建）: {source} → {link_path}"
         )

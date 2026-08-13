@@ -22,14 +22,16 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 
 from loguru import logger
 from sqlalchemy import select
 
 from app.core.config import get_settings
-from app.database.models import History, MediaLink
+from app.database.models import Code, CodeStatus, History, MediaLink
 from app.database.session import session_scope
+from app.utils import get_true_code
 
 # 媒体文件扩展名。按 inode 扫库时只看这些，避免把 nfo/jpg 也算进去
 VIDEO_SUFFIXES = {
@@ -157,6 +159,47 @@ def find_hardlinks(source_path: str, library_path: str = "") -> list[str]:
     return found
 
 
+# 入库后可以升到「已入库」的状态。FAILED 不动 —— 失败原因要留着给人看；
+# NONE 不动 —— 没订阅过的片子入库了也不该凭空出现在订阅列表里
+_COMPLETABLE_STATUS = (
+    CodeStatus.SUBSCRIBED, CodeStatus.DOWNLOADING, CodeStatus.DOWNLOADED,
+)
+
+
+def mark_completed(code: str, session=None) -> bool:
+    """入库成功后把番号标成「已入库」。返回是否真的改了。
+
+    DOWNLOADED → COMPLETED 之前没有任何自动通路，番号会一直停在「已下载」。
+    DOWNLOADING 也一并接受，是为了救「种子已从下载器删除」的情况：
+    sync_download_status 只认下载器里还在的任务，种子一删番号就永久卡在
+    「下载中」，只剩入库这一个出口。
+
+    code 来路不一：webhook 是真番号，watchdir 是文件名派生的。这里统一过
+    get_true_code 再查，否则 "abp984" 找不到 "ABP-984" 那一行，而
+    session.get 查不到只会静默返回 None，问题不会有任何声响。
+
+    session 由调用方传入时复用其事务（watchdir 批量登记走这条），不传则
+    自开一个。
+    """
+    true_code = get_true_code(code)
+    if not true_code:
+        return False
+
+    def _apply(sess) -> bool:
+        row = sess.get(Code, true_code)
+        if row is None or row.status not in _COMPLETABLE_STATUS:
+            return False
+        row.status = CodeStatus.COMPLETED
+        row.update_time = datetime.now()
+        logger.info(f"[{true_code}] 已入库，订阅状态更新为「已入库」")
+        return True
+
+    if session is not None:
+        return _apply(session)
+    with session_scope() as own:
+        return _apply(own)
+
+
 def register_scrape(
     code: str, source_path: str, link_path: str = ""
 ) -> list[str]:
@@ -211,6 +254,7 @@ def register_scrape(
                 ))
 
     logger.info(f"[{code}] 已登记 {len(unique)} 条硬链接关联")
+    mark_completed(code)
     return unique
 
 

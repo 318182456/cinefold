@@ -92,8 +92,10 @@ class TransmissionClient:
                 download_dir=save_path or self.download_path or None,
                 labels=[self.label] if self.label else None,
             )
+            new_hash = added.hashString or torrent_hash
+            self._apply_labels(new_hash, [self.label] if self.label else None, code)
             logger.info(f"[{code}] 已推送种子到 Transmission，hash={added.hashString}")
-            return added.hashString or torrent_hash
+            return new_hash
         except Exception as exc:
             logger.error(f"[{code}] 推送种子失败: {exc}")
             return None
@@ -108,8 +110,10 @@ class TransmissionClient:
                 download_dir=save_path or self.download_path or None,
                 labels=[self.label] if self.label else None,
             )
+            new_hash = added.hashString or get_magnet_hash(magnet)
+            self._apply_labels(new_hash, [self.label] if self.label else None, code)
             logger.info(f"[{code}] 已推送磁链到 Transmission，hash={added.hashString}")
-            return added.hashString or get_magnet_hash(magnet)
+            return new_hash
         except Exception as exc:
             logger.error(f"[{code}] 推送磁链失败: {exc}")
             return None
@@ -157,6 +161,7 @@ class TransmissionClient:
             return None
 
         new_hash = added.hashString or torrent_hash
+        self._apply_labels(new_hash, label_list, code)
         try:
             # 校验后 tr 才知道文件已经在本地，否则会从 0 开始下
             self.client.verify_torrent(ids=[new_hash])
@@ -169,6 +174,24 @@ class TransmissionClient:
             f"[{code}] 已转移做种到 Transmission，hash={new_hash}，目录={save_path}"
         )
         return new_hash
+
+    def _apply_labels(
+        self, torrent_hash: str, labels: Sequence[str] | None, code: str = ""
+    ) -> None:
+        """加完之后再补一次标签。
+
+        RPC 17 以下（Transmission 3.x）的 torrent-add 不认 labels，参数被
+        静默丢弃，种子加进去是没有标签的；torrent-set 则一直支持。多发这
+        一次请求，新旧版本都能打上标签。
+
+        标签只是给人看的标记，设不上不影响做种，异常吞掉即可。
+        """
+        if not labels or not torrent_hash:
+            return
+        try:
+            self.client.change_torrent(ids=[torrent_hash], labels=list(labels))
+        except Exception as exc:
+            logger.warning(f"[{code}] Transmission 设置标签失败 {torrent_hash}: {exc}")
 
     # ------------------------------------------------------------------
     def monitor_torrent(self, hashes: Sequence[str] | None = None) -> list[dict]:
