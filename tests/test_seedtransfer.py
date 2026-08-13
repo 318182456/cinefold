@@ -263,7 +263,48 @@ class TestAutoTransfer:
         assert seedtransfer.run_auto_transfer() == 1
         assert [a["save_path"] for a in tr.added] == ["/downloads/x"]
 
+    def _wire_batch(self, monkeypatch, total, batch_limit):
+        """备好 total 个已完成任务，把单轮上限配成 batch_limit。"""
+        rows = [
+            {"hash": f"H{i}", "name": f"片{i}", "completed": True}
+            for i in range(total)
+        ]
+        qb = FakeQB(details={r["hash"]: _detail(r["hash"]) for r in rows}, rows=rows)
+        tr = FakeTR()
+
+        monkeypatch.setattr(seedtransfer, "_clients", lambda: (qb, tr))
+        monkeypatch.setattr(seedtransfer, "is_available", lambda: (True, ""))
+        monkeypatch.setattr(
+            seedtransfer, "get_settings",
+            lambda: type("S", (), {
+                "seed_transfer_enabled": True,
+                "seed_transfer_categories": "",
+                "seed_transfer_tags": "",
+                "seed_transfer_delete_source": False,
+                "seed_transfer_label": "t",
+                "transmission_label": "",
+                "seed_transfer_path_map": "",
+                "seed_transfer_batch_limit": batch_limit,
+            })(),
+        )
+        return qb, tr
+
     def test_batch_limit_respected(self, monkeypatch):
+        self._wire_batch(monkeypatch, total=25, batch_limit=20)
+        assert seedtransfer.run_auto_transfer() == 20
+
+    def test_batch_limit_configurable(self, monkeypatch):
+        """改大上限就该一轮转更多，不再卡在默认的 20。"""
+        self._wire_batch(monkeypatch, total=120, batch_limit=100)
+        assert seedtransfer.run_auto_transfer() == 100
+
+    def test_batch_limit_zero_means_unlimited(self, monkeypatch):
+        """填 0 表示不限量，一轮把候选全清掉。"""
+        self._wire_batch(monkeypatch, total=57, batch_limit=0)
+        assert seedtransfer.run_auto_transfer() == 57
+
+    def test_batch_limit_falls_back_when_missing(self, monkeypatch):
+        """老配置文件里没有这一项时退回默认值，不能报错。"""
         rows = [
             {"hash": f"H{i}", "name": f"片{i}", "completed": True}
             for i in range(seedtransfer.BATCH_LIMIT + 5)
@@ -287,6 +328,36 @@ class TestAutoTransfer:
         )
 
         assert seedtransfer.run_auto_transfer() == seedtransfer.BATCH_LIMIT
+
+
+class TestListCandidates:
+    def _wire(self, monkeypatch, total, batch_limit):
+        rows = [
+            {"hash": f"H{i}", "name": f"片{i}", "completed": True,
+             "save_path": "/downloads/x"}
+            for i in range(total)
+        ]
+        qb = FakeQB(details={r["hash"]: _detail(r["hash"]) for r in rows}, rows=rows)
+        monkeypatch.setattr(seedtransfer, "_clients", lambda: (qb, FakeTR()))
+        monkeypatch.setattr(seedtransfer, "is_available", lambda: (True, ""))
+        monkeypatch.setattr(
+            seedtransfer, "get_settings",
+            lambda: type("S", (), {
+                "seed_transfer_categories": "",
+                "seed_transfer_tags": "",
+                "seed_transfer_batch_limit": batch_limit,
+            })(),
+        )
+
+    def test_follows_configured_limit(self, monkeypatch):
+        """列表默认条数跟着配置走，不能被函数签名的默认值定死。"""
+        self._wire(monkeypatch, total=80, batch_limit=50)
+        assert len(seedtransfer.list_candidates()) == 50
+
+    def test_explicit_limit_wins(self, monkeypatch):
+        """调用方显式传了就以传入的为准。"""
+        self._wire(monkeypatch, total=80, batch_limit=50)
+        assert len(seedtransfer.list_candidates(limit=5)) == 5
 
 
 class TestAgentAction:

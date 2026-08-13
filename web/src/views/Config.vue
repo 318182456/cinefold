@@ -141,6 +141,8 @@ const GROUPS = [
           { k: 'seed_transfer_enabled', label: '自动转移', t: 'bool',
             hint: '定时把 qBittorrent 里已下载完的种子交给 Transmission 继续做种，文件不移动' },
           { k: 'seed_transfer_interval', label: '检查间隔（分钟）', t: 'number', ph: '60' },
+          { k: 'seed_transfer_batch_limit', label: '每轮最多转移', t: 'number', ph: '20',
+            hint: '每个种子都要触发一次 tr 校验，校验吃磁盘 IO。存量多可调大，填 0 表示不限' },
           { k: 'seed_transfer_delete_source', label: '转移后删除 qB 源任务', t: 'bool',
             hint: '只删任务不删文件。关闭则两个下载器同时做种同一份文件' },
           { k: 'seed_transfer_categories', label: '限定分类', ph: '留空表示不限，多个用逗号分隔' },

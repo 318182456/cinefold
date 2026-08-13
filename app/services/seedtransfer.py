@@ -21,9 +21,21 @@ from loguru import logger
 
 from app.core.config import get_settings
 
-# 一轮最多转移多少个。每个都要导出种子 + 触发校验，tr 校验是磁盘 IO 密集操作，
-# 一次涌进去几百个会把磁盘打满，反而拖慢正在下载的任务
+# 一轮最多转移多少个的默认值。每个都要导出种子 + 触发校验，tr 校验是磁盘 IO
+# 密集操作，一次涌进去几百个会把磁盘打满，反而拖慢正在下载的任务。
+# 实际取 SEED_TRANSFER_BATCH_LIMIT，这里只是配置缺失时的兜底
 BATCH_LIMIT = 20
+
+
+def _batch_limit() -> int:
+    """本轮转移上限。配成 0 或负数视为不限量，交给用户自己承担 IO 代价。"""
+    limit = getattr(get_settings(), "seed_transfer_batch_limit", BATCH_LIMIT)
+    try:
+        limit = int(limit)
+    except (TypeError, ValueError):
+        return BATCH_LIMIT
+    # 0 和负数表示不限；用一个大到不会触发的数代替，省得调用方分情况判断
+    return limit if limit > 0 else 10**9
 
 
 @dataclass
@@ -233,6 +245,7 @@ def run_auto_transfer() -> int:
 
     categories = _split_setting(settings.seed_transfer_categories)
     tags = _split_setting(settings.seed_transfer_tags)
+    limit = _batch_limit()
 
     candidates: list[str] = []
     for row in rows:
@@ -250,7 +263,7 @@ def run_auto_transfer() -> int:
                 continue
 
         candidates.append(torrent_hash)
-        if len(candidates) >= BATCH_LIMIT:
+        if len(candidates) >= limit:
             break
 
     if not candidates:
@@ -261,12 +274,18 @@ def run_auto_transfer() -> int:
     return result.count
 
 
-def list_candidates(limit: int = BATCH_LIMIT) -> list[dict]:
+def list_candidates(limit: int | None = None) -> list[dict]:
     """列出可转移的 qb 已完成任务，供助手与前端展示。
+
+    limit 留空取配置里的单轮上限。默认值不能写成 BATCH_LIMIT —— 那会在函数
+    定义时就定死，用户改了配置也不生效。
 
     只看 qb 那一侧：种子是否已在 tr 里，转移时 add_torrent_for_seeding 会
     自行识别重复，这里不必先问一遍 tr —— 那要把 tr 全量拉一次，代价不小。
     """
+    if limit is None:
+        limit = _batch_limit()
+
     ok, reason = is_available()
     if not ok:
         return []
