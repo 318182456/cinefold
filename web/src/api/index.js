@@ -136,6 +136,10 @@ export const getWatchDirProgress = (watchId = 0) =>
 // 给还没登记种子的关联补查下载器
 export const backfillWatchDirTorrents = (watchId = 0) =>
   http.post('/watchdirs/backfill', null, { params: { watch_id: watchId } })
+// 把刮削输出目录里已存在但没登记的影片纳入管理。
+// dry_run 默认为真 —— 登记结果是反向删除的依据，先让用户核对配对
+export const adoptScrapeDir = (dryRun = true) =>
+  http.post('/watchdirs/adopt-scrape', null, { params: { dry_run: dryRun } })
 // 扣留中的删除：文件已消失但还在宽限期内观察
 export const listWatchDirHolds = (watchId = 0) =>
   http.get('/watchdirs/holds', { params: { watch_id: watchId } })

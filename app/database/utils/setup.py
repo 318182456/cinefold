@@ -69,6 +69,10 @@ def update_database() -> None:
         ("watch_dir", "target_dir", "VARCHAR(500) NOT NULL DEFAULT ''"),
         # 直通模式：不建硬链接，只登记关联。存量规则一律为假，行为不变
         ("watch_dir", "passthrough", "BOOLEAN NOT NULL DEFAULT FALSE"),
+        # 种子反查的失败计数与上次尝试时间，用于给查不到的关联降频。
+        # 存量记录从 0 开始，等于「还没查过」，与新建记录一致
+        ("media_link", "torrent_miss", "INTEGER NOT NULL DEFAULT 0"),
+        ("media_link", "torrent_probe_time", "TIMESTAMP"),
     ]
     for table, column, column_type in migrations:
         check_and_create_column(engine, table, column, column_type)

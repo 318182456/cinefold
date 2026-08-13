@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import BigInteger, DateTime, String, Text
+from sqlalchemy import BigInteger, DateTime, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database.base import DBBase
@@ -35,5 +35,13 @@ class MediaLink(DBBase):
     inode: Mapped[int | None] = mapped_column(BigInteger, index=True, nullable=True)
     # 源文件所在设备号。inode 仅在同一设备内唯一，跨卷比对必须带上
     device: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
+    # 向下载器反查种子连续失败了几次。手工拷进来的文件、种子早被删掉的文件
+    # 永远查不到，靠这个计数把它们降频，别每轮对账都拉一次全量种子列表
+    torrent_miss: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # 上次反查的时间。降频判断用，空表示还没查过
+    torrent_probe_time: Mapped[datetime | None] = mapped_column(
+        DateTime, nullable=True
+    )
 
     create_time: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)

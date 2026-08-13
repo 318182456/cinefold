@@ -30,10 +30,24 @@ def find_torrents_by_path(paths: Sequence[str]) -> dict[str, list[str]]:
     文件，code 是从文件名生成的，跟 History 里登记的番号对不上，查不到种子。
     下载器手里才有「这个文件属于哪个种子」的权威答案。
     """
+    merged, _ = find_torrents_by_path_checked(paths)
+    return merged
+
+
+def find_torrents_by_path_checked(
+    paths: Sequence[str],
+) -> tuple[dict[str, list[str]], bool]:
+    """同 find_torrents_by_path，另外返回「是否至少有一个下载器答上了话」。
+
+    空结果有两种截然不同的含义：确实没有种子含这些文件，还是下载器全都挂了。
+    调用方要据此决定是否把这批文件记成「查不到」—— 把下载器故障记成查不到，
+    会让故障期间的所有关联白白攒够失败次数、进入降频期。
+    """
     if not paths:
-        return {}
+        return {}, True
 
     merged: dict[str, list[str]] = {}
+    answered = False
     for name in list_configured_clients():
         client = get_download_client(name)
         if client is None:
@@ -42,15 +56,18 @@ def find_torrents_by_path(paths: Sequence[str]) -> dict[str, list[str]]:
         if finder is None:
             continue  # 该下载器未实现反查，跳过
         try:
-            for path, hashes in finder(paths).items():
-                bucket = merged.setdefault(path, [])
-                for h in hashes:
-                    if h not in bucket:
-                        bucket.append(h)
+            result = finder(paths)
         except Exception as exc:
             logger.warning(f"{name} 按路径反查种子异常: {exc}")
+            continue
+        answered = True
+        for path, hashes in result.items():
+            bucket = merged.setdefault(path, [])
+            for h in hashes:
+                if h not in bucket:
+                    bucket.append(h)
 
-    return merged
+    return merged, answered
 
 
 def get_download_client(name: str = "") -> DownloadClient | None:

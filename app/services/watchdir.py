@@ -26,10 +26,11 @@ import hashlib
 import os
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from loguru import logger
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 
 from app.core.config import get_settings
 from app.database.models import (
@@ -1329,7 +1330,7 @@ def _record_torrents(
     return hashes
 
 
-def backfill_torrents(watch_id: int = 0) -> int:
+def backfill_torrents(watch_id: int = 0, force: bool = False) -> int:
     """给还没登记种子的关联补查一次。返回新登记的种子数。
 
     为什么建链接时查过还要再查：那一刻种子可能还不在下载器里，或者查不到 ——
@@ -1345,11 +1346,28 @@ def backfill_torrents(watch_id: int = 0) -> int:
 
     只查 History 里确实没有记录的，已登记的不重复查 —— 一次全量拉取
     下载器的种子列表并不便宜。
+
+    上面列的窗口都会自己关上，但有两类关联是永久查不到的：手工拷进监控目录
+    的文件、种子早被删掉的文件。它们进不了 History，于是每轮对账都要为它们
+    拉一次全量种子列表 —— 几千条这样的记录能把下载器刷到超时。所以连续查不到
+    WATCHDIR_TORRENT_MISS_LIMIT 次之后转为低频重试，见 _probe_due。
+
+    watch_id 非 0 时限定到该规则；手动触发（API）时 force 为真，无视降频，
+    因为用户点下按钮就是要立刻查一次。
     """
+    settings = get_settings()
+    now = datetime.now()
+
     with session_scope() as session:
         stmt = select(MediaLink)
         rows = [
-            {"code": r.code, "source_path": r.source_path, "link_path": r.link_path}
+            {
+                "code": r.code,
+                "source_path": r.source_path,
+                "link_path": r.link_path,
+                "torrent_miss": r.torrent_miss or 0,
+                "torrent_probe_time": r.torrent_probe_time,
+            }
             for r in session.scalars(stmt).all()
         ]
         # 已经有种子记录的 code，跳过
@@ -1373,21 +1391,42 @@ def backfill_torrents(watch_id: int = 0) -> int:
             prefix = str(base)
         rows = [r for r in rows if r["link_path"].startswith(prefix)]
 
-    pending = [
+    candidates = [
         r for r in rows
         if r["code"] not in known and r["source_path"]
         and Path(r["source_path"]).exists()
     ]
+    pending = [r for r in candidates if force or _probe_due(r, settings, now)]
     if not pending:
+        if candidates:
+            logger.debug(
+                f"补查种子：{len(candidates)} 条待补关联全部处于降频期，本轮跳过"
+            )
         return 0
 
-    from app.modules.downloadclient import find_torrents_by_path
+    deferred = len(candidates) - len(pending)
+    if deferred:
+        logger.info(
+            f"补查种子：{len(pending)} 条待查，{deferred} 条因连续查不到已降频跳过"
+        )
+
+    from app.modules.downloadclient import find_torrents_by_path_checked
 
     try:
-        mapping = find_torrents_by_path([r["source_path"] for r in pending])
+        mapping, answered = find_torrents_by_path_checked(
+            [r["source_path"] for r in pending]
+        )
     except Exception as exc:
         logger.warning(f"补查种子失败: {exc}")
         return 0
+
+    # 命中与否都要落回 media_link：查到的清零，查不到的累加，否则计数永不推进。
+    # 但下载器一个都没答上话时不能记 —— 那是故障，跟「这个文件没有种子」是
+    # 两回事，记了就会让故障期间的关联白白攒满次数、进入降频期
+    if answered:
+        _record_probe(pending, mapping, now)
+    else:
+        logger.warning("补查种子：下载器均无响应，本轮不计入失败次数")
 
     if not mapping:
         return 0
@@ -1425,6 +1464,280 @@ def backfill_torrents(watch_id: int = 0) -> int:
             )
 
     return len(fresh)
+
+
+def _probe_due(row: dict, settings, now: datetime) -> bool:
+    """这条关联本轮该不该再去反查一次。
+
+    没到失败上限的照常每轮查 —— 那些窗口（下载未完成、完成后移动、事后做种）
+    通常几轮内就关上，早期多试几次代价小、收益大。
+    到了上限说明大概率永久查不到，改为按 WATCHDIR_TORRENT_RETRY_HOURS 重试；
+    该值配成 0 表示彻底放弃，不再浪费一次全量拉取。
+    """
+    limit = max(1, int(settings.watchdir_torrent_miss_limit or 1))
+    if (row.get("torrent_miss") or 0) < limit:
+        return True
+
+    hours = int(settings.watchdir_torrent_retry_hours or 0)
+    if hours <= 0:
+        return False
+
+    last = row.get("torrent_probe_time")
+    # 计数到了上限却没有时间戳（存量数据、手工改库），当作到期，让它查一次
+    # 顺便把时间戳补上，之后就能正常降频
+    if last is None:
+        return True
+    return now - last >= timedelta(hours=hours)
+
+
+def _record_probe(pending: list[dict], mapping: dict, now: datetime) -> None:
+    """把本轮反查结果写回 media_link 的计数与时间戳。
+
+    按 link_path（主键）分组批量更新。查到的清零 —— 那些窗口关上之后这条
+    关联就正常了，下次再进这个函数说明是新情况，不该背着旧计数。
+    """
+    hit, miss = [], []
+    for row in pending:
+        target = hit if mapping.get(row["source_path"]) else miss
+        target.append(row["link_path"])
+
+    if not hit and not miss:
+        return
+
+    with session_scope() as session:
+        if hit:
+            session.execute(
+                update(MediaLink)
+                .where(MediaLink.link_path.in_(hit))
+                .values(torrent_miss=0, torrent_probe_time=now)
+            )
+        for path in miss:
+            # 逐条自增，不能用统一的常量值 —— 各条的当前计数不同
+            session.execute(
+                update(MediaLink)
+                .where(MediaLink.link_path == path)
+                .values(
+                    torrent_miss=MediaLink.torrent_miss + 1,
+                    torrent_probe_time=now,
+                )
+            )
+
+
+def adopt_scrape_dir(dry_run: bool = True) -> dict:
+    """把刮削输出目录里「已存在但没登记」的影片纳入管理。
+
+    针对的是启用 cinefold 之前刮削工具就建好的那批链接：文件在媒体库里，
+    media_link 里却没有记录，于是 Emby 删片时反查不到源文件与种子，
+    删除联动对它们完全失效。
+
+    刮削输出目录不是监控规则（列表里是 id=0 的占位项），「全部对账」扫不到
+    它 —— sync_all 只遍历数据库里的 WatchDir 行。所以要单独一条入口。
+
+    配对靠 inode，不靠文件名：
+
+        媒体库里的链接  /volume3/h_video/日本AV/一条美绪/OFKU-232-有码.mp4
+        下载器里的源文件 /downloads/日本AV/ofku-232/ofku-232.mp4
+                        └── 同一个 inode，硬链接的文件系统保证
+
+    候选源文件从下载器的种子清单来，而不是猜某个下载目录 —— 种子里有什么、
+    存在哪，下载器才有权威答案，顺带这一趟就把种子 hash 也拿到了，
+    登记 media_link 与 History 一次做完。
+
+    code 从链接文件名提番号（find_serial_number）。提不出来的跳过而不是
+    退回文件名：这批文件本来就是刮削过的，文件名里必有番号；提不出来说明
+    它不是刮削产物（用户手放的、命名被改烂了），硬造一个 code 只会在
+    media_link 里留下一条永远对不上号的脏记录。
+
+    dry_run 默认为真：这个操作会写 media_link，而 media_link 是反向删除的
+    依据 —— 配错了等于把删除权指向错误的源文件。先让用户看清配对结果。
+
+    返回 {"adopted": [...], "unmatched": [...], "skipped": [...], "total": N}。
+    """
+    from app.modules.downloadclient import find_torrents_by_path
+    from app.utils import find_serial_number
+
+    settings = get_settings()
+    scrape_dir = (settings.medialink_scrape_dir or "").strip() \
+        or settings.medialink_library_path
+    result: dict = {
+        "scrape_dir": scrape_dir,
+        "dry_run": dry_run,
+        "total": 0,
+        "adopted": [],
+        "unmatched": [],
+        "skipped": [],
+        "errors": [],
+    }
+    if not scrape_dir:
+        result["errors"].append(
+            "未配置刮削输出目录（MEDIALINK_SCRAPE_DIR）与媒体库根目录"
+        )
+        return result
+
+    root = Path(scrape_dir)
+    if not root.is_dir():
+        result["errors"].append(f"刮削输出目录不存在或不可读: {scrape_dir}")
+        return result
+
+    # 目录里的视频文件，扣掉已登记的
+    with session_scope() as session:
+        registered = {
+            _norm_path(p) for (p,) in session.execute(
+                select(MediaLink.link_path)
+            ).all() if p
+        }
+
+    pending: list[Path] = []
+    try:
+        for path in root.rglob("*"):
+            try:
+                if path.suffix.lower() not in VIDEO_SUFFIXES or not path.is_file():
+                    continue
+            except OSError:
+                continue
+            if _norm_path(str(path)) in registered:
+                continue
+            pending.append(path)
+    except OSError as exc:
+        result["errors"].append(f"扫描刮削输出目录失败: {exc}")
+        return result
+
+    result["total"] = len(pending)
+    if not pending:
+        return result
+
+    # 建 (inode, device) → 未登记链接 的索引，等下用下载器给的源文件去命中。
+    # 同一 inode 可能有多个链接（刮削建了 -C/-UC 多份），全都要登记 ——
+    # Emby 删哪一份都得能反查回源文件
+    by_inode: dict[tuple[int, int], list[Path]] = {}
+    for path in pending:
+        try:
+            st = path.stat()
+        except OSError:
+            continue
+        if not st.st_ino:
+            # Windows 上取不到 inode，配对无从谈起
+            result["skipped"].append({
+                "link_path": str(path), "reason": "取不到 inode",
+            })
+            continue
+        by_inode.setdefault((st.st_ino, st.st_dev), []).append(path)
+
+    if not by_inode:
+        return result
+
+    # 下载器里全部种子的文件清单 —— 一次全量拉取，这也是 find_torrents_by_path
+    # 内部本来就要做的事，顺带把 hash 一起拿到
+    source_files = _all_torrent_files()
+    if not source_files:
+        result["errors"].append(
+            "下载器里没有取到任何种子文件，无法反查源文件。"
+            "请确认下载器已配置且可连通"
+        )
+
+    torrent_map = find_torrents_by_path(source_files) if source_files else {}
+
+    matched: dict[tuple[int, int], str] = {}
+    for source in source_files:
+        try:
+            st = os.stat(source)
+        except OSError:
+            continue  # 种子在，文件已被删
+        if not st.st_ino:
+            continue
+        key = (st.st_ino, st.st_dev)
+        if key in by_inode:
+            matched.setdefault(key, source)
+
+    plan: list[dict] = []
+    for key, links in by_inode.items():
+        source = matched.get(key)
+        if source is None:
+            for path in links:
+                result["unmatched"].append({"link_path": str(path)})
+            continue
+        for path in links:
+            code = find_serial_number(path.stem) or find_serial_number(
+                path.parent.name
+            )
+            if not code:
+                result["skipped"].append({
+                    "link_path": str(path), "reason": "文件名里提不出番号",
+                })
+                continue
+            plan.append({
+                "code": code,
+                "link_path": str(path),
+                "source_path": source,
+                "torrents": torrent_map.get(source) or [],
+            })
+
+    result["adopted"] = plan
+    if dry_run or not plan:
+        return result
+
+    with session_scope() as session:
+        for row in plan:
+            _register(
+                row["code"], row["source_path"], row["link_path"], session=session
+            )
+            _record_torrents(
+                row["code"], row["source_path"], torrent_map, session=session
+            )
+            mark_completed(row["code"], session=session)
+            logger.info(
+                f"[{row['code']}] 纳入管理: {row['source_path']} → "
+                f"{row['link_path']}，种子 {len(row['torrents'])} 个"
+            )
+
+    logger.info(
+        f"刮削输出目录纳管完成：登记 {len(plan)} 条，"
+        f"未配到源文件 {len(result['unmatched'])} 条，"
+        f"跳过 {len(result['skipped'])} 条"
+    )
+    return result
+
+
+def _all_torrent_files() -> list[str]:
+    """下载器里全部种子包含的文件路径，去重保序。
+
+    adopt_scrape_dir 用它当源文件候选集：媒体库里的链接要配回源文件，
+    而「源文件在哪」只有下载器知道 —— 猜下载根目录会漏掉「完成后移动」
+    到别处的、分类目录各异的、多个下载器的。
+    """
+    from app.modules.downloadclient import get_download_client, list_configured_clients
+
+    found: list[str] = []
+    seen: set[str] = set()
+    for name in list_configured_clients():
+        client = get_download_client(name)
+        if client is None:
+            continue
+        monitor = getattr(client, "monitor_torrent", None)
+        lister = getattr(client, "list_torrent_files", None)
+        if monitor is None or lister is None:
+            continue
+        try:
+            hashes = [t.get("hash", "") for t in monitor() if t.get("hash")]
+            for path in lister(hashes):
+                if path and path not in seen:
+                    seen.add(path)
+                    found.append(path)
+        except Exception as exc:
+            logger.warning(f"{name} 读取全部种子文件清单异常: {exc}")
+
+    if found:
+        logger.info(f"下载器里共 {len(found)} 个种子内文件，作为源文件候选")
+    return found
+
+
+def _norm_path(path: str) -> str:
+    """路径归一化，仅用于比对是否为同一条记录。
+
+    webhook 上报的与磁盘上扫到的写法可能不同（正反斜杠混用、盘符大小写），
+    直接比字符串会把已登记的误判成未登记，于是重复登记一遍。
+    """
+    return str(Path(path)).replace("\\", "/").casefold()
 
 
 def _register_alias(session, code: str, source_path: str) -> None:

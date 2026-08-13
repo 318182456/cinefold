@@ -625,6 +625,10 @@ class _FakeClient:
             out.extend(self.torrents.get(h, []))
         return out
 
+    def monitor_torrent(self, hashes=None):
+        """列出全部种子。adopt_scrape_dir 靠它拿源文件候选集。"""
+        return [{"hash": h, "name": h, "save_path": ""} for h in self.torrents]
+
     def delete_torrent(self, hashes, delete_files=False):
         hit = [h for h in hashes if h in self.torrents]
         self.deleted.extend(hit)
@@ -805,6 +809,121 @@ def test_backfill_skips_already_recorded(rule, fake_downloader):
     assert watchdir.backfill_torrents() == 0
 
 
+def _probe_state(link_suffix: str) -> tuple[int, object]:
+    """取某条 media_link 的反查计数与时间戳。"""
+    with session_scope() as session:
+        row = next(
+            r for r in session.scalars(sa.select(MediaLink)).all()
+            if r.link_path.endswith(link_suffix)
+        )
+        return row.torrent_miss, row.torrent_probe_time
+
+
+def test_backfill_counts_misses_and_then_throttles(rule, fake_downloader, monkeypatch):
+    """永久查不到的关联要在攒够次数后停止每轮重查。
+
+    手工拷进来的文件、种子早被删掉的文件都属于这类。不降频的话每轮对账都要
+    为它们向下载器拉一次全量种子列表，几千条就能把下载器刷到超时。
+    """
+    rule_id, source_dir, _ = rule
+    a = source_dir / "manual.mp4"
+    a.write_bytes(b"M" * 64)
+    # 下载器里始终没有这个文件对应的种子
+    watchdir.sync_rule(rule_id, dry_run=False)
+
+    calls = []
+    original = fake_downloader.find_torrents_by_path
+    monkeypatch.setattr(
+        fake_downloader, "find_torrents_by_path",
+        lambda paths: calls.append(list(paths)) or original(paths),
+    )
+
+    settings = watchdir.get_settings()
+    monkeypatch.setattr(settings, "watchdir_torrent_miss_limit", 3, raising=False)
+    monkeypatch.setattr(settings, "watchdir_torrent_retry_hours", 24, raising=False)
+
+    # 前三轮照常查，计数逐轮累加
+    for expected in (1, 2, 3):
+        assert watchdir.backfill_torrents() == 0
+        assert _probe_state("manual.mp4")[0] == expected
+    assert len(calls) == 3
+
+    # 第四轮起进入降频期，不再打下载器
+    assert watchdir.backfill_torrents() == 0
+    assert len(calls) == 3, "已达上限仍在每轮反查，降频没起作用"
+    assert _probe_state("manual.mp4")[0] == 3
+
+
+def test_backfill_retries_after_throttle_window(rule, fake_downloader, monkeypatch):
+    """降频不是永久放弃：过了重试间隔还要再查一次（事后做种的情形）。"""
+    rule_id, source_dir, _ = rule
+    a = source_dir / "later.mp4"
+    a.write_bytes(b"L" * 64)
+    watchdir.sync_rule(rule_id, dry_run=False)
+
+    settings = watchdir.get_settings()
+    monkeypatch.setattr(settings, "watchdir_torrent_miss_limit", 1, raising=False)
+    monkeypatch.setattr(settings, "watchdir_torrent_retry_hours", 24, raising=False)
+
+    assert watchdir.backfill_torrents() == 0
+    assert _probe_state("later.mp4")[0] == 1
+    # 立刻再来一轮：在降频期内，不查
+    assert watchdir.backfill_torrents() == 0
+
+    # 把时间戳往前推超过重试间隔，同时让种子出现
+    with session_scope() as session:
+        for row in session.scalars(sa.select(MediaLink)).all():
+            row.torrent_probe_time = datetime.now() - timedelta(hours=25)
+    fake_downloader.torrents["HASH_LATER"] = [str(a)]
+
+    assert watchdir.backfill_torrents() == 1
+    # 查到了要清零，否则下次又背着旧计数直接进降频期
+    assert _probe_state("later.mp4")[0] == 0
+
+
+def test_backfill_force_ignores_throttle(rule, fake_downloader, monkeypatch):
+    """手动触发要无视降频 —— 用户点按钮就是要立刻查一次。"""
+    rule_id, source_dir, _ = rule
+    a = source_dir / "forced.mp4"
+    a.write_bytes(b"F" * 64)
+    watchdir.sync_rule(rule_id, dry_run=False)
+
+    settings = watchdir.get_settings()
+    monkeypatch.setattr(settings, "watchdir_torrent_miss_limit", 1, raising=False)
+    monkeypatch.setattr(settings, "watchdir_torrent_retry_hours", 0, raising=False)
+
+    assert watchdir.backfill_torrents() == 0
+    # retry_hours=0 表示到上限后彻底不再查，定时那条路应当跳过
+    assert watchdir.backfill_torrents() == 0
+
+    fake_downloader.torrents["HASH_FORCED"] = [str(a)]
+    assert watchdir.backfill_torrents() == 0, "定时路径不该无视降频"
+    assert watchdir.backfill_torrents(force=True) == 1
+
+
+def test_backfill_downloader_outage_does_not_count_as_miss(
+    rule, fake_downloader, monkeypatch
+):
+    """下载器整体不可达不算「这个文件查不到种子」。
+
+    否则 qb 挂一阵子就把所有待补关联推进降频期，等它恢复了反而不查了。
+    """
+    rule_id, source_dir, _ = rule
+    a = source_dir / "outage.mp4"
+    a.write_bytes(b"O" * 64)
+    watchdir.sync_rule(rule_id, dry_run=False)
+
+    def boom(paths):
+        raise RuntimeError("Read timed out")
+
+    monkeypatch.setattr(fake_downloader, "find_torrents_by_path", boom)
+    assert watchdir.backfill_torrents() == 0
+
+    miss, probed = _probe_state("outage.mp4")
+    assert miss == 0, "下载器故障被计入了失败次数"
+    assert probed is None
+
+
 def test_backfill_makes_later_torrent_deletable(rule, fake_downloader, monkeypatch):
     """补登记之后，即使下载器现查失效也能删掉种子。"""
     rule_id, source_dir, library = rule
@@ -943,6 +1062,201 @@ def test_scrape_dir_listed_as_protected(client, tmp_path, configure):
     assert items[0]["protected"] is True
     assert items[0]["id"] == 0
     assert items[0]["resolved_target"] == str(scrape)
+
+
+def test_scrape_dir_counts_files_and_unregistered(client, tmp_path, configure):
+    """刮削输出目录实时统计影片数与已登记数。
+
+    差额就是刮削工具建好但没走 webhook 的既存文件 —— 它们不在删除联动的
+    管辖范围内，页面据此提示用户。
+    """
+    from app.database.models import MediaLink
+    from app.database.session import session_scope
+
+    scrape = tmp_path / "h_video" / "日本AV"
+    (scrape / "ABC-123").mkdir(parents=True)
+    (scrape / "ABC-123" / "ABC-123.mp4").write_text("x")
+    (scrape / "ABC-123" / "ABC-123.nfo").write_text("x")  # 非视频，不计入
+    (scrape / "DEF-456").mkdir()
+    (scrape / "DEF-456" / "DEF-456.mkv").write_text("x")
+
+    with session_scope() as session:
+        session.add(MediaLink(
+            link_path=str(scrape / "ABC-123" / "ABC-123.mp4"),
+            code="ABC-123", source_path=str(tmp_path / "dl" / "ABC-123.mp4"),
+        ))
+
+    configure(
+        medialink_library_path=str(tmp_path / "h_video"),
+        medialink_scrape_dir=str(scrape),
+    )
+    item = client.get("/api/v1/watchdirs").json()["data"]["items"][0]
+
+    assert item["file_count"] == 2
+    assert item["registered_count"] == 1
+
+
+def test_scrape_dir_counts_zero_when_missing(client, tmp_path, configure):
+    """目录不存在时统计不报错，返回 0。"""
+    configure(
+        medialink_library_path=str(tmp_path),
+        medialink_scrape_dir=str(tmp_path / "nope"),
+    )
+    item = client.get("/api/v1/watchdirs").json()["data"]["items"][0]
+    assert item["file_count"] == 0
+    assert item["registered_count"] == 0
+
+
+def test_adopt_scrape_dir_matches_by_inode(tmp_path, configure, fake_downloader):
+    """刮削目录里的既存链接按 inode 配回下载器的源文件，并登记种子。"""
+    from app.database.models import History, MediaLink
+
+    dl = tmp_path / "downloads" / "ofku-232"
+    dl.mkdir(parents=True)
+    source = dl / "ofku-232.mp4"
+    source.write_bytes(b"V" * 64)
+
+    # 刮削工具建的链接：路径与命名跟源文件完全不同，只有 inode 相同
+    scrape = tmp_path / "h_video" / "日本AV" / "一条美绪"
+    scrape.mkdir(parents=True)
+    link = scrape / "OFKU-232-有码.mp4"
+    os.link(source, link)
+
+    fake_downloader.torrents["HASH_X"] = [str(source)]
+    configure(
+        medialink_library_path=str(tmp_path / "h_video"),
+        medialink_scrape_dir=str(tmp_path / "h_video" / "日本AV"),
+    )
+
+    # 先演练：不该写库
+    preview = watchdir.adopt_scrape_dir(dry_run=True)
+    assert preview["total"] == 1
+    assert len(preview["adopted"]) == 1
+    assert preview["adopted"][0]["code"] == "OFKU-232"
+    assert preview["adopted"][0]["source_path"] == str(source)
+    assert preview["adopted"][0]["torrents"] == ["HASH_X"]
+    with session_scope() as session:
+        assert session.scalars(sa.select(MediaLink)).all() == []
+
+    result = watchdir.adopt_scrape_dir(dry_run=False)
+    assert len(result["adopted"]) == 1
+
+    with session_scope() as session:
+        record = session.get(MediaLink, str(link))
+        assert record is not None
+        assert record.code == "OFKU-232"
+        assert record.source_path == str(source)
+        # 种子一并落库，反向删除才有据可依
+        hashes = [h for (h,) in session.execute(sa.select(History.hash)).all()]
+        assert hashes == ["HASH_X"]
+
+
+def test_adopt_scrape_dir_skips_already_registered(
+    tmp_path, configure, fake_downloader
+):
+    """已登记的不重复处理 —— 否则每次点都把 source_path 覆盖一遍。"""
+    dl = tmp_path / "downloads"
+    dl.mkdir()
+    source = dl / "abc-123.mp4"
+    source.write_bytes(b"V")
+    scrape = tmp_path / "lib" / "AV"
+    scrape.mkdir(parents=True)
+    link = scrape / "ABC-123.mp4"
+    os.link(source, link)
+
+    fake_downloader.torrents["H1"] = [str(source)]
+    configure(
+        medialink_library_path=str(tmp_path / "lib"),
+        medialink_scrape_dir=str(scrape),
+    )
+
+    assert len(watchdir.adopt_scrape_dir(dry_run=False)["adopted"]) == 1
+    # 第二次就没有待纳管的了
+    again = watchdir.adopt_scrape_dir(dry_run=True)
+    assert again["total"] == 0
+    assert again["adopted"] == []
+
+
+def test_adopt_scrape_dir_reports_unmatched(tmp_path, configure, fake_downloader):
+    """源文件不在下载器里的配不上，如实报出来而不是静默跳过。"""
+    scrape = tmp_path / "lib" / "AV"
+    scrape.mkdir(parents=True)
+    (scrape / "XYZ-999.mp4").write_bytes(b"V")  # 孤立文件，没有源文件
+
+    configure(
+        medialink_library_path=str(tmp_path / "lib"),
+        medialink_scrape_dir=str(scrape),
+    )
+    result = watchdir.adopt_scrape_dir(dry_run=True)
+
+    assert result["total"] == 1
+    assert result["adopted"] == []
+    assert len(result["unmatched"]) == 1
+
+
+def test_adopt_scrape_dir_skips_files_without_code(
+    tmp_path, configure, fake_downloader
+):
+    """提不出番号的跳过 —— 硬造 code 会留下永远对不上号的脏记录。"""
+    dl = tmp_path / "downloads"
+    dl.mkdir()
+    source = dl / "随手拍的视频.mp4"
+    source.write_bytes(b"V")
+    scrape = tmp_path / "lib" / "AV"
+    scrape.mkdir(parents=True)
+    os.link(source, scrape / "随手拍的视频.mp4")
+
+    fake_downloader.torrents["H1"] = [str(source)]
+    configure(
+        medialink_library_path=str(tmp_path / "lib"),
+        medialink_scrape_dir=str(scrape),
+    )
+    result = watchdir.adopt_scrape_dir(dry_run=True)
+
+    assert result["adopted"] == []
+    assert len(result["skipped"]) == 1
+    assert "番号" in result["skipped"][0]["reason"]
+
+
+def test_adopt_scrape_dir_without_config(tmp_path, configure):
+    """没配刮削目录也没配库根时如实报错，不静默返回空。"""
+    configure(medialink_library_path="", medialink_scrape_dir="")
+    result = watchdir.adopt_scrape_dir(dry_run=True)
+    assert result["errors"]
+
+
+def test_adopt_scrape_endpoint_defaults_to_dry_run(
+    client, tmp_path, configure, fake_downloader
+):
+    """接口默认演练 —— 登记是反向删除的依据，不能不问就写。"""
+    from app.database.models import MediaLink
+
+    dl = tmp_path / "downloads"
+    dl.mkdir()
+    source = dl / "def-456.mp4"
+    source.write_bytes(b"V")
+    scrape = tmp_path / "lib" / "AV"
+    scrape.mkdir(parents=True)
+    os.link(source, scrape / "DEF-456.mp4")
+
+    fake_downloader.torrents["H2"] = [str(source)]
+    configure(
+        medialink_library_path=str(tmp_path / "lib"),
+        medialink_scrape_dir=str(scrape),
+    )
+
+    body = client.post("/api/v1/watchdirs/adopt-scrape").json()
+    assert body["code"] == 200
+    assert len(body["data"]["adopted"]) == 1
+    with session_scope() as session:
+        assert session.scalars(sa.select(MediaLink)).all() == []
+
+    body = client.post(
+        "/api/v1/watchdirs/adopt-scrape", params={"dry_run": False}
+    ).json()
+    assert len(body["data"]["adopted"]) == 1
+    with session_scope() as session:
+        assert len(session.scalars(sa.select(MediaLink)).all()) == 1
 
 
 def test_scrape_dir_falls_back_to_library(client, tmp_path, configure):

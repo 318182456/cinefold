@@ -20,7 +20,8 @@ from app.database.models import WatchDir
 from app.database.session import session_scope
 from app.schemas.reponse import ResponseEntity
 from app.services.watchdir import (
-    backfill_torrents, cancel_hold, list_holds, sync_all, sync_rule,
+    adopt_scrape_dir, backfill_torrents, cancel_hold, list_holds, sync_all,
+    sync_rule,
 )
 
 router = APIRouter(prefix="/watchdirs", tags=["监控目录"])
@@ -127,6 +128,7 @@ def list_watchdirs(current_user: str = Depends(get_current_user)):
     # 改显示成「由刮削 webhook 逐条登记」
     scrape_dir = (settings.medialink_scrape_dir or "").strip() or library
     if scrape_dir:
+        total, registered = _count_scrape_files(scrape_dir)
         rows.insert(0, {
             "id": 0,
             "protected": True,
@@ -143,7 +145,13 @@ def list_watchdirs(current_user: str = Depends(get_current_user)):
             "source_exists": False,
             "target_exists": Path(scrape_dir).is_dir(),
             "last_scan_time": "",
-            "file_count": 0,
+            # 真实规则的 file_count 来自上次同步的记录；刮削输出目录没有同步
+            # 这回事，直接实时数一遍目录
+            "file_count": total,
+            # 已登记数与总数的差额 = 刮削工具建好但 media_link 里没有的既存
+            # 文件。这些文件在 Emby 里删掉不会联动删源文件与种子，页面要
+            # 明确显示出来，否则用户以为全在管辖范围内
+            "registered_count": registered,
             "last_error": "",
             "create_time": "",
         })
@@ -295,11 +303,30 @@ def backfill(watch_id: int = 0, current_user: str = Depends(get_current_user)):
     建链接那一刻种子可能还不在下载器里（下载未完成、完成后才移入监控目录、
     事后做种），此时 History 是空的，删除时就查不到种子。这个接口补上。
     定时对账里也会自动跑一次。
+
+    force=True：手动点这个接口就是要立刻查一遍，无视「连续查不到已降频」，
+    定时对账那条路仍然遵守降频。
     """
-    added = backfill_torrents(watch_id)
+    added = backfill_torrents(watch_id, force=True)
     return ResponseEntity.ok(
         {"added": added}, message=f"补登记 {added} 个种子"
     )
+
+
+@router.post("/adopt-scrape")
+def adopt_scrape(
+    dry_run: bool = True, current_user: str = Depends(get_current_user)
+):
+    """把刮削输出目录里已存在但没登记的影片纳入管理。
+
+    刮削输出目录不是监控规则，「全部对账」扫不到它 —— 启用 cinefold 之前
+    刮削工具建好的那批链接因此一直在管辖范围之外，Emby 里删掉不会联动
+    删源文件与种子。这个接口按 inode 把它们配回下载器里的源文件。
+
+    dry_run 默认为真：登记结果是反向删除的依据，配错等于把删除权指向错误的
+    源文件，必须先让用户核对配对结果。
+    """
+    return ResponseEntity.ok(adopt_scrape_dir(dry_run=dry_run))
 
 
 @router.get("/holds")
@@ -461,6 +488,55 @@ def sync_one(
             "; ".join(result.errors[:3]), code=400, data=result.as_dict()
         )
     return ResponseEntity.ok(result.as_dict())
+
+
+def _count_scrape_files(scrape_dir: str) -> tuple[int, int]:
+    """数刮削输出目录里的影片数，返回 (总数, 已登记数)。
+
+    刮削输出目录不是监控规则，没有 file_count 可读，只能每次列表时实时扫。
+    只数视频文件 —— 目录里 nfo/jpg 比影片多得多，算进去这个数就没意义了。
+
+    已登记数按 media_link.link_path 落在该目录下来算。差额就是刮削工具建好
+    但从没走过 webhook 的既存文件：Emby 里删掉它们不会联动删源文件与种子。
+
+    大目录上这个扫描要几秒。目录不可读时返回 (0, 0)，页面照旧显示，
+    不为了一个统计数字让整个列表接口失败。
+    """
+    from app.database.models import MediaLink
+    from app.services.medialink import VIDEO_SUFFIXES
+
+    root = Path(scrape_dir)
+    try:
+        found = {
+            str(p) for p in root.rglob("*")
+            if p.suffix.lower() in VIDEO_SUFFIXES and p.is_file()
+        }
+    except OSError as exc:
+        logger.warning(f"统计刮削输出目录文件数失败: {exc}")
+        return 0, 0
+
+    if not found:
+        return 0, 0
+
+    # 比对时统一大小写与分隔符：webhook 上报的路径可能与实际扫到的写法不同
+    # （Windows 上盘符大小写、正反斜杠混用），直接比字符串会把已登记的
+    # 误判成未登记
+    def norm(path: str) -> str:
+        return str(Path(path)).replace("\\", "/").casefold()
+
+    normalized = {norm(p) for p in found}
+    registered = 0
+    try:
+        with session_scope() as session:
+            for link_path in session.scalars(select(MediaLink.link_path)).all():
+                if link_path and norm(link_path) in normalized:
+                    registered += 1
+    except Exception as exc:
+        # 统计不到不影响列表，总数照样有用
+        logger.warning(f"统计刮削输出目录已登记数失败: {exc}")
+        return len(found), 0
+
+    return len(found), registered
 
 
 def _resolve_target(

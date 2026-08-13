@@ -136,6 +136,11 @@ class Settings:
     # 这个兜底才是实际起作用的那条路径，间隔短一点响应更快。
     # 每轮要扫源目录并逐条比对，目录很大时别设太小
     watchdir_sync_interval: int = 30
+    # 补查种子连续失败几次后转为低频重试。手工拷进来的文件、种子早被删掉的
+    # 文件永远查不到，不降频的话每轮对账都要为它们拉一次全量种子列表
+    watchdir_torrent_miss_limit: int = 3
+    # 降频后的重试间隔（小时）。设为 0 则达到上限后永不再查
+    watchdir_torrent_retry_hours: int = 24
 
     # --- 下载器 ---
     qbittorrent_url: str = ""
@@ -432,6 +437,8 @@ def load_settings() -> Settings:
         watchdir_delete_grace=_env_int("WATCHDIR_DELETE_GRACE", 1800),
         watchdir_auto_sync=_env_bool("WATCHDIR_AUTO_SYNC", True),
         watchdir_sync_interval=_env_int("WATCHDIR_SYNC_INTERVAL", 30),
+        watchdir_torrent_miss_limit=_env_int("WATCHDIR_TORRENT_MISS_LIMIT", 3),
+        watchdir_torrent_retry_hours=_env_int("WATCHDIR_TORRENT_RETRY_HOURS", 24),
 
         qbittorrent_url=_env("QBITTORRENT_URL"),
         qbittorrent_username=_env("QBITTORRENT_USERNAME"),

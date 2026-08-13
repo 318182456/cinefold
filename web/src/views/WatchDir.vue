@@ -1,9 +1,9 @@
 <script setup>
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import {
-  backfillWatchDirTorrents, cancelWatchDirHold, createWatchDir, deleteWatchDir,
-  getWatchDirProgress, listWatchDirHolds, listWatchDirs, syncAllWatchDirs,
-  syncWatchDir, updateWatchDir,
+  adoptScrapeDir, backfillWatchDirTorrents, cancelWatchDirHold, createWatchDir,
+  deleteWatchDir, getWatchDirProgress, listWatchDirHolds, listWatchDirs,
+  syncAllWatchDirs, syncWatchDir, updateWatchDir,
 } from '@/api'
 import { useToast } from '@/composables/useToast'
 import LoadingBlock from '@/components/LoadingBlock.vue'
@@ -35,6 +35,11 @@ const saving = ref(false)
 const syncResult = ref(null)
 const syncing = ref(false)
 const confirmingRule = ref(null)
+
+// 刮削输出目录既存文件纳管的演练结果
+const adoptOpen = ref(false)
+const adoptResult = ref(null)
+const adopting = ref(false)
 
 // 同步进度。真同步走后台线程，靠轮询这个接口看它跑到哪了 ——
 // 每个新文件都要等写入稳定（最多 6 秒），没有进度就完全是黑盒
@@ -159,6 +164,13 @@ const graceLabel = computed(() => {
 
 function fileName(path) {
   return (path || '').split(/[\\/]/).pop() || path
+}
+
+// 刮削输出目录才有 registered_count：目录里实际存在多少影片、其中多少条
+// 登记过关联。差额是刮削工具建好但从没走 webhook 的既存文件
+function unregisteredCount(item) {
+  if (item.registered_count === undefined) return 0
+  return Math.max(0, (item.file_count || 0) - item.registered_count)
 }
 
 function waitLabel(item) {
@@ -324,6 +336,36 @@ async function backfill() {
     toast.error(err.message)
   } finally {
     syncing.value = false
+  }
+}
+
+// 刮削输出目录的既存文件纳管。先演练看配对结果，再执行 ——
+// 登记的是反向删除的依据，配错等于把删除权指向错误的源文件
+async function previewAdopt() {
+  adoptResult.value = null
+  adoptOpen.value = true
+  adopting.value = true
+  try {
+    adoptResult.value = await adoptScrapeDir(true)
+  } catch (err) {
+    toast.error(err.message)
+    adoptOpen.value = false
+  } finally {
+    adopting.value = false
+  }
+}
+
+async function runAdopt() {
+  adopting.value = true
+  try {
+    const data = await adoptScrapeDir(false)
+    toast.success(`已纳入管理 ${(data.adopted || []).length} 个影片`)
+    adoptOpen.value = false
+    await load()
+  } catch (err) {
+    toast.error(err.message)
+  } finally {
+    adopting.value = false
   }
 }
 
@@ -524,14 +566,35 @@ onUnmounted(() => {
           <span v-if="item.file_count" class="text-[11px] text-gray-600">
             {{ item.file_count }} 个文件
           </span>
+          <!-- 刮削输出目录里可能有刮削工具建好但没走 webhook 的既存文件，
+               它们不在删除联动的管辖范围内，得明确标出来 -->
+          <span
+            v-if="unregisteredCount(item)"
+            class="badge bg-amber-950/60 text-amber-400"
+            title="这些文件没有登记关联：在 Emby 里删掉不会连带删除源文件与种子"
+          >
+            {{ unregisteredCount(item) }} 个未登记
+          </span>
           <span v-if="item.last_scan_time" class="text-[11px] text-gray-600">
             {{ item.last_scan_time }}
           </span>
 
-          <!-- 刮削输出目录是占位项，由刮削工具与 webhook 联动维护，无可操作动作 -->
-          <span v-if="item.protected" class="ml-auto text-[11px] text-gray-600">
-            由刮削联动维护 · 在「设置 → 媒体联动」中修改
-          </span>
+          <!-- 刮削输出目录是占位项，由 webhook 逐条登记，没有同步/编辑动作。
+               唯一的例外是纳管既存文件 —— webhook 只管它上报过的那些 -->
+          <div v-if="item.protected" class="ml-auto flex items-center gap-2">
+            <button
+              v-if="unregisteredCount(item)"
+              class="btn-ghost px-2 py-0.5 text-[11px] text-amber-400"
+              :disabled="adopting"
+              title="按 inode 把这些文件配回下载器里的源文件与种子，纳入删除联动"
+              @click="previewAdopt"
+            >
+              纳入管理
+            </button>
+            <span class="text-[11px] text-gray-600">
+              在「设置 → 媒体联动」中修改
+            </span>
+          </div>
           <div v-else class="ml-auto flex items-center gap-1">
             <button class="btn-ghost px-2 py-0.5 text-[11px]" @click="preview(item)">
               同步
@@ -603,6 +666,14 @@ onUnmounted(() => {
             </div>
           </div>
         </div>
+
+        <!-- 未登记的既存文件不在删除联动范围内，也没有自动补全的途径 ——
+             刮削输出目录不是监控规则，「全部对账」不会扫它 -->
+        <p v-if="unregisteredCount(item)" class="text-[11px] text-amber-400">
+          有 {{ unregisteredCount(item) }} 个影片没有登记关联（多为启用 cinefold
+          之前刮削的）。它们在 Emby 里删掉不会连带删除源文件与种子 ——
+          点「纳入管理」按 inode 配回下载器里的源文件。
+        </p>
 
         <p v-if="item.last_error" class="text-[11px] text-amber-400">
           {{ item.last_error }}
@@ -888,6 +959,102 @@ onUnmounted(() => {
             @click="runSync"
           >
             {{ syncing ? '同步中…' : '执行同步' }}
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 刮削输出目录纳管确认：先看 inode 配对结果 -->
+    <div
+      v-if="adoptOpen"
+      class="fixed inset-0 z-40 flex items-center justify-center bg-black/60 p-4"
+      @click.self="adoptOpen = false"
+    >
+      <div class="card w-full max-w-lg space-y-3">
+        <p class="text-sm font-medium text-gray-200">纳入管理（刮削输出目录）</p>
+
+        <LoadingBlock v-if="adopting && !adoptResult" :rows="3" />
+
+        <template v-else-if="adoptResult">
+          <p class="text-xs text-gray-400">
+            未登记 {{ adoptResult.total }} 个 ·
+            可纳管 {{ (adoptResult.adopted || []).length }} ·
+            配不到源文件 {{ (adoptResult.unmatched || []).length }} ·
+            跳过 {{ (adoptResult.skipped || []).length }}
+          </p>
+
+          <div v-if="(adoptResult.adopted || []).length" class="space-y-1">
+            <p class="text-[11px] text-emerald-400">
+              将登记这些关联（按 inode 配对，不动任何文件）
+            </p>
+            <p
+              v-for="a in adoptResult.adopted.slice(0, 8)"
+              :key="a.link_path"
+              class="truncate text-[11px] text-gray-500"
+              :title="`${a.source_path} → ${a.link_path}`"
+            >
+              {{ a.code }} · 种子 {{ (a.torrents || []).length }} ·
+              {{ fileName(a.link_path) }}
+            </p>
+            <p v-if="adoptResult.adopted.length > 8" class="text-[11px] text-gray-600">
+              还有 {{ adoptResult.adopted.length - 8 }} 条…
+            </p>
+          </div>
+
+          <!-- 配不到源文件的多是种子已删、或源文件被移走后失去硬链接关系。
+               这些没法自动纳管，说清原因免得用户以为按钮没生效 -->
+          <div v-if="(adoptResult.unmatched || []).length" class="space-y-1">
+            <p class="text-[11px] text-amber-400">
+              配不到源文件（种子已删、或源文件已不在下载器里），无法纳管
+            </p>
+            <p
+              v-for="u in adoptResult.unmatched.slice(0, 5)"
+              :key="u.link_path"
+              class="truncate text-[11px] text-gray-600"
+              :title="u.link_path"
+            >
+              {{ fileName(u.link_path) }}
+            </p>
+            <p v-if="adoptResult.unmatched.length > 5" class="text-[11px] text-gray-600">
+              还有 {{ adoptResult.unmatched.length - 5 }} 条…
+            </p>
+          </div>
+
+          <div v-if="(adoptResult.skipped || []).length" class="space-y-1">
+            <p class="text-[11px] text-gray-500">跳过</p>
+            <p
+              v-for="(s, i) in adoptResult.skipped.slice(0, 5)"
+              :key="i"
+              class="truncate text-[11px] text-gray-600"
+              :title="s.link_path"
+            >
+              {{ fileName(s.link_path) }} · {{ s.reason }}
+            </p>
+          </div>
+
+          <p v-if="(adoptResult.errors || []).length" class="text-[11px] text-red-400">
+            {{ adoptResult.errors.join('; ') }}
+          </p>
+
+          <p
+            v-if="(adoptResult.adopted || []).length"
+            class="rounded-lg bg-amber-950/40 px-3 py-2 text-[11px] text-amber-300"
+          >
+            登记后这些影片就进入删除联动范围：在 Emby 里删掉会连带删源文件与种子。
+            请先核对上面的番号与配对是否合理。
+          </p>
+        </template>
+
+        <div class="flex justify-end gap-2 pt-1">
+          <button class="btn-ghost px-3 py-1.5 text-xs" @click="adoptOpen = false">
+            取消
+          </button>
+          <button
+            class="btn-primary px-3 py-1.5 text-xs"
+            :disabled="adopting || !(adoptResult?.adopted || []).length"
+            @click="runAdopt"
+          >
+            {{ adopting ? '登记中…' : '确认纳入管理' }}
           </button>
         </div>
       </div>
