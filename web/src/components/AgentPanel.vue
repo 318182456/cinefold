@@ -20,9 +20,8 @@ const SUGGESTIONS = [
 ]
 
 // 需要慎重确认的操作各自的后果说明。未列出的按「只移除任务」处理
+// 删除类的提示由确认框里的复选框自己给，这里只留其余动作
 const PROPOSAL_HINT = {
-  delete_with_files: '磁盘文件会一并删除，不可恢复',
-  delete: '只从下载器移除任务，磁盘文件保留',
   transfer: '文件不移动，由 Transmission 接管做种；按配置可能会删掉 qB 的源任务',
 }
 
@@ -175,7 +174,12 @@ async function send(text) {
 
   try {
     const data = await askAgent(content, history)
-    const fresh = (data?.proposals || []).map((p) => ({ ...p, status: 'pending' }))
+    const fresh = (data?.proposals || []).map((p) => ({
+      ...p,
+      status: 'pending',
+      // 删除类操作的「同时删除文件」初始值取助手选的动作，最终由用户勾选决定
+      deleteFiles: p.action === 'delete_with_files',
+    }))
     // 新提案顶掉旧的：用户说「不保留文件」是在改上一条的条件，不是要
     // 同时挂两条针对同一批任务的操作
     if (fresh.length) supersedePending()
@@ -198,11 +202,24 @@ async function send(text) {
   }
 }
 
+const DELETE_ACTIONS = ['delete', 'delete_with_files']
+const isDelete = (proposal) => DELETE_ACTIONS.includes(proposal.action)
+
+/** 按钮上直接写清会做什么，勾没勾文件一眼可辨。 */
+function confirmLabel(proposal) {
+  if (!isDelete(proposal)) return '确认执行'
+  return proposal.deleteFiles ? '删除任务和文件' : '仅删除任务'
+}
+
 async function confirmProposal(proposal) {
   if (proposal.status !== 'pending') return
   proposal.status = 'running'
   try {
-    const data = await confirmAgentAction(proposal.id)
+    // 非删除类操作不带这个字段，免得后端拿它去改动作
+    const data = await confirmAgentAction(
+      proposal.id,
+      isDelete(proposal) ? proposal.deleteFiles : null,
+    )
     proposal.status = 'done'
     proposal.result = data?.message || `已${proposal.label}`
   } catch (err) {
@@ -405,8 +422,31 @@ onBeforeUnmount(() => {
                 </li>
               </ul>
 
-              <p v-if="proposal.destructive && proposal.status === 'pending'" class="mt-1.5 text-[11px] text-red-400">
-                {{ PROPOSAL_HINT[proposal.action] || '只从下载器移除任务，磁盘文件保留' }}
+              <!-- 删不删文件在这里定，助手提案时选的动作只作为初始值 -->
+              <label
+                v-if="isDelete(proposal) && proposal.status === 'pending'"
+                class="mt-2 flex cursor-pointer items-start gap-1.5"
+              >
+                <input
+                  v-model="proposal.deleteFiles"
+                  type="checkbox"
+                  class="mt-0.5 h-3.5 w-3.5 shrink-0 cursor-pointer accent-red-600"
+                >
+                <span :class="proposal.deleteFiles ? 'text-red-300' : 'text-gray-400'">
+                  同时删除磁盘文件
+                  <span class="block text-[10px]" :class="proposal.deleteFiles ? 'text-red-400' : 'text-gray-600'">
+                    {{ proposal.deleteFiles
+                      ? '文件将一并删除，不可恢复'
+                      : '不勾选则只移除任务，文件保留在磁盘上' }}
+                  </span>
+                </span>
+              </label>
+
+              <p
+                v-else-if="proposal.destructive && proposal.status === 'pending'"
+                class="mt-1.5 text-[11px] text-red-400"
+              >
+                {{ PROPOSAL_HINT[proposal.action] || '' }}
               </p>
               <p v-if="proposal.error" class="mt-1.5 text-[11px] text-red-400">
                 {{ proposal.error }}
@@ -418,7 +458,7 @@ onBeforeUnmount(() => {
                   :class="proposal.destructive ? 'bg-red-600 hover:bg-red-700' : 'bg-brand hover:bg-brand-hover'"
                   @click="confirmProposal(proposal)"
                 >
-                  确认执行
+                  {{ confirmLabel(proposal) }}
                 </button>
                 <button
                   class="rounded border border-gray-700 px-2 py-1 text-[11px] text-gray-400 hover:bg-gray-800"

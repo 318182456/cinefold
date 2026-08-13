@@ -233,6 +233,63 @@ class TestExecuteProposal:
         execute(result["proposal"]["id"])
         assert fake_downloader.calls == [("delete(delete_files=True)", ["AAA1"])]
 
+    def test_checkbox_can_add_file_deletion(self, fake_downloader):
+        """提案是 delete，勾上复选框后应改成连文件一起删。"""
+        from app.modules.agent.actions import execute
+
+        result = json.loads(call_tool("propose_action", json.dumps({"action": "delete", "hashes": ["AAA1"]})))
+        outcome = execute(result["proposal"]["id"], delete_files=True)
+        assert fake_downloader.calls == [("delete(delete_files=True)", ["AAA1"])]
+        # 回执要说的是真正做了的事，不能还照提案时的措辞
+        assert "文件" in outcome["message"]
+
+    def test_checkbox_can_remove_file_deletion(self, fake_downloader):
+        """提案是 delete_with_files，取消勾选后必须只删任务 —— 这条错了就是误删文件。"""
+        from app.modules.agent.actions import execute
+
+        result = json.loads(call_tool("propose_action", json.dumps({
+            "action": "delete_with_files", "hashes": ["AAA1"],
+        })))
+        execute(result["proposal"]["id"], delete_files=False)
+        assert fake_downloader.calls == [("delete(delete_files=False)", ["AAA1"])]
+
+    def test_none_keeps_proposal_action(self, fake_downloader):
+        """不传复选框状态时沿用提案里的动作。"""
+        from app.modules.agent.actions import execute
+
+        result = json.loads(call_tool("propose_action", json.dumps({
+            "action": "delete_with_files", "hashes": ["AAA1"],
+        })))
+        execute(result["proposal"]["id"], delete_files=None)
+        assert fake_downloader.calls == [("delete(delete_files=True)", ["AAA1"])]
+
+    def test_flag_ignored_for_non_delete(self, fake_downloader):
+        """暂停操作不该被 delete_files 影响成删除。"""
+        from app.modules.agent.actions import execute
+
+        result = json.loads(call_tool("propose_action", json.dumps({"action": "pause", "hashes": ["AAA1"]})))
+        execute(result["proposal"]["id"], delete_files=True)
+        assert fake_downloader.calls == [("pause", ["AAA1"])]
+
+    def test_history_cleared_regardless_of_checkbox(self, fake_downloader):
+        """只删任务也要清历史 —— 种子没了，留着记录订阅任务照样会跳过。"""
+        import sqlalchemy as sa
+
+        from app.database.models import History
+        from app.database.session import session_scope
+        from app.modules.agent.actions import execute
+
+        with session_scope() as session:
+            session.add(History(hash="AAA1", code="ABC-9", save_path="/x/a.mp4"))
+
+        result = json.loads(call_tool("propose_action", json.dumps({
+            "action": "delete_with_files", "hashes": ["AAA1"],
+        })))
+        execute(result["proposal"]["id"], delete_files=False)
+
+        with session_scope() as session:
+            assert session.scalar(sa.select(History).where(History.hash == "AAA1")) is None
+
     def test_proposal_is_single_use(self, fake_downloader):
         """重复点确认不能执行两遍。"""
         from app.modules.agent.actions import execute

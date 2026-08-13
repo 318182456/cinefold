@@ -43,6 +43,8 @@ def agent_chat(body: ChatRequest, current_user: str = Depends(get_current_user))
 
 class ConfirmRequest(BaseModel):
     proposal_id: str
+    # 删除类操作时由确认对话上的复选框传入；None 表示沿用提案里的动作
+    delete_files: bool | None = None
 
 
 @router.post("/agent/confirm")
@@ -50,7 +52,7 @@ def agent_confirm(body: ConfirmRequest, current_user: str = Depends(get_current_
     """执行助手提出的下载器操作。只有走过这一步才会真的动手。"""
     from app.modules.agent.actions import execute
 
-    result = execute(body.proposal_id)
+    result = execute(body.proposal_id, body.delete_files)
     if not result.get("ok"):
         return ResponseEntity.fail(result.get("message") or "执行失败", data=result)
     return ResponseEntity.ok(result, message=result.get("message") or "已执行")

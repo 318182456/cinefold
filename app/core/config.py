@@ -157,6 +157,25 @@ class Settings:
     thunder_file_id: str = ""
     thunder_authorization: str = ""
 
+    # --- 转移做种（qBittorrent → Transmission）---
+    # 定时把 qb 里已下载完的种子交给 tr 继续做种，qb 腾出来干新活。
+    # 文件不动，两边指向同一份，所以从 qb 删任务时永不删文件
+    seed_transfer_enabled: bool = False
+    # 自动转移的间隔（分钟）
+    seed_transfer_interval: int = 60
+    # 转移后是否从 qb 删掉源任务（只删任务，文件留给 tr 做种）。
+    # 关掉则两边同时做种
+    seed_transfer_delete_source: bool = True
+    # 只转移这些分类/标签的种子，逗号分隔。都留空表示全部已完成任务都转
+    seed_transfer_categories: str = ""
+    seed_transfer_tags: str = ""
+    # 转移进 tr 的种子打的标签，便于区分「文件不归 tr 管」的这批。
+    # 留空则用 TRANSMISSION_LABEL
+    seed_transfer_label: str = "cinefold-transfer"
+    # 两个下载器挂载点不一致时的路径映射，"qb前缀:tr前缀"，多组用逗号分隔。
+    # 例：/downloads:/data/downloads
+    seed_transfer_path_map: str = ""
+
     # --- PT 站点 ---
     # Rousi 新站是前后端分离架构，用 Bearer token 而非 Cookie。
     # 填了用户名密码就会自动登录续期，token 可留空。
@@ -410,6 +429,14 @@ def load_settings() -> Settings:
         thunder_url=_env("THUNDER_URL"),
         thunder_file_id=_env("THUNDER_FILE_ID"),
         thunder_authorization=_env("THUNDER_AUTHORIZATION"),
+
+        seed_transfer_enabled=_env_bool("SEED_TRANSFER_ENABLED", False),
+        seed_transfer_interval=_env_int("SEED_TRANSFER_INTERVAL", 60),
+        seed_transfer_delete_source=_env_bool("SEED_TRANSFER_DELETE_SOURCE", True),
+        seed_transfer_categories=_env("SEED_TRANSFER_CATEGORIES"),
+        seed_transfer_tags=_env("SEED_TRANSFER_TAGS"),
+        seed_transfer_label=_env("SEED_TRANSFER_LABEL", "cinefold-transfer"),
+        seed_transfer_path_map=_env("SEED_TRANSFER_PATH_MAP"),
 
         rousi_username=_env("ROUSI_USERNAME"),
         rousi_password=_env("ROUSI_PASSWORD"),

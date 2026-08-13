@@ -23,6 +23,7 @@ const DESCRIPTIONS = {
   fill_empty_banner: '补全缺少详情与封面的番号',
   pt_wait: '同步下载器任务状态',
   translate_titles: '翻译缺中文标题的番号',
+  transfer_seeds: '把 qB 已下载完的种子转给 Transmission 做种',
 }
 
 async function load() {

@@ -487,10 +487,15 @@ TOOL_SCHEMAS = [
                 "properties": {
                     "action": {
                         "type": "string",
-                        "enum": ["pause", "resume", "recheck", "reannounce", "delete", "delete_with_files"],
+                        "enum": [
+                            "pause", "resume", "recheck", "reannounce",
+                            "delete", "delete_with_files", "transfer",
+                        ],
                         "description": (
                             "delete 只删任务保留文件；delete_with_files 连磁盘文件一起删，"
-                            "不可逆，用户没明确说要删文件时不要选它"
+                            "不可逆，用户没明确说要删文件时不要选它；"
+                            "transfer 把 qBittorrent 里已下载完的种子转到 Transmission 继续做种，"
+                            "文件不动，只对已完成的任务有效"
                         ),
                     },
                     "hashes": {

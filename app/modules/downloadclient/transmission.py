@@ -113,6 +113,57 @@ class TransmissionClient:
             logger.error(f"[{code}] 推送磁链失败: {exc}")
             return None
 
+    def add_torrent_for_seeding(
+        self, content: bytes, save_path: str, code: str = "", labels: Sequence[str] | None = None
+    ) -> str | None:
+        """接管一份已下载完成的文件继续做种。返回 hash，失败返回 None。
+
+        与 add_torrent 的区别有两处，都是为了不重下已有的文件：
+        - download_dir 必须是源下载器的保存路径，tr 才能在那里找到文件
+        - 先暂停加入再触发校验，跳过「加进来就开下」的窗口。tr 校验完发现
+          文件齐全就直接转做种，缺文件才会补下
+
+        已存在同 hash 的种子时不重复添加，直接返回既有 hash —— transmission
+        对重复添加会抛 DuplicateTorrent，那不是错误，是「已经转移过了」。
+        """
+        if not content or not save_path:
+            logger.warning(f"[{code}] 转移做种缺少种子内容或保存路径")
+            return None
+        if not self._ensure_client():
+            return None
+
+        torrent_hash = get_torrent_hash(content)
+        label_list = list(labels) if labels else ([self.label] if self.label else None)
+
+        try:
+            added = self.client.add_torrent(
+                base64.b64encode(content).decode(),
+                download_dir=save_path,
+                labels=label_list,
+                paused=True,
+            )
+        except Exception as exc:
+            # transmission-rpc 对重复种子抛的是普通异常，只能按文案判别
+            if "duplicate" in str(exc).lower():
+                logger.info(f"[{code}] Transmission 中已存在该种子，跳过: {torrent_hash}")
+                return torrent_hash
+            logger.error(f"[{code}] 转移做种失败: {exc}")
+            return None
+
+        new_hash = added.hashString or torrent_hash
+        try:
+            # 校验后 tr 才知道文件已经在本地，否则会从 0 开始下
+            self.client.verify_torrent(ids=[new_hash])
+            self.client.start_torrent(ids=[new_hash])
+        except Exception as exc:
+            # 种子已经加进去了，校验没触发起来不算整体失败，用户手动校验即可
+            logger.warning(f"[{code}] Transmission 触发校验失败，请手动校验 {new_hash}: {exc}")
+
+        logger.info(
+            f"[{code}] 已转移做种到 Transmission，hash={new_hash}，目录={save_path}"
+        )
+        return new_hash
+
     # ------------------------------------------------------------------
     def monitor_torrent(self, hashes: Sequence[str] | None = None) -> list[dict]:
         if not self._ensure_client():

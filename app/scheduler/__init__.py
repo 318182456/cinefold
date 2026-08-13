@@ -182,6 +182,20 @@ def pt_wait() -> int:
     return services.sync_download_status()
 
 
+def transfer_seeds() -> int:
+    """转移做种：把 qb 里已下载完的种子交给 tr 继续做种。
+
+    开关（SEED_TRANSFER_ENABLED）关着时立即返回，不打下载器接口。
+    """
+    from app.services.seedtransfer import run_auto_transfer
+
+    try:
+        return run_auto_transfer()
+    except Exception as exc:
+        logger.exception(f"[任务] 转移做种失败: {exc}")
+        return 0
+
+
 def sync_watch_dirs() -> int:
     """监控目录全量对账。
 
@@ -322,6 +336,11 @@ INTERVAL_JOBS: dict[str, dict] = {
     "sync_watch_dirs": {
         "func": sync_watch_dirs, "name": "监控目录对账", "minutes": 30,
         "interval_key": "watchdir_sync_interval",
+    },
+    # 开关（SEED_TRANSFER_ENABLED）关着时直接返回，不打下载器接口
+    "transfer_seeds": {
+        "func": transfer_seeds, "name": "转移做种", "minutes": 60,
+        "interval_key": "seed_transfer_interval",
     },
     # 开关（AUTO_UPDATE_ENABLED）关着时直接返回，不打 API
     "auto_update": {

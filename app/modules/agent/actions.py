@@ -26,6 +26,9 @@ ACTIONS = {
     "reannounce": ("强制汇报", False),
     "delete": ("删除任务（保留文件）", True),
     "delete_with_files": ("删除任务并删除文件", True),
+    # 转移本身不删文件，但会按配置把 qb 的源任务删掉，不便一键还原，
+    # 因此同样标为需要慎重确认
+    "transfer": ("转移做种到 Transmission", True),
 }
 
 _lock = threading.Lock()
@@ -110,8 +113,52 @@ def _clear_history(hashes: list[str]) -> None:
         logger.warning(f"清理下载历史失败: {exc}")
 
 
-def execute(proposal_id: str) -> dict:
-    """执行已确认的操作。"""
+def _execute_transfer(hashes: list[str], label: str) -> dict:
+    """执行转移做种。
+
+    转移不清下载历史：文件还在，番号也还是已下载状态，只是做种的下载器换了人。
+    """
+    from app.services.seedtransfer import is_available, transfer_hashes
+
+    ok, reason = is_available()
+    if not ok:
+        return {"ok": False, "message": reason, "affected": 0}
+
+    try:
+        result = transfer_hashes(hashes)
+    except Exception as exc:
+        logger.exception(f"agent 执行转移做种异常: {exc}")
+        return {"ok": False, "message": f"转移做种失败: {exc}", "affected": 0}
+
+    if not result.transferred:
+        detail = "; ".join(
+            f"{item['hash'][:8]}: {item['reason']}" for item in result.failed[:3]
+        )
+        message = "没有任务被转移" + (f"（{detail}）" if detail else "，可能都还没下载完")
+        return {"ok": False, "message": message, "affected": 0}
+
+    message = f"已{label} {len(result.transferred)} 个任务"
+    if result.failed:
+        message += f"，{len(result.failed)} 个失败"
+    if result.skipped:
+        message += f"，{len(result.skipped)} 个未下载完跳过"
+
+    logger.info(f"agent 已执行转移做种，影响 {len(result.transferred)} 个任务")
+    return {
+        "ok": True,
+        "message": message,
+        "affected": len(result.transferred),
+        "hashes": result.transferred,
+    }
+
+
+def execute(proposal_id: str, delete_files: bool | None = None) -> dict:
+    """执行已确认的操作。
+
+    delete_files 由确认对话上的复选框传入，只对删除类操作有意义：给了就以它
+    为准，助手提案时选的 delete / delete_with_files 只作为复选框的初始值。
+    真正决定删不删文件的是点确认那一刻的勾选状态。
+    """
     record = take_proposal(proposal_id)
     if record is None:
         return {"ok": False, "message": "操作已过期或已执行，请重新提问"}
@@ -120,6 +167,15 @@ def execute(proposal_id: str) -> dict:
     hashes = [t["hash"] for t in record["targets"] if t.get("hash")]
     if not hashes:
         return {"ok": False, "message": "没有可操作的任务"}
+
+    # 复选框的勾选状态覆盖提案时的动作，标签也跟着改，日志与回执才对得上
+    if action in ("delete", "delete_with_files") and delete_files is not None:
+        action = "delete_with_files" if delete_files else "delete"
+        record = {**record, "action": action, "label": ACTIONS[action][0]}
+
+    # 转移做种是 qb → tr 的定向操作，不走「所有下载器都试一遍」那条路
+    if action == "transfer":
+        return _execute_transfer(hashes, record["label"])
 
     done: list[str] = []
     errors: list[str] = []

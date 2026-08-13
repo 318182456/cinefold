@@ -270,6 +270,59 @@ class QBitTorrentClient:
                 logger.warning(f"读取 qBittorrent 种子 {h} 的文件清单失败: {exc}")
         return paths
 
+    def export_torrent(self, torrent_hash: str) -> bytes | None:
+        """导出种子的 .torrent 文件内容，失败返回 None。
+
+        转移做种要把种子原样交给另一个下载器，磁链不够 —— 私有站的种子
+        没有 DHT，靠磁链拿不到 metadata，必须是带 tracker 的完整 .torrent。
+
+        qb 4.5+ 才有 /torrents/export；旧版返回 404，此时只能放弃转移。
+        """
+        if not torrent_hash or not self._ensure_client():
+            return None
+
+        try:
+            content = self.client.torrents_export(torrent_hash=torrent_hash)
+        except Exception as exc:
+            logger.warning(f"导出 qBittorrent 种子 {torrent_hash} 失败: {exc}")
+            return None
+
+        if not content:
+            logger.warning(f"qBittorrent 导出的种子 {torrent_hash} 内容为空")
+            return None
+        return bytes(content)
+
+    def get_torrent_detail(self, torrent_hash: str) -> dict | None:
+        """单个种子的详情，转移做种要用到保存路径与内容路径。
+
+        返回 {hash, name, save_path, content_path, category, tags, progress}，
+        查不到返回 None。
+        """
+        if not torrent_hash or not self._ensure_client():
+            return None
+
+        try:
+            rows = self.client.torrents_info(torrent_hashes=[torrent_hash])
+        except Exception as exc:
+            logger.warning(f"读取 qBittorrent 种子 {torrent_hash} 详情失败: {exc}")
+            return None
+
+        if not rows:
+            return None
+        t = rows[0]
+        return {
+            "hash": t.hash,
+            "name": t.name,
+            # save_path 是种子内容的父目录，转移时 tr 的 download_dir 要对齐它，
+            # 否则 tr 会重新下载而不是直接校验已有文件
+            "save_path": t.save_path,
+            "content_path": t.content_path or t.save_path,
+            "category": getattr(t, "category", "") or "",
+            "tags": getattr(t, "tags", "") or "",
+            "progress": round(t.progress, 4),
+            "state": t.state,
+        }
+
     def find_torrents_by_path(self, paths: Sequence[str]) -> dict[str, list[str]]:
         """按文件路径反查种子 hash。返回 {路径: [hash, ...]}。
 

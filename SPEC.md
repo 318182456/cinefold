@@ -103,15 +103,15 @@ id (autoincrement) / namespace / key / content / create_time
 | `GET/POST /message` | 消息回调（Telegram/企业微信 webhook） |
 | `GET  /agent/status` | AI 助手是否可用 |
 | `POST /agent/chat` | AI 助手对话 |
-| `POST /agent/confirm` · `POST /agent/cancel` | 确认/放弃助手提出的下载器操作 |
+| `POST /agent/confirm` · `POST /agent/cancel` | 确认/放弃助手提出的下载器操作（confirm 可带 `delete_files` 覆盖删除方式） |
 
 ## 5. 模块清单
 
 ### 下载客户端 `modules/downloadclient/`
 统一接口：`__init__` / `login_*` / `add_torrent` / `add_torrent_by_magnet` / `monitor_torrent`
 `control_torrent(action, hashes)` — pause/resume/recheck/reannounce，迅雷未实现
-- `qbittorrent` — QBitTorrentClient
-- `transmission` — TransmissionClient
+- `qbittorrent` — QBitTorrentClient（另有 `export_torrent` / `get_torrent_detail`，供转移做种用）
+- `transmission` — TransmissionClient（另有 `add_torrent_for_seeding`，接管已有文件继续做种）
 - `thunder` — Thunder（另有 `get_device_id` / `get_pan_auth` / `analyze_size`）
 
 ### 资源站点 `modules/ladysite/`
@@ -144,7 +144,8 @@ id (autoincrement) / namespace / key / content / create_time
   `list_tasks` / `read_logs` / `list_downloads` / `check_config`；
   另有 `propose_action` 登记待确认的下载器操作
 - `actions` — 提案的登记与执行。内存存储、5 分钟过期、一次性消费；
-  执行才调下载器的 `control_torrent` / `delete_torrent`
+  执行才调下载器的 `control_torrent` / `delete_torrent`，
+  或走 `seedtransfer.transfer_hashes`（`transfer` 动作）
 - 配置独立于翻译（`AGENT_*`），留空则回退到 `OPENAI_*`
 
 ### 云盘 `modules/cloudnas/`
@@ -162,7 +163,14 @@ id (autoincrement) / namespace / key / content / create_time
 通知       send_message / send_subscribe_message / send_subscribe_actor_message /
           send_downloading_message / send_downloaded_message / send_complete_message
 缓存       get_rank_cache
+转移做种   seedtransfer.transfer_hashes / run_auto_transfer / list_candidates
 ```
+
+**转移做种 `services/seedtransfer.py`** — 把 qb 里已下载完的种子交给 tr 继续做种。
+导出 `.torrent` 原文件（磁链拿不到私有站的 metadata），按 `SEED_TRANSFER_PATH_MAP`
+换算保存路径后加进 tr 并触发校验；tr 确认接管后才动 qb 的源任务，且只删任务不删文件
+—— 两个下载器指向同一份文件。触发方式：定时任务 `transfer_seeds`，或 AI 助手的
+`transfer` 提案经用户确认。
 
 ## 7. 定时任务 `scheduler/`
 
@@ -177,7 +185,10 @@ id (autoincrement) / namespace / key / content / create_time
 | `run_actors` | `0 21 * * *` | 演员订阅 |
 | `run_codes_task` | `0 22 * * *` | 订阅下载 |
 
-另有 `cache_photos` / `save_image` / `translate_titles` / `pt_wait` / `push_job` / `start_scheduler` / `restart_scheduler`。
+另有 `cache_photos` / `save_image` / `translate_titles` / `pt_wait` / `transfer_seeds` / `push_job` / `start_scheduler` / `restart_scheduler`。
+
+固定间隔任务中，`transfer_seeds`（转移做种，默认 60 分钟，`SEED_TRANSFER_INTERVAL` 可调）
+在 `SEED_TRANSFER_ENABLED` 关闭时直接返回，不打下载器接口。
 
 ## 8. 过滤与排序 `utils/filters`
 
