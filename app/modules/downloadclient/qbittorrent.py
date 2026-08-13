@@ -322,6 +322,62 @@ class QBitTorrentClient:
                 self._on_error(exc, "读取文件清单")
         return paths
 
+    def unwant_torrent_files(
+        self, torrent_hash: str, paths: Sequence[str]
+    ) -> tuple[int, int]:
+        """把种子里指定的文件标记为「不需要」，种子本身继续做种。
+
+        用于合集种子：一个种子打包几十部片，删掉其中一部时不能删整个种子 ——
+        那样其余影片就全都停止做种了。把该文件的优先级设为 0（不下载），
+        种子继续为剩下的文件做种。
+
+        返回 (标记成功数, 剩余仍需要的文件数)。后者为 0 表示整个种子都不要了，
+        留着只是个空壳，调用方应当把它删掉。种子不存在或全都匹配不上时返回
+        (0, 0) —— 标记数为 0 时调用方本就该退回删种，两种情形殊途同归。
+        """
+        if not torrent_hash or not paths:
+            return 0, 0
+        if not self._ensure_client():
+            return 0, 0
+
+        targets = {str(PurePath(p)) for p in paths if p}
+        if not targets:
+            return 0, 0
+
+        try:
+            info = self.client.torrents_info(torrent_hashes=[torrent_hash])
+            if not info:
+                logger.info(f"qBittorrent 中已无种子 {torrent_hash}，无需标记文件")
+                return 0, 0
+            root = info[0].save_path
+            # priority 接口按文件序号操作。qb 的字段叫 index（不是 id ——
+            # tr 那边才是 id），取错会抛 AttributeError 被 except 吞成「标记失败」，
+            # 结果文件被下载器重新下回来
+            ids, remaining = [], 0
+            for f in self.client.torrents_files(torrent_hash=torrent_hash):
+                if str(PurePath(root) / f.name) in targets:
+                    ids.append(f.index)
+                elif (f.priority or 0) > 0:
+                    # 之前就已标记为不需要的（priority=0）不算「仍需要」，
+                    # 否则种子明明已经空了还会被判成有内容而留下空壳
+                    remaining += 1
+            if not ids:
+                return 0, 0
+
+            self.client.torrents_file_priority(
+                torrent_hash=torrent_hash, file_ids=ids, priority=0
+            )
+            _report_ok()
+            logger.info(
+                f"已在 qBittorrent 种子 {torrent_hash} 中把 {len(ids)} 个文件"
+                f"标记为不需要，剩余 {remaining} 个文件仍在做种"
+            )
+            return len(ids), remaining
+        except Exception as exc:
+            logger.warning(f"标记 qBittorrent 文件为不需要失败 {torrent_hash}: {exc}")
+            self._on_error(exc, "标记文件不需要")
+            return 0, 0
+
     def export_torrent(self, torrent_hash: str) -> bytes | None:
         """导出种子的 .torrent 文件内容，失败返回 None。
 

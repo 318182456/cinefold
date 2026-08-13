@@ -27,6 +27,8 @@ def configure():
             "medialink_scrape_dir",
             "medialink_delete_enabled",
             "medialink_webhook_token",
+            "medialink_collection_guard",
+            "medialink_feature_min_mb",
         )
     }
 
@@ -72,9 +74,9 @@ def clean_tables():
         with session_scope() as session:
             for row in session.query(MediaLink).all():
                 session.delete(row)
-            for row in session.query(History).filter(
-                History.code.like("ABS-%")
-            ).all():
+            # 清全部 History：用例里的番号不止 ABS-*（IPX/SNIS/FSTU 等），
+            # 只清 ABS-% 会让残留的 hash 污染后面用例的反查结果
+            for row in session.query(History).all():
                 session.delete(row)
     _clear()
     yield
@@ -395,6 +397,446 @@ def test_delete_removes_all_files_reported_by_torrent(linked, fake_client, tmp_p
     # 任务目录空了要清掉，但下载根目录必须留着
     assert not task_dir.exists()
     assert source.parent.exists()
+
+
+def _install_client(monkeypatch, files: list[str]):
+    """注入汇报指定文件清单的假下载器。"""
+    class FakeClient:
+        def delete_torrent(self, hashes, delete_files=False):
+            return list(hashes)
+
+        def list_torrent_files(self, hashes):
+            return list(files)
+
+    import app.modules.downloadclient as dc
+    monkeypatch.setattr(dc, "list_configured_clients", lambda: ["qbittorrent"])
+    monkeypatch.setattr(dc, "get_download_client", lambda name="": FakeClient())
+
+
+def _make_collection(root, codes, size_mb=150):
+    """造一个合集种子的目录结构：每部片一个番号目录，各带 nfo/poster。
+
+    仿真实数据（Arina Hashimoto S1 FHD Video Collection：306 文件 / 51 部片）。
+    """
+    made = {}
+    for code in codes:
+        d = root / code
+        d.mkdir(parents=True)
+        movie = d / f"{code}.mp4"
+        # 稀疏写：只 seek 到目标大小再写 1 字节，避免真占几百 MB 磁盘
+        with open(movie, "wb") as fh:
+            fh.seek(size_mb * 1024 * 1024)
+            fh.write(b"M")
+        nfo = d / f"{code}.nfo"
+        nfo.write_bytes(b"meta")
+        poster = d / f"{code}-poster.jpg"
+        poster.write_bytes(b"img")
+        made[code] = (movie, nfo, poster)
+    return made
+
+
+def test_collection_torrent_only_deletes_registered_movie(
+    tmp_path, configure, monkeypatch
+):
+    """合集种子：删一部片不能连带删掉同种子里的其余影片。
+
+    对应线上那个 306 文件 / 51 部片的种子。删 IPX-219 时只该动 IPX-219/ 下的
+    文件，其余 50 部必须完好。
+    """
+    download = tmp_path / "downloads" / "Collection"
+    library = tmp_path / "library"
+    (library / "IPX-219").mkdir(parents=True)
+
+    made = _make_collection(download, ["IPX-219", "SNIS-632", "SSNI-100"])
+    source = made["IPX-219"][0]
+    link = library / "IPX-219" / "IPX-219.mp4"
+    os.link(source, link)
+
+    configure(
+        medialink_library_path=str(library),
+        medialink_delete_enabled=True,
+        medialink_webhook_token="",
+    )
+
+    all_files = [str(p) for trio in made.values() for p in trio]
+    _install_client(monkeypatch, all_files)
+    with session_scope() as session:
+        session.add(History(hash="C" * 40, code="IPX-219", save_path=str(source)))
+    medialink.register_scrape("IPX-219", str(source), str(link))
+
+    result = medialink.handle_media_deleted(link_path=str(link))
+
+    # 登记的那部及其同目录附属：删掉
+    for p in made["IPX-219"]:
+        assert not p.exists(), f"该删的没删: {p}"
+    # 其余影片：一个都不能少
+    for code in ("SNIS-632", "SSNI-100"):
+        for p in made[code]:
+            assert p.exists(), f"误删了别的影片的文件: {p}"
+    assert not result.errors
+
+
+def test_single_movie_torrent_still_deletes_whole_payload(
+    tmp_path, configure, monkeypatch
+):
+    """只有一部正片的种子照旧整包删 —— 样品图、说明 txt 正是想删的。
+
+    合集保护不能把普通种子也收窄了，否则会留下一堆垃圾文件。
+    """
+    download = tmp_path / "downloads" / "[厂牌]ABS-001[1080p]"
+    download.mkdir(parents=True)
+    library = tmp_path / "library" / "ABS-001"
+    library.mkdir(parents=True)
+
+    movie = download / "ABS-001.mp4"
+    with open(movie, "wb") as fh:
+        fh.seek(150 * 1024 * 1024); fh.write(b"M")
+    # 预告片：视频扩展名但远小于门槛，不该被数成第二部正片
+    trailer = download / "trailer.mp4"
+    trailer.write_bytes(b"t" * 1024)
+    sample = download / "sample.jpg"
+    sample.write_bytes(b"img")
+    readme = download / "说明.txt"
+    readme.write_bytes(b"text")
+
+    link = library / "ABS-001.mp4"
+    os.link(movie, link)
+    configure(
+        medialink_library_path=str(tmp_path / "library"),
+        medialink_delete_enabled=True,
+        medialink_webhook_token="",
+    )
+
+    _install_client(monkeypatch, [str(movie), str(trailer), str(sample), str(readme)])
+    with session_scope() as session:
+        session.add(History(hash="S" * 40, code="ABS-001", save_path=str(movie)))
+    medialink.register_scrape("ABS-001", str(movie), str(link))
+
+    medialink.handle_media_deleted(link_path=str(link))
+
+    for p in (movie, trailer, sample, readme):
+        assert not p.exists(), f"单片种子应整包删除，残留: {p}"
+
+
+def test_flat_download_root_torrent_unaffected_by_guard(
+    tmp_path, configure, monkeypatch
+):
+    """单文件种子平铺在下载根目录时，不能因为「同目录」而牵连邻居。
+
+    线上有 572 个单文件种子全部躺在 /volume3/h_video/Download/日本AV 下，
+    按目录划边界会圈到整个目录 —— 这里确认走的不是那条路。
+    """
+    download = tmp_path / "downloads" / "日本AV"
+    download.mkdir(parents=True)
+    library = tmp_path / "library" / "FSTU-008"
+    library.mkdir(parents=True)
+
+    mine = download / "FSTU-008.mp4"
+    with open(mine, "wb") as fh:
+        fh.seek(150 * 1024 * 1024); fh.write(b"M")
+    # 同目录里的邻居，属于另外的种子
+    neighbours = []
+    for i in range(3):
+        n = download / f"OTHER-{i:03d}.mp4"
+        with open(n, "wb") as fh:
+            fh.seek(150 * 1024 * 1024); fh.write(b"N")
+        neighbours.append(n)
+
+    link = library / "FSTU-008.mp4"
+    os.link(mine, link)
+    configure(
+        medialink_library_path=str(tmp_path / "library"),
+        medialink_delete_enabled=True,
+        medialink_webhook_token="",
+    )
+
+    # 这个种子只含自己那一个文件
+    _install_client(monkeypatch, [str(mine)])
+    with session_scope() as session:
+        session.add(History(hash="F" * 40, code="FSTU-008", save_path=str(mine)))
+    medialink.register_scrape("FSTU-008", str(mine), str(link))
+
+    medialink.handle_media_deleted(link_path=str(link))
+
+    assert not mine.exists()
+    for n in neighbours:
+        assert n.exists(), f"误删了同目录里别的种子的文件: {n}"
+    assert download.exists(), "下载目录不能被删"
+
+
+def test_collection_torrent_kept_seeding_and_files_unwanted(
+    tmp_path, configure, monkeypatch
+):
+    """合集种子不能整个删掉 —— 否则其余几十部片全都停止做种。
+
+    正确做法：种子留着，只把这部片的文件在下载器里标记为不需要。不标记的话
+    下载器发现文件缺失会重新下回来。
+    """
+    download = tmp_path / "downloads" / "Collection"
+    library = tmp_path / "library"
+    (library / "IPX-219").mkdir(parents=True)
+
+    made = _make_collection(download, ["IPX-219", "SNIS-632"])
+    source = made["IPX-219"][0]
+    link = library / "IPX-219" / "IPX-219.mp4"
+    os.link(source, link)
+    configure(
+        medialink_library_path=str(library),
+        medialink_delete_enabled=True,
+        medialink_webhook_token="",
+    )
+
+    all_files = [str(p) for trio in made.values() for p in trio]
+    deleted_hashes, unwanted = [], []
+
+    class Client:
+        def delete_torrent(self, hashes, delete_files=False):
+            deleted_hashes.extend(hashes)
+            return list(hashes)
+
+        def list_torrent_files(self, hashes):
+            return list(all_files)
+
+        def unwant_torrent_files(self, torrent_hash, paths):
+            unwanted.append((torrent_hash, sorted(paths)))
+            return len(paths), len(paths)
+
+    import app.modules.downloadclient as dc
+    monkeypatch.setattr(dc, "list_configured_clients", lambda: ["qbittorrent"])
+    monkeypatch.setattr(dc, "get_download_client", lambda name="": Client())
+
+    with session_scope() as session:
+        session.add(History(hash="K" * 40, code="IPX-219", save_path=str(source)))
+    medialink.register_scrape("IPX-219", str(source), str(link))
+
+    result = medialink.handle_media_deleted(link_path=str(link))
+
+    assert deleted_hashes == [], "合集种子被整个删掉了，其余影片会停止做种"
+    assert result.torrents_kept == ["K" * 40]
+    # 只标记这部片的文件，不能把别人的也标记掉
+    assert len(unwanted) == 1
+    marked_hash, marked_paths = unwanted[0]
+    assert marked_hash == "K" * 40
+    assert marked_paths == sorted(str(p) for p in made["IPX-219"])
+    # 这部片没了，History 行要清掉，否则重新订阅会被当成已下载而跳过
+    with session_scope() as session:
+        assert session.get(History, "K" * 40) is None
+
+
+def test_collection_torrent_deleted_when_nothing_left_wanted(
+    tmp_path, configure, monkeypatch
+):
+    """合集里的片子被逐部删完后，种子成了空壳，要把它删掉。
+
+    留着既做不了种，又白占一个任务位。
+    """
+    download = tmp_path / "downloads" / "Collection"
+    library = tmp_path / "library"
+    (library / "IPX-219").mkdir(parents=True)
+
+    made = _make_collection(download, ["IPX-219", "SNIS-632"])
+    source = made["IPX-219"][0]
+    link = library / "IPX-219" / "IPX-219.mp4"
+    os.link(source, link)
+    configure(
+        medialink_library_path=str(library),
+        medialink_delete_enabled=True,
+        medialink_webhook_token="",
+    )
+
+    all_files = [str(p) for trio in made.values() for p in trio]
+    deleted_hashes = []
+
+    class Client:
+        def delete_torrent(self, hashes, delete_files=False):
+            deleted_hashes.extend(hashes)
+            return list(hashes)
+
+        def list_torrent_files(self, hashes):
+            return list(all_files)
+
+        def unwant_torrent_files(self, torrent_hash, paths):
+            # 汇报「标记成功，但已经没有仍需要的文件了」
+            return len(paths), 0
+
+    import app.modules.downloadclient as dc
+    monkeypatch.setattr(dc, "list_configured_clients", lambda: ["qbittorrent"])
+    monkeypatch.setattr(dc, "get_download_client", lambda name="": Client())
+
+    with session_scope() as session:
+        session.add(History(hash="E" * 40, code="IPX-219", save_path=str(source)))
+    medialink.register_scrape("IPX-219", str(source), str(link))
+
+    result = medialink.handle_media_deleted(link_path=str(link))
+
+    assert deleted_hashes == ["E" * 40], "空壳种子没被删掉"
+    assert result.torrents_deleted == ["E" * 40]
+    assert result.torrents_kept == [], "已删掉的种子不该同时算作保留"
+
+
+def test_single_movie_torrent_is_deleted_not_unwanted(
+    tmp_path, configure, monkeypatch
+):
+    """单片种子照旧整个删掉 —— 没有别的影片需要它继续做种。"""
+    download = tmp_path / "downloads" / "task"
+    download.mkdir(parents=True)
+    library = tmp_path / "library" / "ABS-001"
+    library.mkdir(parents=True)
+
+    movie = download / "ABS-001.mp4"
+    with open(movie, "wb") as fh:
+        fh.seek(150 * 1024 * 1024); fh.write(b"M")
+    link = library / "ABS-001.mp4"
+    os.link(movie, link)
+    configure(
+        medialink_library_path=str(tmp_path / "library"),
+        medialink_delete_enabled=True,
+        medialink_webhook_token="",
+    )
+
+    deleted_hashes, unwanted = [], []
+
+    class Client:
+        def delete_torrent(self, hashes, delete_files=False):
+            deleted_hashes.extend(hashes)
+            return list(hashes)
+
+        def list_torrent_files(self, hashes):
+            return [str(movie)]
+
+        def unwant_torrent_files(self, torrent_hash, paths):
+            unwanted.append(torrent_hash)
+            return len(paths), len(paths)
+
+    import app.modules.downloadclient as dc
+    monkeypatch.setattr(dc, "list_configured_clients", lambda: ["qbittorrent"])
+    monkeypatch.setattr(dc, "get_download_client", lambda name="": Client())
+
+    with session_scope() as session:
+        session.add(History(hash="Z" * 40, code="ABS-001", save_path=str(movie)))
+    medialink.register_scrape("ABS-001", str(movie), str(link))
+
+    result = medialink.handle_media_deleted(link_path=str(link))
+
+    assert deleted_hashes == ["Z" * 40]
+    assert unwanted == [], "单片种子不该走标记路径"
+    assert result.torrents_kept == []
+
+
+def test_client_without_unwant_support_does_not_crash(
+    tmp_path, configure, monkeypatch
+):
+    """迅雷等未实现标记接口的下载器要能跳过，不能抛异常。"""
+    download = tmp_path / "downloads" / "Collection"
+    library = tmp_path / "library"
+    (library / "IPX-219").mkdir(parents=True)
+
+    made = _make_collection(download, ["IPX-219", "SNIS-632"])
+    source = made["IPX-219"][0]
+    link = library / "IPX-219" / "IPX-219.mp4"
+    os.link(source, link)
+    configure(
+        medialink_library_path=str(library),
+        medialink_delete_enabled=True,
+        medialink_webhook_token="",
+    )
+
+    all_files = [str(p) for trio in made.values() for p in trio]
+
+    class LegacyClient:
+        def delete_torrent(self, hashes, delete_files=False):
+            return list(hashes)
+
+        def list_torrent_files(self, hashes):
+            return list(all_files)
+        # 故意不实现 unwant_torrent_files
+
+    import app.modules.downloadclient as dc
+    monkeypatch.setattr(dc, "list_configured_clients", lambda: ["thunder"])
+    monkeypatch.setattr(dc, "get_download_client", lambda name="": LegacyClient())
+
+    with session_scope() as session:
+        session.add(History(hash="L" * 40, code="IPX-219", save_path=str(source)))
+    medialink.register_scrape("IPX-219", str(source), str(link))
+
+    result = medialink.handle_media_deleted(link_path=str(link))
+
+    # 标记不了也不能删掉整个种子，更不能连带删别的影片
+    assert result.torrents_kept == []
+    assert result.torrents_deleted == []
+    for p in made["SNIS-632"]:
+        assert p.exists(), f"误删了别的影片: {p}"
+
+
+def test_collection_guard_can_be_disabled(tmp_path, configure, monkeypatch):
+    """关掉保护时恢复旧行为（整包全删），给需要的人留退路。"""
+    download = tmp_path / "downloads" / "Collection"
+    library = tmp_path / "library"
+    (library / "IPX-219").mkdir(parents=True)
+
+    made = _make_collection(download, ["IPX-219", "SNIS-632"])
+    source = made["IPX-219"][0]
+    link = library / "IPX-219" / "IPX-219.mp4"
+    os.link(source, link)
+
+    configure(
+        medialink_library_path=str(library),
+        medialink_delete_enabled=True,
+        medialink_webhook_token="",
+        medialink_collection_guard=False,
+    )
+
+    all_files = [str(p) for trio in made.values() for p in trio]
+    _install_client(monkeypatch, all_files)
+    with session_scope() as session:
+        session.add(History(hash="D" * 40, code="IPX-219", save_path=str(source)))
+    medialink.register_scrape("IPX-219", str(source), str(link))
+
+    medialink.handle_media_deleted(link_path=str(link))
+
+    for trio in made.values():
+        for p in trio:
+            assert not p.exists(), f"保护已关闭，应整包删除，残留: {p}"
+
+
+def test_unregistered_torrent_file_with_extra_hardlink_is_kept(
+    tmp_path, configure, monkeypatch
+):
+    """种子内未登记的文件若被别处硬链接引用，不能删 —— 会破坏那边的引用。"""
+    download = tmp_path / "downloads" / "task"
+    download.mkdir(parents=True)
+    library = tmp_path / "library" / "ABS-001"
+    library.mkdir(parents=True)
+    elsewhere = tmp_path / "another_library"
+    elsewhere.mkdir()
+
+    movie = download / "ABS-001.mp4"
+    with open(movie, "wb") as fh:
+        fh.seek(150 * 1024 * 1024); fh.write(b"M")
+    # 种子内的另一个文件，别处也建了硬链接
+    shared = download / "bonus.jpg"
+    shared.write_bytes(b"img")
+    os.link(shared, elsewhere / "bonus.jpg")
+
+    link = library / "ABS-001.mp4"
+    os.link(movie, link)
+    configure(
+        medialink_library_path=str(tmp_path / "library"),
+        medialink_delete_enabled=True,
+        medialink_webhook_token="",
+    )
+
+    _install_client(monkeypatch, [str(movie), str(shared)])
+    with session_scope() as session:
+        session.add(History(hash="H" * 40, code="ABS-001", save_path=str(movie)))
+    medialink.register_scrape("ABS-001", str(movie), str(link))
+
+    result = medialink.handle_media_deleted(link_path=str(link))
+
+    assert not movie.exists(), "登记的影片该删"
+    assert shared.exists(), "被别处引用的文件不该删"
+    assert (elsewhere / "bonus.jpg").exists()
+    assert any("硬链接引用" in e for e in result.errors)
 
 
 def test_torrent_files_queried_before_deletion(linked, monkeypatch, tmp_path):

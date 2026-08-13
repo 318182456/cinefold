@@ -121,6 +121,12 @@ class Settings:
     medialink_scrape_dir: str = ""
     # 媒体服务器删除影片时，同步删除种子与源文件。关闭时只记录不动手
     medialink_delete_enabled: bool = False
+    # 合集种子保护：种子里含多部正片时，只删登记的那部及其同目录附属，
+    # 其余影片不碰。设为 0 关闭保护，恢复「种子清单里的文件全删」。
+    # 判定正片的体积下限（MB）—— 预告片、样品视频比正片小得多，
+    # 不设门槛会把它们数成"另一部影片"，让单片种子被误判为合集
+    medialink_collection_guard: bool = True
+    medialink_feature_min_mb: int = 100
     # webhook 校验密钥。请求需带 X-Cinefold-Token，留空则不校验
     medialink_webhook_token: str = ""
 
@@ -431,6 +437,8 @@ def load_settings() -> Settings:
 
         medialink_library_path=_env("MEDIALINK_LIBRARY_PATH"),
         medialink_delete_enabled=_env_bool("MEDIALINK_DELETE_ENABLED", False),
+        medialink_collection_guard=_env_bool("MEDIALINK_COLLECTION_GUARD", True),
+        medialink_feature_min_mb=_env_int("MEDIALINK_FEATURE_MIN_MB", 100),
         medialink_scrape_dir=_env("MEDIALINK_SCRAPE_DIR"),
         medialink_webhook_token=_env("MEDIALINK_WEBHOOK_TOKEN"),
 

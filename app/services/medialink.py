@@ -71,6 +71,8 @@ class DeleteResult:
     code: str = ""
     dry_run: bool = False
     torrents_deleted: list[str] = field(default_factory=list)
+    # 合集种子：没删掉，只把这部片的文件标记为不需要，继续做种其余影片
+    torrents_kept: list[str] = field(default_factory=list)
     files_deleted: list[str] = field(default_factory=list)
     links_deleted: list[str] = field(default_factory=list)
     # 刮削附属：nfo、海报、字幕、extrafanart 目录等
@@ -84,6 +86,7 @@ class DeleteResult:
             "code": self.code,
             "dry_run": self.dry_run,
             "torrents_deleted": self.torrents_deleted,
+            "torrents_kept": self.torrents_kept,
             "files_deleted": self.files_deleted,
             "links_deleted": self.links_deleted,
             "sidecars_deleted": self.sidecars_deleted,
@@ -576,21 +579,23 @@ def _prune_empty_dirs(videos: list[str], result: DeleteResult) -> None:
             current = current.parent
 
 
-def _torrent_files(hashes: list[str]) -> list[str]:
-    """向下载器要这些种子的完整文件清单。
+def _torrent_files_by_hash(hashes: list[str]) -> dict[str, list[str]]:
+    """向下载器要这些种子的文件清单，按种子分组。
 
     这是删源文件侧最可靠的依据：种子里有什么，下载器最清楚，不用去猜
     「下载目录里哪些文件属于这部片子」。多下载器都问一遍，取并集。
 
     必须在删种之前调用 —— 种子一删，清单就查不到了。
+
+    逐个种子问而不是一次问全部：合集判定要数每个种子内的正片数，清单混成
+    一个列表后，两个单片种子加起来也有 2 部正片，会被误判成合集。
     """
     if not hashes:
-        return []
+        return {}
 
     from app.modules.downloadclient import get_download_client, list_configured_clients
 
-    found: list[str] = []
-    seen: set[str] = set()
+    out: dict[str, list[str]] = {}
     for name in list_configured_clients():
         client = get_download_client(name)
         if client is None:
@@ -598,17 +603,120 @@ def _torrent_files(hashes: list[str]) -> list[str]:
         lister = getattr(client, "list_torrent_files", None)
         if lister is None:
             continue  # 老客户端未实现该接口，跳过即可
-        try:
-            for path in lister(hashes):
-                if path and path not in seen:
-                    seen.add(path)
-                    found.append(path)
-        except Exception as exc:
-            logger.warning(f"{name} 读取种子文件清单异常: {exc}")
+        for h in hashes:
+            try:
+                paths = [p for p in lister([h]) if p]
+            except Exception as exc:
+                logger.warning(f"{name} 读取种子 {h} 文件清单异常: {exc}")
+                continue
+            if not paths:
+                continue
+            bucket = out.setdefault(h, [])
+            for p in paths:
+                if p not in bucket:
+                    bucket.append(p)
 
-    if found:
-        logger.info(f"从下载器取到 {len(found)} 个种子内文件")
-    return found
+    if out:
+        logger.info(
+            f"从下载器取到 {sum(len(v) for v in out.values())} 个种子内文件"
+            f"（{len(out)} 个种子）"
+        )
+    return out
+
+
+def _is_feature_video(path: str) -> bool:
+    """这个文件是否算一部「正片」。
+
+    合集判定要数正片数量，不能只看扩展名 —— 预告片、样品视频、片头动画都是
+    视频文件，把它们数进去会让单片种子被误判成合集，白白缩小删除范围，
+    留下一堆该删没删的垃圾文件。体积是最省事也最可靠的区分方式。
+
+    取不到体积（文件已不在）时按正片算：宁可判成合集少删一点，也不要
+    把合集误判成单片、连带删掉别的影片。
+    """
+    if Path(path).suffix.lower() not in VIDEO_SUFFIXES:
+        return False
+
+    floor = max(0, int(get_settings().medialink_feature_min_mb or 0)) * 1024 * 1024
+    if floor <= 0:
+        return True
+    try:
+        return Path(path).stat().st_size >= floor
+    except OSError:
+        return True
+
+
+def _plan_torrent_deletion(
+    hashes: list[str], registered_sources: set[str]
+) -> tuple[list[str], list[str], dict[str, list[str]]]:
+    """决定每个种子该整个删掉，还是只把这部片的文件标记为不需要。
+
+    背景：种子的完整清单本来照单全删。对「一部影片 + 样品图 + 说明 txt」的
+    普通种子这是对的 —— 那些附属文件正是想删的。但对合集种子（一个种子打包
+    几十部片，各占一个番号子目录）就成了灾难：Emby 里删一部片，会连带删掉
+    同种子里其余几十部，而且整个种子被移除后，那几十部还全都停止做种。
+
+    判据用「种子内有几部正片」而不是目录结构。曾考虑过按目录划边界，
+    但实测发现大量单文件种子的文件平铺在下载根目录下（同一目录里躺着
+    几百部互不相关的片子），按目录反而会把范围扩大到整个下载目录。
+
+    返回 (要删掉的种子, 要保留做种的合集种子, 该删的文件按种子分组)。
+    合集种子只删登记那部及其同目录附属 —— 合集里每部片各有自己的番号目录，
+    这样刚好留下该片的正片与它的 nfo/poster/字幕。
+    """
+    per_hash = _torrent_files_by_hash(hashes)
+    guard = get_settings().medialink_collection_guard
+
+    to_delete: list[str] = []
+    to_keep: list[str] = []
+    files: dict[str, list[str]] = {}
+
+    for h in hashes:
+        paths = per_hash.get(h) or []
+        if not paths:
+            # 清单查不到（种子已不在、下载器离线）：按原样整个删，
+            # 没有清单也就没有「误删同种子其它影片」的风险
+            to_delete.append(h)
+            continue
+
+        features = [p for p in paths if _is_feature_video(p)]
+        if not guard or len(features) <= 1 or not registered_sources:
+            to_delete.append(h)
+            files[h] = paths
+            continue
+
+        # 登记源文件所在目录即该片的范围
+        keep_dirs = {Path(p).parent for p in registered_sources}
+        mine, others = [], []
+        for path in paths:
+            parent = Path(path).parent
+            if any(parent == d or d in parent.parents for d in keep_dirs):
+                mine.append(path)
+            else:
+                others.append(path)
+
+        if not others:
+            # 整个种子都属于这部片，照常删
+            to_delete.append(h)
+            files[h] = paths
+            continue
+
+        # 登记的源文件必须在删除名单里 —— 它们是本次删除的正主
+        for p in registered_sources:
+            if p in paths and p not in mine:
+                mine.append(p)
+
+        to_keep.append(h)
+        files[h] = mine
+        left = len(features) - len([p for p in mine if _is_feature_video(p)])
+        logger.warning(
+            f"种子 {h} 含 {len(features)} 部正片（合集），保留做种：只删这部片的 "
+            f"{len(mine)} 个文件并在下载器里标记为不需要，"
+            f"其余 {left} 部影片的 {len(others)} 个文件不动。"
+            f"如需恢复旧行为（整包全删）设 MEDIALINK_COLLECTION_GUARD=false"
+        )
+
+    return to_delete, to_keep, files
 
 
 def _is_download_root(path: Path) -> bool:
@@ -826,12 +934,22 @@ def handle_media_deleted(
 
     # 种子里的文件也算源文件。必须赶在删种之前问，种子删了清单就没了。
     # 登记的 source_path 只有影片一个文件，种子里的样品图、说明 txt 得靠这个补全
-    torrent_files = _torrent_files(hashes)
+    #
+    # 合集种子（一包几十部片）只删这部片那几个文件，种子留着继续做种其余影片
+    hashes_to_delete, hashes_to_keep, files_by_hash = _plan_torrent_deletion(
+        hashes, {row.source_path for row in links if row.source_path}
+    )
+    torrent_files: list[str] = []
+    for paths in files_by_hash.values():
+        for p in paths:
+            if p not in torrent_files:
+                torrent_files.append(p)
     source_paths.update(torrent_files)
 
     logger.warning(
         f"[{result.code}] 媒体联动删除{'（演练）' if dry_run else ''} —— "
-        f"种子 {len(hashes)} 个: {', '.join(hashes) or '无'}; "
+        f"删种 {len(hashes_to_delete)} 个: {', '.join(hashes_to_delete) or '无'}; "
+        f"保留做种 {len(hashes_to_keep)} 个: {', '.join(hashes_to_keep) or '无'}; "
         f"源文件 {len(source_paths)} 个: {', '.join(source_paths) or '无'}; "
         f"硬链接 {len(link_paths)} 个: {', '.join(link_paths)}"
     )
@@ -845,25 +963,59 @@ def handle_media_deleted(
         dry_run = True
 
     if dry_run:
-        result.torrents_deleted = hashes
+        result.torrents_deleted = list(hashes_to_delete)
+        result.torrents_kept = list(hashes_to_keep)
         result.files_deleted = sorted(source_paths)
         result.links_deleted = link_paths
         result.sidecars_deleted, result.dirs_deleted = _preview_cleanup(link_paths)
         return result
 
-    # 1) 删种。转种下同一文件对应多个种子，全部删掉；文件不交给下载器删
+    # 1) 处理种子。转种下同一文件对应多个种子，逐个按计划处理；
+    #    文件一律不交给下载器删（转种时保存路径可能不一致，容易误删漏删）
     from app.modules.downloadclient import get_download_client, list_configured_clients
 
-    if hashes:
-        for name in list_configured_clients():
-            client = get_download_client(name)
-            if client is None:
-                continue
+    for name in list_configured_clients():
+        client = get_download_client(name)
+        if client is None:
+            continue
+
+        if hashes_to_delete:
             try:
-                deleted = client.delete_torrent(hashes, delete_files=False)
+                deleted = client.delete_torrent(hashes_to_delete, delete_files=False)
                 result.torrents_deleted.extend(deleted)
             except Exception as exc:
                 msg = f"{name} 删种异常: {exc}"
+                logger.error(msg)
+                result.errors.append(msg)
+
+        # 合集种子：只把这部片的文件标记为不需要，种子继续做种其余影片。
+        # 不标记的话下载器会发现文件缺失，重新把它下回来
+        for h in hashes_to_keep:
+            unwant = getattr(client, "unwant_torrent_files", None)
+            if unwant is None:
+                continue  # 该下载器未实现（迅雷），只能放着
+            try:
+                marked, remaining = unwant(h, files_by_hash.get(h) or [])
+            except Exception as exc:
+                msg = f"{name} 标记种子 {h} 文件不需要异常: {exc}"
+                logger.error(msg)
+                result.errors.append(msg)
+                continue
+
+            if not marked:
+                continue
+            if remaining:
+                result.torrents_kept.append(h)
+                continue
+
+            # 全部文件都标记成不需要了：种子成了空壳，做不了种也占着任务位，
+            # 直接删掉。这种情况出现在合集里的片子被逐部删完之后
+            try:
+                deleted = client.delete_torrent([h], delete_files=False)
+                result.torrents_deleted.extend(deleted)
+                logger.info(f"种子 {h} 已无任何需要的文件，删除该任务")
+            except Exception as exc:
+                msg = f"{name} 删除空壳种子 {h} 异常: {exc}"
                 logger.error(msg)
                 result.errors.append(msg)
 
@@ -875,8 +1027,10 @@ def handle_media_deleted(
     # 别的整理工具。那种情况下删源文件既释放不了空间（引用计数不到 0），
     # 又会让那些引用无从追溯，所以宁可留着。
     #
-    # 只保护登记过的源文件；种子里的其它文件（样品图、说明 txt）不设这层
-    # 保护 —— 它们本来就没有硬链接，多一次 stat 是白费
+    # 未登记的种子内文件（样品图、说明 txt）也要过一遍检查，只是期望值是 1：
+    # 它们本该没有任何硬链接，nlink 超过 1 说明别处正引用着同一份数据 ——
+    # 另一个媒体库、别的整理工具。合集种子里这类文件可能是别的影片的附属，
+    # 删掉会破坏那边的引用。多一次 stat 换掉这个风险是值得的
     #
     # 直通模式（link_path == source_path，没有真的建过硬链接）要把自己排除掉，
     # 否则期望值算成 2 而实际 nlink 只有 1 —— 检查虽不会误拦（只拦超出的），
@@ -890,7 +1044,7 @@ def handle_media_deleted(
     }
     allowed_links = 1 + len(link_paths) - len(passthrough_paths)
     for path in sorted(source_paths):
-        expected = allowed_links if path in registered_sources else 0
+        expected = allowed_links if path in registered_sources else 1
         _delete_file(path, result, expected_links=expected)
 
     # 种子文件删完，任务目录多半空了。只清种子自己那棵目录树，
@@ -920,14 +1074,24 @@ def handle_media_deleted(
             row = session.get(MediaLink, path)
             if row is not None:
                 session.delete(row)
-        # 历史记录一并清掉，否则订阅任务会认为该番号已下载而跳过
+        # 历史记录一并清掉，否则订阅任务会认为该番号已下载而跳过。
+        # 只清真删掉的种子 —— 合集种子还在做种，它的 History 行得留着，
+        # 那是「这个 hash 存在于下载器」的凭据，删了会让后续对账反复补查
         for h in result.torrents_deleted:
             row = session.get(History, h)
             if row is not None:
                 session.delete(row)
+        # 合集种子本身留着做种，但这部片的文件已经删了。它在 History 里
+        # 那条 hash → 本番号 的映射必须清掉，否则重新订阅这部片时会被当成
+        # 「已下载过」直接跳过。种子仍在下载器里，删这行不影响它继续做种
+        for h in result.torrents_kept:
+            row = session.get(History, h)
+            if row is not None and row.code == result.code:
+                session.delete(row)
 
     logger.warning(
-        f"[{result.code}] 联动删除完成 —— 种子 {len(result.torrents_deleted)}，"
+        f"[{result.code}] 联动删除完成 —— 种子 {len(result.torrents_deleted)}"
+        f"{f'（另有 {len(result.torrents_kept)} 个合集种子保留做种）' if result.torrents_kept else ''}，"
         f"文件 {len(result.files_deleted)}，"
         f"刮削附属 {len(result.sidecars_deleted)}，"
         f"目录 {len(result.dirs_deleted)}，错误 {len(result.errors)}"

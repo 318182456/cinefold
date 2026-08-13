@@ -303,6 +303,56 @@ class TransmissionClient:
             )
         return out
 
+    def unwant_torrent_files(
+        self, torrent_hash: str, paths: Sequence[str]
+    ) -> tuple[int, int]:
+        """把种子里指定的文件标记为「不需要」。语义同 qBittorrent 版。
+
+        tr 用 files_unwanted 传文件序号，语义与 qb 的 priority=0 一致：
+        该文件不再下载，种子继续为其余文件做种。
+
+        返回 (标记成功数, 剩余仍需要的文件数)。
+        """
+        if not torrent_hash or not paths:
+            return 0, 0
+        if not self._ensure_client():
+            return 0, 0
+
+        targets = {str(PurePath(p)) for p in paths if p}
+        if not targets:
+            return 0, 0
+
+        try:
+            found = self.client.get_torrents(
+                ids=[torrent_hash],
+                arguments=["hashString", "downloadDir", "files", "priorities", "wanted"],
+            )
+            if not found:
+                logger.info(f"Transmission 中已无种子 {torrent_hash}，无需标记文件")
+                return 0, 0
+            t = found[0]
+            root = t.download_dir
+            ids, remaining = [], 0
+            for f in t.get_files():
+                if str(PurePath(root) / f.name) in targets:
+                    ids.append(f.id)
+                elif f.selected:
+                    # selected 即 tr 的 wanted。之前就没勾选的不算「仍需要」，
+                    # 否则种子明明已经空了还会被判成有内容而留下空壳
+                    remaining += 1
+            if not ids:
+                return 0, 0
+
+            self.client.change_torrent(ids=[torrent_hash], files_unwanted=ids)
+            logger.info(
+                f"已在 Transmission 种子 {torrent_hash} 中把 {len(ids)} 个文件"
+                f"标记为不需要，剩余 {remaining} 个文件仍在做种"
+            )
+            return len(ids), remaining
+        except Exception as exc:
+            logger.warning(f"标记 Transmission 文件为不需要失败 {torrent_hash}: {exc}")
+            return 0, 0
+
     def delete_torrent(
         self, hashes: Sequence[str], delete_files: bool = False
     ) -> list[str]:
