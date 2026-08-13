@@ -312,3 +312,54 @@ class TestScheduler:
 
         assert "transfer_seeds" in INTERVAL_JOBS
         assert INTERVAL_JOBS["transfer_seeds"]["interval_key"] == "seed_transfer_interval"
+
+
+class TestTransmissionPayload:
+    """交给 transmission-rpc 的种子必须是 bytes 原文。
+
+    库只对 bytes / Path / file 做 base64；传字符串会被当作本地文件名塞进
+    RPC 的 filename 字段，tr 在磁盘上找不到那个「文件」，回 invalid or
+    corrupt torrent file。这两个用例守的就是参数类型。
+    """
+
+    def _client(self, recorder):
+        from app.modules.downloadclient.transmission import TransmissionClient
+
+        client = TransmissionClient.__new__(TransmissionClient)
+        client.client = recorder
+        client.download_path = "/downloads"
+        client.label = "L"
+        client._ensure_client = lambda: True
+        return client
+
+    class Recorder:
+        def __init__(self):
+            self.kwargs = None
+
+        def add_torrent(self, torrent, **kwargs):
+            self.kwargs = {"torrent": torrent, **kwargs}
+            return type("T", (), {"hashString": "NEW"})()
+
+        def verify_torrent(self, ids=None):
+            pass
+
+        def start_torrent(self, ids=None):
+            pass
+
+    def test_seeding_passes_raw_bytes(self):
+        rec = self.Recorder()
+        content = b"d8:announce4:teste"
+
+        self._client(rec).add_torrent_for_seeding(content, save_path="/downloads/x")
+
+        assert rec.kwargs["torrent"] == content
+        assert isinstance(rec.kwargs["torrent"], bytes)
+
+    def test_add_passes_raw_bytes(self):
+        rec = self.Recorder()
+        content = b"d8:announce4:teste"
+
+        self._client(rec).add_torrent(content)
+
+        assert rec.kwargs["torrent"] == content
+        assert isinstance(rec.kwargs["torrent"], bytes)

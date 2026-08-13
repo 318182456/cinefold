@@ -4,7 +4,6 @@
 """
 from __future__ import annotations
 
-import base64
 from pathlib import PurePath
 from typing import Sequence
 from urllib.parse import urlparse
@@ -86,8 +85,10 @@ class TransmissionClient:
 
         torrent_hash = get_torrent_hash(content)
         try:
+            # 直接传 bytes，库内部会做 base64。传 base64 字符串会被当成本地
+            # 文件名，tr 找不到那个文件，报 invalid or corrupt torrent file
             added = self.client.add_torrent(
-                base64.b64encode(content).decode(),
+                content,
                 download_dir=save_path or self.download_path or None,
                 labels=[self.label] if self.label else None,
             )
@@ -137,7 +138,7 @@ class TransmissionClient:
 
         try:
             added = self.client.add_torrent(
-                base64.b64encode(content).decode(),
+                content,
                 download_dir=save_path,
                 labels=label_list,
                 paused=True,
