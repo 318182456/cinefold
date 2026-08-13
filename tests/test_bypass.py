@@ -212,14 +212,30 @@ class TestSiteClientFallback:
 
         assert client.get("/search") == "<html>VIA</html>"
 
+    def test_5xx_triggers_bypass(self, monkeypatch):
+        """5xx 多半是站点前面的防护层掐了直连，值得让 bypass 再试一次。"""
+        from app.modules.ladysite import base
+
+        client = base.SiteClient("https://javdb.com", interval=0)
+
+        def fake_get(self, url, **kwargs):
+            return httpx.Response(502, text="bad gateway", request=httpx.Request("GET", url))
+
+        monkeypatch.setattr(httpx.Client, "get", fake_get)
+        monkeypatch.setattr(base, "fetch_via_bypass",
+                            lambda url, params=None, timeout=15.0: "<html>VIA</html>")
+
+        assert client.get("/search") == "<html>VIA</html>"
+
     def test_other_errors_do_not_trigger_bypass(self, monkeypatch):
+        """4xx（除 403）是站点的真实答复，过盾也变不出页面来，不该白跑一趟。"""
         from app.modules.ladysite import base
 
         client = base.SiteClient("https://javdb.com", interval=0)
         called = {"bypass": False}
 
         def fake_get(self, url, **kwargs):
-            return httpx.Response(500, text="err", request=httpx.Request("GET", url))
+            return httpx.Response(404, text="not found", request=httpx.Request("GET", url))
 
         def spy(url, params=None, timeout=15.0):
             called["bypass"] = True

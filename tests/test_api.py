@@ -127,15 +127,25 @@ class TestConfig:
         assert get_settings(reload=True).qbittorrent_password == "realpass"
 
     def test_save_config_applies_real_value(self, client, auth):
-        from app.core.config import get_settings
+        """写进去的值要真的落到配置里。
 
-        response = client.post(
-            "/api/v1/config",
-            headers=auth,
-            json={"config": {"qbittorrent_url": "http://192.168.1.9:8080"}},
-        )
-        assert response.json()["code"] == 200
-        assert get_settings(reload=True).qbittorrent_url == "http://192.168.1.9:8080"
+        测完必须清掉：这个地址会写进测试用的 .env，后面的用例（如 medialink 的
+        联动删除）碰到已配置的下载器就会真的去连 192.168.1.9，连不通时 TCP
+        要挂到超时，整套测试会卡死在那里。
+        """
+        from app.core.config import get_settings, save_settings
+
+        try:
+            response = client.post(
+                "/api/v1/config",
+                headers=auth,
+                json={"config": {"qbittorrent_url": "http://192.168.1.9:8080"}},
+            )
+            assert response.json()["code"] == 200
+            assert get_settings(reload=True).qbittorrent_url == "http://192.168.1.9:8080"
+        finally:
+            save_settings({"QBITTORRENT_URL": ""})
+            get_settings(reload=True)
 
     def test_unknown_key_ignored(self, client, auth):
         response = client.post(

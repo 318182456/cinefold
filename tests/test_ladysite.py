@@ -10,6 +10,23 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def ensure_tables():
+    """建表。
+
+    解析类站点在构造时会读 datasource 表拿地址与节流配置（SiteClient.from_source），
+    表不存在就直接抛 OperationalError —— 单独跑这个文件时没有别的用例替它建表。
+
+    必须先 import models：建表建的是 DBBase.metadata 里登记过的表，而登记发生在
+    模型类被导入的那一刻。不导入就是一张空 metadata，create_all 什么也不建。
+    """
+    from app.database import models  # noqa: F401  导入即向 metadata 登记各表
+    from app.database.base import DBBase
+    from app.database.session import engine
+
+    DBBase.metadata.create_all(engine)
+
+
 JAVDB_DETAIL = """
 <html><body>
 <h2 class="title is-4">
