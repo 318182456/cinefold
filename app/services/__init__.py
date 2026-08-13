@@ -618,7 +618,11 @@ def purge_migrated_actors(dry_run: bool = True) -> dict:
 # 下载状态同步
 # ======================================================================
 def sync_download_status() -> int:
-    """查询下载器，把已完成的任务更新为下载完成并通知。"""
+    """查询下载器，把已完成的任务更新为下载完成并通知。
+
+    刚下完的任务顺手转移做种（若已开启），不必等下一轮定时扫描 —— 这里
+    已经知道是哪几个刚完成，比全量拉一次 qb 列表省事得多。
+    """
     client = downloadclient.get_download_client()
     if client is None:
         return 0
@@ -637,20 +641,70 @@ def sync_download_status() -> int:
     states = client.monitor_torrent(list(hash_to_code.keys()))
 
     completed = 0
+    just_done: list[str] = []
     for state in states:
         if not state.get("completed"):
             continue
-        code = hash_to_code.get(state.get("hash", ""))
+        torrent_hash = state.get("hash", "")
+        code = hash_to_code.get(torrent_hash)
         if not code:
             continue
         _update_code_status(code, CodeStatus.DOWNLOADED)
-        _update_save_path(state.get("hash", ""), state.get("save_path", ""))
+        _update_save_path(torrent_hash, state.get("save_path", ""))
         send_downloaded_message(code)
+        just_done.append(torrent_hash)
         completed += 1
 
     if completed:
         logger.info(f"{completed} 个任务下载完成")
+        _transfer_just_completed(client, just_done)
     return completed
+
+
+def _transfer_just_completed(client, hashes: list[str]) -> None:
+    """把刚下完的任务转移到 tr 做种。未开启或条件不满足时静默跳过。
+
+    只在默认下载器是 qb 时做 —— 这批 hash 来自默认下载器，默认是 tr 时
+    它们本就在 tr 里，拿去 transfer_hashes 只会得到一串「qb 中找不到」。
+
+    转移失败不影响下载完成本身，异常一律吞掉：这是搭在同步流程上的顺带
+    动作，不能让它把状态更新和通知带崩。漏掉的下一轮定时扫描会补上。
+    """
+    if not hashes:
+        return
+
+    settings = get_settings()
+    if not settings.seed_transfer_enabled:
+        return
+
+    from app.modules.downloadclient.qbittorrent import QBitTorrentClient
+    if not isinstance(client, QBitTorrentClient):
+        logger.debug("[转移做种] 默认下载器不是 qBittorrent，跳过即时转移")
+        return
+
+    try:
+        from app.services import seedtransfer
+
+        ok, reason = seedtransfer.is_available()
+        if not ok:
+            logger.debug(f"[转移做种] {reason}，跳过即时转移")
+            return
+
+        # 同样守单轮上限：一批下完好几十个时，这里不设限就绕开了配置，
+        # tr 的校验会把磁盘打满。超出的留给定时任务下一轮
+        limit = seedtransfer._batch_limit()
+        if len(hashes) > limit:
+            logger.info(
+                f"[转移做种] 刚完成 {len(hashes)} 个，超出单轮上限 {limit}，"
+                f"本次转移前 {limit} 个，其余等定时任务"
+            )
+            hashes = hashes[:limit]
+
+        result = seedtransfer.transfer_hashes(hashes)
+        if result.count:
+            logger.info(f"[转移做种] 下载完成后即时转移 {result.count} 个")
+    except Exception as exc:
+        logger.warning(f"[转移做种] 下载完成后即时转移失败: {exc}")
 
 
 def _update_save_path(torrent_hash: str, save_path: str) -> None:

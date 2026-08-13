@@ -504,3 +504,120 @@ class TestTransmissionPayload:
         )
 
         assert rec.calls == ["start"]
+
+
+class TestTransferOnComplete:
+    """下载完成后的即时转移。
+
+    这是搭在下载状态同步流程上的顺带动作，出问题不能连累主流程 ——
+    状态已经更新、通知已经发出去了，转移失败顶多等下一轮定时扫描补上。
+    """
+
+    def _qb_client(self):
+        from app.modules.downloadclient.qbittorrent import QBitTorrentClient
+        return QBitTorrentClient.__new__(QBitTorrentClient)
+
+    def _run(self, monkeypatch, client, hashes, enabled=True, transfer=None):
+        from app import services
+
+        monkeypatch.setattr(
+            services, "get_settings",
+            lambda: type("S", (), {"seed_transfer_enabled": enabled})(),
+        )
+        called = []
+        if transfer is None:
+            def transfer(hs):
+                called.append(list(hs))
+                return seedtransfer.TransferResult(transferred=list(hs))
+        else:
+            original = transfer
+
+            def transfer(hs):
+                called.append(list(hs))
+                return original(hs)
+
+        monkeypatch.setattr(seedtransfer, "transfer_hashes", transfer)
+        monkeypatch.setattr(seedtransfer, "is_available", lambda: (True, ""))
+        services._transfer_just_completed(client, hashes)
+        return called
+
+    def test_transfers_just_completed_hashes(self, monkeypatch):
+        called = self._run(monkeypatch, self._qb_client(), ["AAA", "BBB"])
+        assert called == [["AAA", "BBB"]]
+
+    def test_skipped_when_disabled(self, monkeypatch):
+        called = self._run(monkeypatch, self._qb_client(), ["AAA"], enabled=False)
+        assert called == []
+
+    def test_skipped_for_non_qb_client(self, monkeypatch):
+        """默认下载器是 tr 时这批 hash 本就在 tr 里，转移只会全数失败。"""
+        from app.modules.downloadclient.transmission import TransmissionClient
+
+        tr_client = TransmissionClient.__new__(TransmissionClient)
+        called = self._run(monkeypatch, tr_client, ["AAA"])
+        assert called == []
+
+    def test_empty_hashes_does_nothing(self, monkeypatch):
+        called = self._run(monkeypatch, self._qb_client(), [])
+        assert called == []
+
+    def test_respects_batch_limit(self, monkeypatch):
+        """一批下完几十个时也要守单轮上限，否则绕开配置把磁盘打满。"""
+        monkeypatch.setattr(seedtransfer, "_batch_limit", lambda: 3)
+
+        called = self._run(
+            monkeypatch, self._qb_client(), ["A", "B", "C", "D", "E"]
+        )
+
+        assert called == [["A", "B", "C"]]
+
+    def test_transfer_error_is_swallowed(self, monkeypatch):
+        """转移抛异常不能往上冒 —— 主流程的状态更新和通知已经做完了。"""
+        def boom(hs):
+            raise RuntimeError("tr 挂了")
+
+        # 不抛出即为通过
+        self._run(monkeypatch, self._qb_client(), ["AAA"], transfer=boom)
+
+    def test_sync_download_status_triggers_transfer(self, monkeypatch):
+        """同步流程认定下载完成后，必须把这批 hash 交给转移。
+
+        单测 _transfer_just_completed 覆盖不到这条接线 —— 调用被摘掉时
+        那些用例照样全绿。
+        """
+        from app import services
+        from app.database.base import DBBase
+        from app.database.models import Code, CodeStatus, History
+        from app.database.session import engine, session_scope
+
+        DBBase.metadata.create_all(engine)
+
+        code = "SYNC-001"
+        torrent_hash = "SYNCHASH001"
+        with session_scope() as session:
+            session.merge(Code(code=code, status=CodeStatus.DOWNLOADING))
+            session.merge(History(hash=torrent_hash, code=code))
+
+        client = self._qb_client()
+        monkeypatch.setattr(
+            client, "monitor_torrent",
+            lambda hashes=None: [{
+                "hash": torrent_hash, "completed": True,
+                "save_path": "/downloads/x",
+            }],
+            raising=False,
+        )
+        monkeypatch.setattr(
+            services.downloadclient, "get_download_client",
+            lambda name="": client,
+        )
+        monkeypatch.setattr(services, "send_downloaded_message", lambda c: None)
+
+        handed = []
+        monkeypatch.setattr(
+            services, "_transfer_just_completed",
+            lambda cl, hs: handed.append(list(hs)),
+        )
+
+        assert services.sync_download_status() == 1
+        assert handed == [[torrent_hash]]
