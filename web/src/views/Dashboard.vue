@@ -14,13 +14,16 @@ const today = ref([])
 const loading = ref(true)
 const running = ref(false)
 
+// label 按 code.status 的真实口径来 —— status 是单值流转字段，
+// 「待搜种」只含还没推给下载器的，不是订阅过的总数；actors 统计的是
+// 演员订阅表，不是番号里出现过的演员
 const TILES = [
   { key: 'total', label: '番号总数', color: 'text-gray-200' },
-  { key: 'subscribed', label: '已订阅', color: 'text-blue-400' },
+  { key: 'subscribed', label: '待搜种', color: 'text-blue-400' },
   { key: 'downloading', label: '下载中', color: 'text-amber-400' },
   { key: 'downloaded', label: '已下载', color: 'text-emerald-400' },
   { key: 'completed', label: '已入库', color: 'text-emerald-300' },
-  { key: 'actors', label: '演员', color: 'text-gray-200' },
+  { key: 'actors', label: '已订阅演员', color: 'text-gray-200' },
 ]
 
 async function load() {

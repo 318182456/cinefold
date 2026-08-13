@@ -224,10 +224,11 @@ def _dispatch_command(text: str) -> str:
         return (
             f"📊 统计\n"
             f"总番号: {stats['total']}\n"
-            f"已订阅: {stats['subscribed']}\n"
+            f"待搜种: {stats['subscribed']}\n"
             f"下载中: {stats['downloading']}\n"
-            f"已完成: {stats['downloaded']}\n"
-            f"演员: {stats['actors']}"
+            f"已下载: {stats['downloaded']}\n"
+            f"已入库: {stats['completed']}\n"
+            f"已订阅演员: {stats['actors']}"
         )
 
     if command == "/sub":
