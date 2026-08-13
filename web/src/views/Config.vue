@@ -143,6 +143,8 @@ const GROUPS = [
           { k: 'seed_transfer_interval', label: '检查间隔（分钟）', t: 'number', ph: '60' },
           { k: 'seed_transfer_batch_limit', label: '每轮最多转移', t: 'number', ph: '20',
             hint: '每个种子都要触发一次 tr 校验，校验吃磁盘 IO。存量多可调大，填 0 表示不限' },
+          { k: 'seed_transfer_skip_verify', label: '跳过 Transmission 校验', t: 'bool',
+            hint: '加完直接做种，省掉整盘重读。但 tr 不再核对文件，真有缺损会把坏块传出去，可能被站点判作弊。文件刚由 qB 下完校验过时才建议开' },
           { k: 'seed_transfer_delete_source', label: '转移后删除 qB 源任务', t: 'bool',
             hint: '只删任务不删文件。关闭则两个下载器同时做种同一份文件' },
           { k: 'seed_transfer_categories', label: '限定分类', ph: '留空表示不限，多个用逗号分隔' },

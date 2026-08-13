@@ -156,6 +156,7 @@ def transfer_hashes(hashes: list[str], delete_source: bool | None = None) -> Tra
             save_path=save_path,
             code=detail.get("name", "")[:40],
             labels=_transfer_labels(settings),
+            verify=not getattr(settings, "seed_transfer_skip_verify", False),
         )
         if not new_hash:
             result.failed.append({"hash": torrent_hash, "reason": "Transmission 添加失败"})

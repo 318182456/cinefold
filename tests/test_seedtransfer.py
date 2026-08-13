@@ -45,12 +45,13 @@ class FakeTR:
         self.result = result
         self.added = []
 
-    def add_torrent_for_seeding(self, content, save_path, code="", labels=None):
+    def add_torrent_for_seeding(self, content, save_path, code="", labels=None, verify=True):
         self.added.append({
             "content": content,
             "save_path": save_path,
             "code": code,
             "labels": labels,
+            "verify": verify,
         })
         return self.result
 
@@ -158,6 +159,56 @@ class TestTransferHashes:
     def test_empty_input(self, wired):
         result = seedtransfer.transfer_hashes([])
         assert result.count == 0
+
+
+class TestSkipVerify:
+    """跳过校验的开关要一路传到下载器。
+
+    传反了后果不对称：本该跳过却校验了只是慢；本该校验却跳过了，tr 会把
+    没核对过的文件当好数据传出去。
+    """
+
+    def _settings(self, skip):
+        return type("S", (), {
+            "seed_transfer_delete_source": False,
+            "seed_transfer_label": "t",
+            "transmission_label": "",
+            "seed_transfer_path_map": "",
+            "seed_transfer_skip_verify": skip,
+        })()
+
+    def test_verify_on_by_default(self, wired, monkeypatch):
+        qb, tr = wired(FakeQB(details={"AAA": _detail()}), FakeTR())
+        monkeypatch.setattr(seedtransfer, "get_settings", lambda: self._settings(False))
+
+        seedtransfer.transfer_hashes(["AAA"])
+
+        assert tr.added[0]["verify"] is True
+
+    def test_verify_skipped_when_configured(self, wired, monkeypatch):
+        qb, tr = wired(FakeQB(details={"AAA": _detail()}), FakeTR())
+        monkeypatch.setattr(seedtransfer, "get_settings", lambda: self._settings(True))
+
+        seedtransfer.transfer_hashes(["AAA"])
+
+        assert tr.added[0]["verify"] is False
+
+    def test_missing_setting_keeps_verifying(self, wired, monkeypatch):
+        """老配置里没这一项时必须按校验处理，不能默默跳过。"""
+        qb, tr = wired(FakeQB(details={"AAA": _detail()}), FakeTR())
+        monkeypatch.setattr(
+            seedtransfer, "get_settings",
+            lambda: type("S", (), {
+                "seed_transfer_delete_source": False,
+                "seed_transfer_label": "t",
+                "transmission_label": "",
+                "seed_transfer_path_map": "",
+            })(),
+        )
+
+        seedtransfer.transfer_hashes(["AAA"])
+
+        assert tr.added[0]["verify"] is True
 
 
 class TestPathMap:
@@ -406,16 +457,17 @@ class TestTransmissionPayload:
     class Recorder:
         def __init__(self):
             self.kwargs = None
+            self.calls = []
 
         def add_torrent(self, torrent, **kwargs):
             self.kwargs = {"torrent": torrent, **kwargs}
             return type("T", (), {"hashString": "NEW"})()
 
         def verify_torrent(self, ids=None):
-            pass
+            self.calls.append("verify")
 
         def start_torrent(self, ids=None):
-            pass
+            self.calls.append("start")
 
     def test_seeding_passes_raw_bytes(self):
         rec = self.Recorder()
@@ -434,3 +486,21 @@ class TestTransmissionPayload:
 
         assert rec.kwargs["torrent"] == content
         assert isinstance(rec.kwargs["torrent"], bytes)
+
+    def test_verifies_before_start_by_default(self):
+        """默认必须先校验再启动，顺序反了 tr 会当没有文件从头下。"""
+        rec = self.Recorder()
+
+        self._client(rec).add_torrent_for_seeding(b"x", save_path="/downloads/x")
+
+        assert rec.calls == ["verify", "start"]
+
+    def test_skips_verify_when_disabled(self):
+        """verify=False 时不能调 verify_torrent，但仍要把种子启动起来。"""
+        rec = self.Recorder()
+
+        self._client(rec).add_torrent_for_seeding(
+            b"x", save_path="/downloads/x", verify=False
+        )
+
+        assert rec.calls == ["start"]
