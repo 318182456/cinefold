@@ -19,6 +19,13 @@ const SUGGESTIONS = [
   '配置有什么问题？',
 ]
 
+// 需要慎重确认的操作各自的后果说明。未列出的按「只移除任务」处理
+const PROPOSAL_HINT = {
+  delete_with_files: '磁盘文件会一并删除，不可恢复',
+  delete: '只从下载器移除任务，磁盘文件保留',
+  transfer: '文件不移动，由 Transmission 接管做种；按配置可能会删掉 qB 的源任务',
+}
+
 const open = ref(false)
 const available = ref(false)
 const model = ref('')
@@ -108,9 +115,52 @@ function scrollToBottom() {
   })
 }
 
+/** 把还挂着的提案标记为被顶替，并通知后端销毁，免得它们留到过期。 */
+function supersedePending() {
+  for (const msg of messages.value) {
+    for (const proposal of msg.proposals || []) {
+      if (proposal.status !== 'pending') continue
+      proposal.status = 'superseded'
+      cancelAgentAction(proposal.id).catch(() => {})
+    }
+  }
+}
+
+/** 还挂着的待确认操作。有它在，"确认"「取消」这类话就该落到它身上。 */
+function pendingProposal() {
+  for (let i = messages.value.length - 1; i >= 0; i -= 1) {
+    const hit = (messages.value[i].proposals || []).find((p) => p.status === 'pending')
+    if (hit) return hit
+  }
+  return null
+}
+
+// 用户可能不点按钮而是直接打字确认/取消。这些话发给模型只会让它再提一次案，
+// 所以在前端就地拦下来，直接作用到挂着的那个提案上
+// 只收含义唯一的词。「删除」「继续」这类不算 —— 挂着的可能是暂停提案，
+// 把「删除」当成确认就会执行成暂停，反而更离谱
+const CONFIRM_WORDS = /^(确认|确定|确认执行|执行|好|好的|嗯|可以|同意|是|yes|y|ok|confirm)[。.!！]?$/i
+const CANCEL_WORDS = /^(取消|算了|不要|不用|不用了|放弃|no|n|cancel)[。.!！]?$/i
+
 async function send(text) {
   const content = (text ?? question.value).trim()
   if (!content || sending.value) return
+
+  const pending = pendingProposal()
+  if (pending) {
+    if (CONFIRM_WORDS.test(content)) {
+      question.value = ''
+      messages.value.push({ role: 'user', content })
+      await confirmProposal(pending)
+      return
+    }
+    if (CANCEL_WORDS.test(content)) {
+      question.value = ''
+      messages.value.push({ role: 'user', content })
+      await cancelProposal(pending)
+      return
+    }
+  }
 
   question.value = ''
   messages.value.push({ role: 'user', content })
@@ -125,12 +175,16 @@ async function send(text) {
 
   try {
     const data = await askAgent(content, history)
+    const fresh = (data?.proposals || []).map((p) => ({ ...p, status: 'pending' }))
+    // 新提案顶掉旧的：用户说「不保留文件」是在改上一条的条件，不是要
+    // 同时挂两条针对同一批任务的操作
+    if (fresh.length) supersedePending()
     messages.value.push({
       role: 'assistant',
       content: data?.answer || '没有返回内容',
       tools: data?.tools_used || [],
       // 待确认的下载器操作，点确认才真的执行
-      proposals: (data?.proposals || []).map((p) => ({ ...p, status: 'pending' })),
+      proposals: fresh,
     })
   } catch (err) {
     messages.value.push({
@@ -313,10 +367,13 @@ onBeforeUnmount(() => {
             <div
               v-for="proposal in msg.proposals || []"
               :key="proposal.id"
-              class="rounded-lg border px-2.5 py-2 text-xs"
-              :class="proposal.destructive
-                ? 'border-red-900/70 bg-red-950/30'
-                : 'border-gray-700 bg-gray-800/40'"
+              class="rounded-lg border px-2.5 py-2 text-xs transition-opacity"
+              :class="[
+                proposal.destructive
+                  ? 'border-red-900/70 bg-red-950/30'
+                  : 'border-gray-700 bg-gray-800/40',
+                ['cancelled', 'superseded'].includes(proposal.status) ? 'opacity-50' : '',
+              ]"
             >
               <p class="flex items-center gap-1.5">
                 <svg
@@ -349,9 +406,7 @@ onBeforeUnmount(() => {
               </ul>
 
               <p v-if="proposal.destructive && proposal.status === 'pending'" class="mt-1.5 text-[11px] text-red-400">
-                {{ proposal.action === 'delete_with_files'
-                  ? '磁盘文件会一并删除，不可恢复'
-                  : '只从下载器移除任务，磁盘文件保留' }}
+                {{ PROPOSAL_HINT[proposal.action] || '只从下载器移除任务，磁盘文件保留' }}
               </p>
               <p v-if="proposal.error" class="mt-1.5 text-[11px] text-red-400">
                 {{ proposal.error }}
@@ -380,6 +435,9 @@ onBeforeUnmount(() => {
               </p>
               <p v-else-if="proposal.status === 'cancelled'" class="mt-2 text-[11px] text-gray-500">
                 已取消
+              </p>
+              <p v-else-if="proposal.status === 'superseded'" class="mt-2 text-[11px] text-gray-500">
+                已被下面的新操作取代
               </p>
             </div>
 
