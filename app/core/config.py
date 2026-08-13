@@ -166,10 +166,6 @@ class Settings:
     # 一轮最多转移多少个。每个都要导出种子并触发 tr 校验，校验吃磁盘 IO，
     # 一次涌进去太多会拖慢正在下载的任务。存量多又不怕 IO 时可以调大
     seed_transfer_batch_limit: int = 20
-    # 跳过 tr 的文件校验，加完直接开始做种。省掉整盘重读的 IO，代价是
-    # tr 不核对本地文件：真有缺损就会把坏块传出去，PT 站可能判作弊。
-    # 源文件刚由 qb 校验过时开启最划算，不确定时保持关闭
-    seed_transfer_skip_verify: bool = False
     # 转移后是否从 qb 删掉源任务（只删任务，文件留给 tr 做种）。
     # 关掉则两边同时做种
     seed_transfer_delete_source: bool = True
@@ -440,7 +436,6 @@ def load_settings() -> Settings:
         seed_transfer_enabled=_env_bool("SEED_TRANSFER_ENABLED", False),
         seed_transfer_interval=_env_int("SEED_TRANSFER_INTERVAL", 60),
         seed_transfer_batch_limit=_env_int("SEED_TRANSFER_BATCH_LIMIT", 20),
-        seed_transfer_skip_verify=_env_bool("SEED_TRANSFER_SKIP_VERIFY", False),
         seed_transfer_delete_source=_env_bool("SEED_TRANSFER_DELETE_SOURCE", True),
         seed_transfer_categories=_env("SEED_TRANSFER_CATEGORIES"),
         seed_transfer_tags=_env("SEED_TRANSFER_TAGS"),

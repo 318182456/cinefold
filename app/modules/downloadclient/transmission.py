@@ -115,12 +115,7 @@ class TransmissionClient:
             return None
 
     def add_torrent_for_seeding(
-        self,
-        content: bytes,
-        save_path: str,
-        code: str = "",
-        labels: Sequence[str] | None = None,
-        verify: bool = True,
+        self, content: bytes, save_path: str, code: str = "", labels: Sequence[str] | None = None
     ) -> str | None:
         """接管一份已下载完成的文件继续做种。返回 hash，失败返回 None。
 
@@ -129,9 +124,10 @@ class TransmissionClient:
         - 先暂停加入再触发校验，跳过「加进来就开下」的窗口。tr 校验完发现
           文件齐全就直接转做种，缺文件才会补下
 
-        verify=False 则不触发校验，加完直接开。省掉整盘重读的 IO，代价是
-        tr 未经核对就认定本地文件有效：文件真有缺损时会把坏块传给别人。
-        源文件刚由 qb 校验过时这样最快，不确定时应保持开启。
+        校验这一步省不掉：Transmission 做种前必定核对本地文件，RPC 里没有
+        「信任文件、跳过校验」的开关（torrent-add 无此参数，session 也只有
+        start-added-torrents）。不显式调 verify_torrent 也没用，start 时
+        tr 会自己校验一遍。
 
         已存在同 hash 的种子时不重复添加，直接返回既有 hash —— transmission
         对重复添加会抛 DuplicateTorrent，那不是错误，是「已经转移过了」。
@@ -162,9 +158,8 @@ class TransmissionClient:
 
         new_hash = added.hashString or torrent_hash
         try:
-            if verify:
-                # 校验后 tr 才知道文件已经在本地，否则会从 0 开始下
-                self.client.verify_torrent(ids=[new_hash])
+            # 校验后 tr 才知道文件已经在本地，否则会从 0 开始下
+            self.client.verify_torrent(ids=[new_hash])
             self.client.start_torrent(ids=[new_hash])
         except Exception as exc:
             # 种子已经加进去了，这一步没成不算整体失败，用户手动处理即可
@@ -172,7 +167,6 @@ class TransmissionClient:
 
         logger.info(
             f"[{code}] 已转移做种到 Transmission，hash={new_hash}，目录={save_path}"
-            f"{'' if verify else '（已跳过校验）'}"
         )
         return new_hash
 
