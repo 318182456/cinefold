@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from fastapi import APIRouter, Depends
+from loguru import logger
 from pydantic import BaseModel
 from sqlalchemy import func, or_, select
 
@@ -35,6 +36,16 @@ class DeleteRequest(BaseModel):
     """按 link_path 或 code 定位要清理的关联。"""
     link_path: str = ""
     code: str = ""
+    dry_run: bool = True
+
+
+class BatchRequest(BaseModel):
+    """一批 link_path。孤儿一览的多选批量操作用。
+
+    按 link_path 而不是 code：同一番号可能有多条链接，选中的是具体哪一条
+    得由用户决定，按 code 会把没选中的那些也一起删了。
+    """
+    link_paths: list[str] = []
     dry_run: bool = True
 
 
@@ -403,6 +414,95 @@ def delete_medialink(
     if result.errors and not result.links_deleted:
         return ResponseEntity.fail("; ".join(result.errors), code=400, data=result.as_dict())
     return ResponseEntity.ok(result.as_dict())
+
+
+@router.post("/batch-delete")
+def batch_delete(
+    body: BatchRequest, current_user: str = Depends(get_current_user)
+):
+    """批量联动删除。孤儿一览里勾中的那些一次删完。
+
+    逐条走 handle_media_deleted，不合并成一次 —— 那个函数按 link_path 反查
+    源文件与种子，每条的删除范围各不相同，合并没有意义。单条失败不中断
+    整批：一条记录挂了（文件锁住、权限不足）不该让剩下的全都做不成，
+    错误逐条收集，最后一并回报。
+
+    dry_run 默认为真，与单条删除口径一致，必须显式传 false 才真删。
+    """
+    paths = [p for p in (body.link_paths or []) if p]
+    if not paths:
+        return ResponseEntity.fail("未选中任何记录", code=400)
+
+    results: list[dict] = []
+    errors: list[str] = []
+    # 真删掉的条数。dry_run 时恒为 0，前端据此区分「演练」与「真删」
+    deleted = 0
+    downgraded = False
+
+    for path in paths:
+        try:
+            outcome = handle_media_deleted(link_path=path, dry_run=body.dry_run)
+        except Exception as exc:
+            msg = f"{path}: {exc}"
+            logger.error(f"批量联动删除异常 {msg}")
+            errors.append(msg)
+            continue
+
+        # 全局开关关着时 service 层会把 dry_run 兜回真，据此提示用户
+        if outcome.dry_run and not body.dry_run:
+            downgraded = True
+        elif not outcome.dry_run:
+            deleted += 1
+
+        _invalidate(*outcome.files_deleted, *outcome.links_deleted)
+        errors.extend(f"{path}: {e}" for e in outcome.errors)
+        results.append(outcome.as_dict())
+
+    _drop_stats_cache()
+
+    # 一条都没成功才算整体失败，部分成功照常返回，让前端展示明细
+    if not results and errors:
+        return ResponseEntity.fail("; ".join(errors[:5]), code=400)
+
+    return ResponseEntity.ok({
+        "total": len(paths),
+        "deleted": deleted,
+        "dry_run": downgraded or body.dry_run,
+        "results": results,
+        "errors": errors,
+    })
+
+
+@router.post("/batch-record")
+def batch_drop_records(
+    body: BatchRequest, current_user: str = Depends(get_current_user)
+):
+    """批量只删关联记录，不碰任何文件。
+
+    孤儿一览的常见处置：文件早就手工删干净了，只想把库里这条没用的记录清掉。
+    """
+    paths = [p for p in (body.link_paths or []) if p]
+    if not paths:
+        return ResponseEntity.fail("未选中任何记录", code=400)
+
+    removed: list[str] = []
+    with session_scope() as session:
+        # 分片：SQLite 的 IN 参数上限 999，一次全选很容易超
+        for start in range(0, len(paths), 500):
+            for row in session.scalars(
+                select(MediaLink).where(
+                    MediaLink.link_path.in_(paths[start:start + 500])
+                )
+            ).all():
+                removed.append(row.link_path)
+                session.delete(row)
+
+    _drop_stats_cache()
+    return ResponseEntity.ok({
+        "removed": removed,
+        # 选中却没删掉的（记录已被别处清掉），前端据此提示
+        "missing": [p for p in paths if p not in set(removed)],
+    })
 
 
 @router.delete("/record")

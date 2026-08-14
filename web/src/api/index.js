@@ -119,6 +119,12 @@ export const pruneMediaLinks = () => http.post('/medialinks/prune')
 // 与 stats 那次一个量级，同样放宽超时
 export const listMediaLinkOrphans = (params) =>
   http.get('/medialinks/orphans', { params, timeout: 300000 })
+// 批量联动删除。逐条删种 + 删文件，选得多时很慢，超时放宽
+export const batchDeleteMediaLinks = (payload) =>
+  http.post('/medialinks/batch-delete', payload, { timeout: 600000 })
+// 批量只删记录，不碰文件
+export const batchDropMediaLinkRecords = (linkPaths) =>
+  http.post('/medialinks/batch-record', { link_paths: linkPaths })
 
 // ---------------------------------------------------------------- 监控目录
 export const listWatchDirs = () => http.get('/watchdirs')

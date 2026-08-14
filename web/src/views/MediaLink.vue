@@ -1,8 +1,9 @@
 <script setup>
 import { computed, onMounted, ref } from 'vue'
 import {
-  deleteMediaLink, dropMediaLinkRecord, getMediaLinkStats, listMediaLinkOrphans,
-  listMediaLinks, previewMediaLinkDelete, pruneMediaLinks, registerMediaLink,
+  batchDeleteMediaLinks, batchDropMediaLinkRecords, deleteMediaLink,
+  dropMediaLinkRecord, getMediaLinkStats, listMediaLinkOrphans, listMediaLinks,
+  previewMediaLinkDelete, pruneMediaLinks, registerMediaLink,
 } from '@/api'
 import { useToast } from '@/composables/useToast'
 import LoadingBlock from '@/components/LoadingBlock.vue'
@@ -25,6 +26,42 @@ const view = ref('all')
 const isOrphan = computed(() => view.value === 'orphan')
 const orphanSourceGone = ref(0)
 const orphanTorrentGone = ref(0)
+
+// 孤儿一览的多选。按 link_path 选而不是 code —— 同一番号可能有多条链接，
+// 用户勾的是具体哪一条。不复用 useCodeSelection：那个是按 code 组织的，
+// 动作也写死成订阅/取消订阅
+const picked = ref(new Set())
+const batching = ref(false)
+// 批量删除的确认框。真删文件不可逆，必须再问一次
+const batchConfirm = ref('')
+
+const pickedCount = computed(() => picked.value.size)
+const allPicked = computed(
+  () => items.value.length > 0 && items.value.every((i) => picked.value.has(i.link_path)),
+)
+
+function isPicked(path) {
+  return picked.value.has(path)
+}
+
+function togglePick(path) {
+  // Set 原地改动不触发响应式，得换新实例
+  const next = new Set(picked.value)
+  next.has(path) ? next.delete(path) : next.add(path)
+  picked.value = next
+}
+
+function togglePickAll() {
+  const next = new Set(picked.value)
+  const paths = items.value.map((i) => i.link_path)
+  if (allPicked.value) paths.forEach((p) => next.delete(p))
+  else paths.forEach((p) => next.add(p))
+  picked.value = next
+}
+
+function clearPicked() {
+  picked.value = new Set()
+}
 const stats = ref(null)
 // 失效数要全表探测磁盘，NAS 上可能几十秒，跟总数分开请求单独渲染
 const missing = ref(null)
@@ -138,6 +175,7 @@ function switchView(next) {
   page.value = 1
   // 「只看已丢失」是全部视图的筛选，切到孤儿视图后不再适用
   if (next === 'orphan') missingOnly.value = false
+  clearPicked()
   load()
 }
 
@@ -169,6 +207,8 @@ function reloadStats() {
 
 function search() {
   page.value = 1
+  // 选中的多半已被筛掉，留着就成了「删掉屏幕上看不见的东西」
+  clearPicked()
   load()
 }
 
@@ -181,6 +221,9 @@ function toggleMissing() {
 function go(next) {
   if (next < 1 || next > pages.value || next === page.value) return
   page.value = next
+  // 跨页保留选中很危险：点「批量删除」时删的是屏幕上看不到的记录。
+  // 全选按钮也只作用于当前页，跨页累积会让「已选 N」与眼前所见对不上
+  clearPicked()
   load()
 }
 
@@ -189,6 +232,7 @@ function changeSize(next) {
   if (!value || value === size.value) return
   size.value = value
   page.value = 1
+  clearPicked()
   load()
 }
 
@@ -259,6 +303,56 @@ async function confirmDelete() {
     toast.error(err.message)
   } finally {
     deleting.value = false
+  }
+}
+
+// ---------------------------------------------------------------- 批量
+// 批量联动删除：删种 + 删源文件 + 删硬链接（Emby 里的那份）+ 清记录
+async function runBatchDelete() {
+  if (!pickedCount.value) return
+  batching.value = true
+  try {
+    const data = await batchDeleteMediaLinks({
+      link_paths: [...picked.value],
+      dry_run: false,
+    })
+    if (data.dry_run) {
+      toast.error('联动删除未启用，本次仅演练。请先在设置中开启')
+    } else {
+      toast.success(`已删除 ${data.deleted} / ${data.total} 条`)
+    }
+    // 部分失败照常展示明细，不掩盖
+    if ((data.errors || []).length) {
+      toast.error(`${data.errors.length} 条出错：${data.errors.slice(0, 2).join('; ')}`)
+    }
+    batchConfirm.value = ''
+    clearPicked()
+    await Promise.all([load(), reloadStats()])
+  } catch (err) {
+    toast.error(err.message)
+  } finally {
+    batching.value = false
+  }
+}
+
+// 批量只删记录，不碰文件
+async function runBatchDropRecords() {
+  if (!pickedCount.value) return
+  batching.value = true
+  try {
+    const data = await batchDropMediaLinkRecords([...picked.value])
+    const missing = (data.missing || []).length
+    toast.success(
+      `已删除 ${(data.removed || []).length} 条记录` +
+        (missing ? `，${missing} 条已不在库中` : ''),
+    )
+    batchConfirm.value = ''
+    clearPicked()
+    await Promise.all([load(), reloadStats()])
+  } catch (err) {
+    toast.error(err.message)
+  } finally {
+    batching.value = false
   }
 }
 
@@ -408,13 +502,53 @@ onMounted(() => {
       <p v-if="!items.length" class="card text-center text-sm text-gray-500">
         没有发现下载侧已删、媒体库侧仍在的关联。
       </p>
-      <div v-else class="space-y-2">
+
+      <!-- 多选工具条。全选只作用于当前页，翻页会清空选中 -->
+      <div v-if="items.length" class="flex flex-wrap items-center gap-2">
+        <button class="btn-ghost px-3 py-1 text-xs" @click="togglePickAll">
+          {{ allPicked ? '取消本页全选' : '本页全选' }}
+        </button>
+        <span class="text-xs tabular-nums text-gray-500">已选 {{ pickedCount }}</span>
+        <button
+          v-if="pickedCount"
+          class="btn-ghost px-3 py-1 text-xs"
+          :disabled="batching"
+          @click="clearPicked"
+        >
+          清空选择
+        </button>
+
+        <button
+          class="btn px-3 py-1 text-xs"
+          :class="!pickedCount || batching ? 'btn-ghost' : 'bg-red-900 text-red-200'"
+          :disabled="!pickedCount || batching"
+          @click="batchConfirm = 'delete'"
+        >
+          批量联动删除
+        </button>
+        <button
+          class="btn-ghost px-3 py-1 text-xs"
+          :disabled="!pickedCount || batching"
+          @click="batchConfirm = 'record'"
+        >
+          批量删记录
+        </button>
+      </div>
+
+      <div v-if="items.length" class="space-y-2">
         <div
           v-for="item in items"
           :key="item.link_path"
           class="card space-y-2"
+          :class="isPicked(item.link_path) ? 'border-brand' : ''"
         >
           <div class="flex flex-wrap items-center gap-2">
+            <input
+              type="checkbox"
+              class="h-3.5 w-3.5 shrink-0 cursor-pointer accent-brand"
+              :checked="isPicked(item.link_path)"
+              @change="togglePick(item.link_path)"
+            />
             <span class="font-mono text-sm font-medium text-brand">{{ item.code }}</span>
             <span v-if="item.source_gone" class="badge bg-red-950/60 text-red-300">
               源文件已删
@@ -773,6 +907,67 @@ onMounted(() => {
             @click="confirmDelete"
           >
             {{ deleting ? '删除中…' : deleteEnabled ? '确认删除' : '执行（仅演练）' }}
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 批量操作确认。选中多条时不逐条演练 —— 几十次演练要几十轮下载器
+         往返，把要删什么说清楚比逐条列出来更实际 -->
+    <div
+      v-if="batchConfirm"
+      class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+      @click.self="batchConfirm = ''"
+    >
+      <div class="card w-full max-w-md space-y-3">
+        <p class="text-sm font-medium text-gray-200">
+          {{ batchConfirm === 'delete' ? '批量联动删除' : '批量删除记录' }}
+          <span class="font-mono text-brand">{{ pickedCount }}</span> 条
+        </p>
+
+        <template v-if="batchConfirm === 'delete'">
+          <p class="text-[11px] text-gray-400">
+            对选中的每条关联执行：删种 → 删源文件 → 删媒体库里的硬链接 →
+            清理刮削附属与空目录 → 清记录。Emby 里对应的影片会消失。
+          </p>
+          <p class="rounded-lg bg-red-950/40 px-3 py-2 text-[11px] text-red-300">
+            文件删除不可撤销。下载历史也会一并清掉，之后订阅可能重新下载这些番号。
+          </p>
+          <p v-if="!deleteEnabled" class="text-[11px] text-amber-300">
+            联动删除未启用，本次只会演练，不会真的删除任何文件。
+          </p>
+        </template>
+
+        <template v-else>
+          <p class="text-[11px] text-gray-400">
+            只删掉库里的关联记录，磁盘上的文件与下载器里的种子都不动。
+            用于清理已经手工处理干净的孤儿记录。
+          </p>
+        </template>
+
+        <div class="flex justify-end gap-2 pt-1">
+          <button
+            class="btn-ghost px-3 py-1.5 text-xs"
+            :disabled="batching"
+            @click="batchConfirm = ''"
+          >
+            取消
+          </button>
+          <button
+            v-if="batchConfirm === 'delete'"
+            class="rounded-lg bg-red-600 px-3 py-1.5 text-xs text-white transition-colors hover:bg-red-500 disabled:opacity-50"
+            :disabled="batching"
+            @click="runBatchDelete"
+          >
+            {{ batching ? '删除中…' : deleteEnabled ? `确认删除 ${pickedCount} 条` : '执行（仅演练）' }}
+          </button>
+          <button
+            v-else
+            class="btn-primary px-3 py-1.5 text-xs"
+            :disabled="batching"
+            @click="runBatchDropRecords"
+          >
+            {{ batching ? '处理中…' : `确认删除 ${pickedCount} 条记录` }}
           </button>
         </div>
       </div>

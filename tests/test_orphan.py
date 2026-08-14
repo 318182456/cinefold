@@ -248,3 +248,104 @@ def test_transferred_seed_not_flagged(tmp_path, monkeypatch):
     _use_client(monkeypatch, _Client(hashes=["newhash"], files=[str(source)]))
 
     assert orphan.scan_orphans() == []
+
+
+# ---------------------------------------------------------------- 批量操作
+def _batch_body(paths, dry_run=True):
+    from app.api.endpoints.medialink import BatchRequest
+
+    return BatchRequest(link_paths=paths, dry_run=dry_run)
+
+
+def test_batch_drop_records_removes_all(tmp_path, no_downloader):
+    """批量删记录：选中的全删掉，文件一个都不碰。"""
+    from app.api.endpoints.medialink import batch_drop_records
+
+    _, link_a = _link(tmp_path, "ABS-001", keep_source=False)
+    _, link_b = _link(tmp_path, "ABS-002", keep_source=False)
+
+    resp = batch_drop_records(
+        _batch_body([str(link_a), str(link_b)]), current_user="admin"
+    )
+    data = resp["data"]
+
+    assert sorted(data["removed"]) == sorted([str(link_a), str(link_b)])
+    assert data["missing"] == []
+    # 只删记录，媒体库里的文件必须还在
+    assert link_a.exists() and link_b.exists()
+
+    with session_scope() as session:
+        assert session.query(MediaLink).count() == 0
+
+
+def test_batch_drop_records_reports_missing(tmp_path, no_downloader):
+    """选中的记录已被别处删掉时，如实报告而不是静默略过。"""
+    from app.api.endpoints.medialink import batch_drop_records
+
+    _, link = _link(tmp_path, "ABS-001", keep_source=False)
+
+    resp = batch_drop_records(
+        _batch_body([str(link), "/nowhere/ghost.mp4"]), current_user="admin"
+    )
+    data = resp["data"]
+
+    assert data["removed"] == [str(link)]
+    assert data["missing"] == ["/nowhere/ghost.mp4"]
+
+
+def test_batch_rejects_empty_selection():
+    """没选中任何记录时拒绝，不该当成「全选」误删全库。"""
+    from app.api.endpoints.medialink import batch_delete, batch_drop_records
+
+    assert batch_delete(_batch_body([]), current_user="admin")["code"] == 400
+    assert batch_drop_records(_batch_body([]), current_user="admin")["code"] == 400
+    # 全是空串同理
+    assert batch_drop_records(_batch_body(["", ""]), current_user="admin")["code"] == 400
+
+
+def test_batch_delete_continues_after_failure(tmp_path, monkeypatch, no_downloader):
+    """单条抛异常不该中断整批 —— 其余的照常删完，错误逐条收集。"""
+    from app.api.endpoints import medialink as endpoint
+
+    _, link_a = _link(tmp_path, "ABS-001", keep_source=False)
+    _, link_b = _link(tmp_path, "ABS-002", keep_source=False)
+
+    real = endpoint.handle_media_deleted
+
+    def _flaky(link_path="", code="", dry_run=True):
+        if link_path == str(link_a):
+            raise RuntimeError("boom")
+        return real(link_path=link_path, code=code, dry_run=dry_run)
+
+    monkeypatch.setattr(endpoint, "handle_media_deleted", _flaky)
+
+    resp = endpoint.batch_delete(
+        _batch_body([str(link_a), str(link_b)], dry_run=True), current_user="admin"
+    )
+    data = resp["data"]
+
+    assert data["total"] == 2
+    # 挂掉的那条进 errors，另一条仍然产出了结果
+    assert len(data["results"]) == 1
+    assert any("boom" in e for e in data["errors"])
+
+
+def test_batch_delete_dry_run_keeps_files(tmp_path, no_downloader, monkeypatch):
+    """演练不动磁盘：文件与记录都必须原样保留。"""
+    from app.api.endpoints.medialink import batch_delete
+    from app.core.config import get_settings
+
+    settings = get_settings()
+    monkeypatch.setattr(settings, "medialink_delete_enabled", True)
+    monkeypatch.setattr(settings, "medialink_library_path", str(tmp_path / "library"))
+
+    _, link = _link(tmp_path, "ABS-001", keep_source=False)
+
+    resp = batch_delete(_batch_body([str(link)], dry_run=True), current_user="admin")
+    data = resp["data"]
+
+    assert data["dry_run"] is True
+    assert data["deleted"] == 0
+    assert link.exists()
+    with session_scope() as session:
+        assert session.query(MediaLink).count() == 1
