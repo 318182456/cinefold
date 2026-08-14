@@ -191,13 +191,26 @@ def get_source(key: str) -> dict | None:
     return {**item, "enabled": True, "cookie": "", "interval": item.get("interval", 0.0)}
 
 
-def _check_direct(url: str, timeout: float) -> tuple[str, str]:
-    """直连测一个地址，返回 (status, message)。"""
+def _check_direct(url: str, timeout: float, key: str = "") -> tuple[str, str]:
+    """直连测一个地址，返回 (status, message)。
+
+    请求头复用抓取链路的 SiteClient.headers()：只发 User-Agent 会被部分站点
+    当成机器人（javbus 缺 Accept-Language 就必定踢回 /doc/driver-verify），
+    测试因此报不通，而真实抓取是好的。两条路径必须发一样的头。
+    """
     import httpx
 
     from app.core.config import get_settings
+    from app.modules.ladysite.base import DEFAULT_UA, SiteClient
 
     settings = get_settings()
+    client_obj = SiteClient.from_source(key) if key else None
+    # 源被停用时 from_source 返回 None，此处仍要能测，退回一份等价的头
+    headers = client_obj.headers() if client_obj is not None else {
+        "User-Agent": DEFAULT_UA,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "zh-CN,zh;q=0.9,ja;q=0.8,en;q=0.7",
+    }
     try:
         with httpx.Client(
             timeout=timeout,
@@ -205,13 +218,7 @@ def _check_direct(url: str, timeout: float) -> tuple[str, str]:
             proxy=settings.proxy or None,
             verify=False,
         ) as client:
-            response = client.get(url, headers={
-                "User-Agent": (
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/120.0.0.0 Safari/537.36"
-                ),
-            })
+            response = client.get(url, headers=headers)
     except httpx.TimeoutException:
         return "fail", f"连接超时（{timeout:.0f}s）"
     except Exception as exc:
@@ -281,7 +288,7 @@ def check_source(key: str, timeout: float = 12.0) -> dict:
     if source.get("bypass_first") and has_bypass:
         status, message = _check_via_bypass(url)
     else:
-        status, message = _check_direct(url, timeout)
+        status, message = _check_direct(url, timeout, key)
         # 直连被拦，抓取链路此时会改走过盾服务，测试也照做
         if status == "blocked":
             if not has_bypass:

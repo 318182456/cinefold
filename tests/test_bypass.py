@@ -396,3 +396,49 @@ class TestCheckSource:
             200, text="ok", request=httpx.Request("GET", url)))
 
         assert sources.check_source("javbus")["message"] == ""
+
+    def test_direct_check_sends_full_headers(self, monkeypatch):
+        """直连测试必须发全套头。
+
+        javbus 只认到 User-Agent 时会把请求当机器人，一律 302 到
+        /doc/driver-verify，于是测试报"未真正进站"而实际抓取是好的。
+        Accept-Language 是这里的决定性字段。
+        """
+        from app.modules.ladysite import sources
+
+        captured = {}
+
+        def fake_get(self, url, **kwargs):
+            captured.update(kwargs.get("headers") or {})
+            return httpx.Response(200, text="ok", request=httpx.Request("GET", url))
+
+        monkeypatch.setattr(sources, "get_source", lambda key: {
+            "key": key, "host": "https://www.javbus.com",
+            "enabled": True, "bypass_first": False, "cookie": "", "interval": 0.0,
+        })
+        monkeypatch.setattr(httpx.Client, "get", fake_get)
+
+        assert sources.check_source("javbus")["status"] == "ok"
+        assert captured.get("Accept-Language")
+        assert captured.get("Accept")
+        assert "Chrome" in captured.get("User-Agent", "")
+
+    def test_direct_check_sends_source_cookie(self, monkeypatch):
+        """页面上给源配的 Cookie 也要带上，否则测的不是用户那套配置。"""
+        from app.modules.ladysite import sources
+
+        captured = {}
+
+        def fake_get(self, url, **kwargs):
+            captured.update(kwargs.get("headers") or {})
+            return httpx.Response(200, text="ok", request=httpx.Request("GET", url))
+
+        monkeypatch.setattr(sources, "get_source", lambda key: {
+            "key": key, "host": "https://javdb.com",
+            "enabled": True, "bypass_first": False,
+            "cookie": "over18=1", "interval": 0.0,
+        })
+        monkeypatch.setattr(httpx.Client, "get", fake_get)
+
+        assert sources.check_source("javdb")["status"] == "ok"
+        assert captured.get("Cookie") == "over18=1"
