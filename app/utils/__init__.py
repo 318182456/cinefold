@@ -33,6 +33,19 @@ CODE_PATTERN = re.compile(
     r"(?<![A-Za-z0-9])"
     r"((?:FC2[-_ ]?PPV[-_ ]?\d{6,8})"
     r"|(?:FC2[-_ ]?\d{6,8})"
+    # 日期型（032416_267，无码站的 MMDDYY_序号）。放在字母那几支之前，
+    # 否则 Carib-032416_267 会先被前缀那支匹配成 CARIB-032416。
+    #
+    # 边界全交给外层的 (?<![A-Za-z0-9]) / (?![A-Za-z0-9])：
+    #   - 左边界已挡住 20240315_001 —— 240315 前面是数字 0
+    #   - 右边界不能额外排除 -，否则 032416_267-1pon-1080p 这种常见文件名
+    #     会整条匹配失败（番号后紧跟 - 是常态）
+    # 序号段写 \d{2,4} 而非 \d+ 是唯一的宽度约束，够用：真实序号都是 2-4 位
+    r"|(?:\d{6}[-_]\d{2,4})"
+    # 无分隔符写法（032416267）。这一支在全文搜索里风险最高 —— 任意 8-10 位
+    # 数字都是这个形状，所以把 MMDDYY 的月日范围直接写进正则，而不是只靠
+    # 事后的 _is_mmddyy 校验（finditer 一旦框错就直接返回，没有回退）
+    r"|(?:(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])\d{2}\d{2,4})"
     r"|(?:[0-9]{0,4}[A-Za-z][A-Za-z0-9]{1,7}[-_ ]\d{2,5})"
     r"|(?:[0-9]{0,4}[A-Za-z]{2,6}\d{2,5}))"
     r"(?![A-Za-z0-9])",
@@ -50,6 +63,11 @@ def is_code(text: str) -> bool:
     candidate = text.strip().upper()
     if candidate in NOISE_WORDS:
         return False
+    # 日期型（032416_267 / 032416267）整个是纯数字，下面那个模式要求字母，
+    # 认不出它。前 6 位要像 MMDDYY，否则任意 9 位数字都会被当成番号
+    date_match = _DATE_CODE.match(candidate) or _DATE_CODE_PLAIN.match(candidate)
+    if date_match and _is_mmddyy(date_match.group(1)):
+        return True
     return bool(re.fullmatch(r"(?:FC2-PPV-\d{6,8})|(?:[0-9]{0,4}[A-Z]{2,6}-?\d{2,5})", candidate))
 
 
@@ -57,12 +75,15 @@ def find_serial_number(text: str) -> str:
     """从文件名或标题中提取番号，找不到返回空串。"""
     if not text:
         return ""
-    # 先剥掉扩展名与常见分隔噪声
+    # 先剥掉扩展名与常见分隔噪声。
+    # 下划线保留原样：日期型番号（032416_267）的下划线是官方写法的一部分，
+    # 拍平成 - 会让 get_true_code 认不出它、也就吐不回正确的分隔符。
+    # 其余番号的 _ 由 get_true_code 自己拍平，这里不做
     cleaned = re.sub(r"\.(mp4|mkv|avi|wmv|rmvb|iso|torrent)$", "", text, flags=re.IGNORECASE)
-    cleaned = cleaned.replace("_", "-").replace(" ", "-")
+    cleaned = cleaned.replace(" ", "-")
 
     for match in CODE_PATTERN.finditer(cleaned):
-        candidate = match.group(1).upper().replace("_", "-").replace(" ", "-")
+        candidate = match.group(1).upper().replace(" ", "-")
         if candidate.upper() in NOISE_WORDS:
             continue
         return get_true_code(candidate)
@@ -77,13 +98,14 @@ def find_serial_numbers(text: str, limit: int = 0) -> list[str]:
     """
     if not text:
         return []
+    # 下划线保留原样，理由同 find_serial_number
     cleaned = re.sub(r"\.(mp4|mkv|avi|wmv|rmvb|iso|torrent)$", "", text, flags=re.IGNORECASE)
-    cleaned = cleaned.replace("_", "-").replace(" ", "-")
+    cleaned = cleaned.replace(" ", "-")
 
     out: list[str] = []
     seen: set[str] = set()
     for match in CODE_PATTERN.finditer(cleaned):
-        candidate = match.group(1).upper().replace("_", "-").replace(" ", "-")
+        candidate = match.group(1).upper().replace(" ", "-")
         if candidate in NOISE_WORDS:
             continue
         code = get_true_code(candidate)
@@ -107,6 +129,37 @@ _FC2_HEAD = re.compile(r"^FC2-?(?:PPV-?)?(\d+)")
 # 同一部片子的不同版本靠它区分。画质、日期、分集号不在此列，一律切掉
 _CODE_SUFFIX = re.compile(r"^-(?:C|CH|U|UC|UCH)(?![A-Za-z0-9])")
 
+# 日期型番号：Caribbeancom / 一本道 / 10musume 等无码站用 MMDDYY_序号，
+# 例 032416_267。整个番号纯数字，没有字母。
+#
+# 分隔符必须保留下划线原样：032416_267 是这些站的官方写法，也是 javdb 上
+# 的条目名，规范化成 032416-267 会导致精确比对失败、检索不到。
+#
+# 日期段限定 6 位、序号段 2-4 位，是为了压住误判面 —— 这个形状太宽泛，
+# 订单号、时间戳都长这样。即便如此仍需前后边界断言配合（见 CODE_PATTERN），
+# 单靠位数挡不住 8 位日期串 20240315_001 之类
+_DATE_CODE = re.compile(r"^(\d{6})[-_](\d{2,4})$")
+# 无分隔符的日期型：用户手打搜索时常省掉分隔符（032416267）。
+# 只认 8-10 位 —— 日期段固定 6 位，序号 2-4 位，所以总长只可能是这个区间。
+# 切分点固定在第 6 位之后：9 位串理论上也能切成 0324162+67，但日期段恒为
+# 6 位（MMDDYY），没有歧义
+_DATE_CODE_PLAIN = re.compile(r"^(\d{6})(\d{2,4})$")
+
+
+def _is_mmddyy(part: str) -> bool:
+    """这 6 位数字像不像 MMDDYY 日期。
+
+    日期型番号的前 6 位是发布日期，月份 01-12、日 01-31。校验它能挡掉
+    大量同形状的非番号（订单号、流水号）—— 尤其是无分隔符写法，
+    032416267 与随便一串 9 位数字在形状上无法区分，只能靠这个。
+
+    年份不校验：无码站从 2000 年代至今都在用，两位年任何值都合法。
+    """
+    if len(part) != 6:
+        return False
+    month, day = part[:2], part[2:4]
+    return "01" <= month <= "12" and "01" <= day <= "31"
+
 
 def _with_suffix(core: str, rest: str) -> str:
     """把番号本体与紧随其后的合法后缀拼回去。rest 是本体之后的剩余部分。"""
@@ -126,6 +179,15 @@ def get_true_code(code: str) -> str:
     """
     if not code:
         return ""
+
+    # 日期型（032416_267）要在替换分隔符之前分流：下面那句会把 _ 换成 -，
+    # 而这类番号的下划线是官方写法的一部分，换掉就查不到了。
+    # 同理也不能落到「必须含字母」那道检查上 —— 它整个是纯数字
+    stripped = code.strip()
+    date_match = _DATE_CODE.match(stripped) or _DATE_CODE_PLAIN.match(stripped)
+    if date_match and _is_mmddyy(date_match.group(1)):
+        return f"{date_match.group(1)}_{date_match.group(2)}"
+
     normalized = code.strip().upper().replace("_", "-").replace(" ", "-")
     # 番号必须同时含字母与数字
     if not (re.search(r"[A-Z]", normalized) and re.search(r"\d", normalized)):

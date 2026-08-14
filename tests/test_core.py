@@ -47,6 +47,51 @@ class TestCodeRecognition:
     def test_find_serial_number(self, text, expected):
         assert find_serial_number(text) == expected
 
+    @pytest.mark.parametrize("text", [
+        # 无码站的 MMDDYY_序号（Caribbeancom / 一本道 / 10musume）。
+        # 整个番号纯数字，且下划线是官方写法 —— 拍平成 - 会在 javdb 上查不到
+        "032416_267",
+        "032416-267",       # 破折号写法
+        "032416267",        # 手打搜索常省掉分隔符
+        "032416_267.mp4",
+        "Carib-032416_267",
+        "1pondo-032416_267",
+        "032416_267-1pon-1080p",
+    ])
+    def test_date_style_code_normalizes_to_underscore(self, text):
+        assert find_serial_number(text) == "032416_267"
+
+    @pytest.mark.parametrize("text", [
+        "20240315_001",   # 8 位日期串，不是番号
+        "1234567_89",     # 日期段 7 位
+        "12345_678",      # 日期段 5 位
+        "123456_1",       # 序号只 1 位
+        "123456789",      # 前 6 位 123456 的 34 日不存在
+        "991316267",      # 99 月
+        "003216267",      # 0 月
+        "1080p_264",
+    ])
+    def test_date_style_rejects_lookalikes(self, text):
+        # 这个形状太宽泛（订单号、时间戳都长这样），月日范围是唯一的护栏
+        assert find_serial_number(text) == ""
+
+    @pytest.mark.parametrize("text, expected", [
+        # 数字前缀 + 字母的番号不能被日期型那一支抢走
+        ("259LUXU-1234", "259LUXU-1234"),
+        ("300MIUM-123", "300MIUM-123"),
+        ("200GANA-2711", "200GANA-2711"),
+    ])
+    def test_numeric_prefix_codes_unaffected(self, text, expected):
+        assert find_serial_number(text) == expected
+
+    def test_date_style_is_idempotent(self):
+        # 入库与查库都会过一遍 get_true_code，不幂等就会两次得到不同的 code
+        for raw in ("032416_267", "032416-267", "032416267"):
+            once = get_true_code(raw)
+            assert once == "032416_267"
+            assert get_true_code(once) == once
+        assert is_code("032416_267") is True
+
     @pytest.mark.parametrize("text,expected", [
         ("ABP-984", True),
         ("SSIS001", True),
