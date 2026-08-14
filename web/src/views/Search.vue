@@ -13,6 +13,8 @@ const currentCode = ref('')
 const searching = ref(false)
 const seeking = ref(false)
 const searched = ref(false)
+// 搜过种子就一直留着结果区块，空结果时也要留住「重新搜索」按钮
+const sought = ref(false)
 
 // 检索履历。只存在浏览器本地，不上报服务端 —— 搜索词属于个人痕迹，
 // 也没有跨设备同步的必要
@@ -68,6 +70,7 @@ async function search() {
   searching.value = true
   searched.value = true
   torrents.value = []
+  sought.value = false
   try {
     const data = await searchCodes(value)
     results.value = data.items || []
@@ -84,14 +87,11 @@ async function search() {
 async function findTorrents(code, refresh = false) {
   currentCode.value = code
   seeking.value = true
+  sought.value = true
   torrents.value = []
   try {
     const data = await searchTorrents(code, refresh)
     torrents.value = data.items || []
-    if (!torrents.value.length) {
-      // 检索结果缓存 30 分钟，命中空缓存时重搜是唯一的出路
-      toast.info(refresh ? '各站点都没有这个番号的种子' : '没搜到种子，可点「重新搜索」跳过缓存再试')
-    }
   } catch (err) {
     toast.error(err.message)
   } finally {
@@ -179,7 +179,7 @@ const sizeText = (mb) => (mb >= 1024 ? `${(mb / 1024).toFixed(2)} GB` : `${mb.to
     />
 
     <!-- 种子列表 -->
-    <section v-if="seeking || torrents.length" class="space-y-3">
+    <section v-if="sought" class="space-y-3">
       <div class="flex items-center gap-3">
         <h2 class="text-sm font-medium text-gray-300">
           {{ currentCode }} 的可用资源
@@ -196,6 +196,11 @@ const sizeText = (mb) => (mb >= 1024 ? `${(mb / 1024).toFixed(2)} GB` : `${mb.to
       </div>
 
       <p v-if="seeking" class="text-sm text-gray-500">正在搜索各站点…</p>
+
+      <!-- 检索结果缓存 30 分钟，命中空缓存时点上面的「重新搜索」是唯一的出路 -->
+      <p v-else-if="!torrents.length" class="text-sm text-gray-500">
+        没搜到种子，可点「重新搜索」跳过缓存再试
+      </p>
 
       <div v-else class="overflow-x-auto">
         <table class="w-full min-w-[640px] text-sm">
