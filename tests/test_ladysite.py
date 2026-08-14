@@ -1157,6 +1157,13 @@ MMTV_SEARCH = """
 """
 
 
+MMTV_SEARCH_VARIANT = """
+<html><body>
+<a href="/zh/censored/ssis-0011.html" title="SSIS-0011 別的片">变体</a>
+</body></html>
+"""
+
+
 class TestMmtvParse:
     def test_detail_fields(self):
         from app.modules.ladysite.mmtv import html_to_code
@@ -1178,10 +1185,43 @@ class TestMmtvParse:
 
         assert html_to_detail_url(MMTV_SEARCH, "ZZZZ-999") == ""
 
+    def test_search_rejects_longer_variant(self):
+        """SSIS-001 不能命中 SSIS-0011 —— 子串包含会拿错片。"""
+        from app.modules.ladysite.mmtv import html_to_detail_url
+
+        assert html_to_detail_url(MMTV_SEARCH_VARIANT, "SSIS-001") == ""
+        assert html_to_detail_url(MMTV_SEARCH_VARIANT, "SSIS-0011") != ""
+
     def test_missing_date_returns_none(self):
         from app.modules.ladysite.mmtv import html_to_code
 
         assert html_to_code("<html><body><h1>X</h1></body></html>", "X-1") is None
+
+    def test_language_prefix_not_doubled(self):
+        """内置 host 带 /zh，站内路径也带 /zh，拼接不能出 /zh/zh。"""
+        from app.modules.ladysite.mmtv import Mmtv
+
+        site = Mmtv(host="https://7mmtv.sx/zh")
+        seen = []
+
+        def fake_get(path, **kw):
+            seen.append(path)
+            return ""
+
+        site.client.get = fake_get
+        site.search_detail_url("SSIS-001")
+        assert seen == ["https://7mmtv.sx/zh/search/"]
+
+    def test_relative_detail_joined_to_root(self):
+        """搜索结果的相对路径自带 /zh，要拼到站点根而不是 host 上。"""
+        from app.modules.ladysite.mmtv import Mmtv
+
+        site = Mmtv(host="https://7mmtv.sx/zh")
+        site.search_detail_url = lambda code: "/zh/censored/ssis-001.html"
+        seen = []
+        site.client.get = lambda path, **kw: seen.append(path) or ""
+        site.crawler_original("SSIS-001")
+        assert seen == ["https://7mmtv.sx/zh/censored/ssis-001.html"]
 
 
 # ----------------------------------------------------------------------
@@ -1579,10 +1619,42 @@ class TestCodeRouting:
         assert "javbus" not in sites
 
     def test_theporndb_skipped_without_token(self):
-        """没配 Token 时接口必然 401，不该占一个并发位。"""
+        """没配 Token 时接口必然 401，不该占一个并发位。
+
+        不能只靠"默认停用"挡：老库里这行是 enabled=True（旧默认），
+        升级上来的安装必须由 token 门拦住。
+        """
+        from sqlalchemy import select
+
+        from app.database.models import DataSource
+        from app.database.session import session_scope
         from app.modules.ladysite import _sites_for_code
 
+        # 模拟升级库：theporndb 启用但没配 token
+        with session_scope() as session:
+            row = session.scalar(
+                select(DataSource).where(DataSource.key == "theporndb")
+            )
+            row.enabled = True
+            row.cookie = None
+
         assert "theporndb" not in _sites_for_code("SSIS-001")
+
+    def test_theporndb_included_with_token(self):
+        from sqlalchemy import select
+
+        from app.database.models import DataSource
+        from app.database.session import session_scope
+        from app.modules.ladysite import _sites_for_code
+
+        with session_scope() as session:
+            row = session.scalar(
+                select(DataSource).where(DataSource.key == "theporndb")
+            )
+            row.enabled = True
+            row.cookie = "tok123"
+
+        assert "theporndb" in _sites_for_code("SSIS-001")
 
     def test_unknown_code_falls_back_to_general(self):
         """认不出的番号退回通用清单，不能一个源都不问。"""
@@ -1594,6 +1666,78 @@ class TestCodeRouting:
 # ----------------------------------------------------------------------
 # 抓取顺序按数据源页面上排的优先级走
 # ----------------------------------------------------------------------
+class TestBaseHelpers:
+    @pytest.mark.parametrize("url,host,expected", [
+        ("/a.jpg", "https://x.biz", "https://x.biz/a.jpg"),
+        # host 带尾斜杠或语言路径都不能拼出双斜杠
+        ("/a.jpg", "https://x.biz/", "https://x.biz/a.jpg"),
+        ("//cdn.x/a.jpg", "https://x.biz", "https://cdn.x/a.jpg"),
+        ("https://cdn.x/a.jpg", "https://x.biz", "https://cdn.x/a.jpg"),
+        ("", "https://x.biz", ""),
+    ])
+    def test_absolute_url(self, url, host, expected):
+        from app.modules.ladysite.base import absolute_url
+        assert absolute_url(url, host) == expected
+
+    @pytest.mark.parametrize("text,expected", [
+        ("2021-02-19", "2021-02-19"),
+        ("販売日 : 2021/2/9", "2021-02-09"),
+        ("2024年3月15日", "2024-03-15"),
+        ("no date", ""),
+    ])
+    def test_normalize_date(self, text, expected):
+        from app.modules.ladysite.base import normalize_date
+        assert normalize_date(text) == expected
+
+    @pytest.mark.parametrize("text,code,expected", [
+        ("MDX-0123 测试作品", "MDX-0123", True),
+        ("MDX0123高清", "MDX-0123", True),
+        # 画质后缀是独立词，不能因数字贴着番号而漏判
+        ("MDX-0123 1080P", "MDX-0123", True),
+        # 多部曲变体是别的片
+        ("MD-0180-1 下集", "MD-0180", False),
+        ("SSIS-0011 別的片", "SSIS-001", False),
+        # 字幕版后缀算同一部
+        ("SSIS-001C 中字", "SSIS-001", True),
+        ("没有番号的标题", "MDX-0123", False),
+    ])
+    def test_text_contains_code(self, text, code, expected):
+        from app.modules.ladysite.base import text_contains_code
+        assert text_contains_code(text, code) is expected
+
+    def test_cookie_pairs(self):
+        from app.modules.ladysite.base import _cookie_pairs
+
+        assert _cookie_pairs("adc=1; b=2") == [
+            {"name": "adc", "value": "1"}, {"name": "b", "value": "2"},
+        ]
+        assert _cookie_pairs("") == []
+        assert _cookie_pairs("novalue") == []
+
+    def test_bypass_first_passes_cookie(self, monkeypatch):
+        """mgstage 的年龄门 Cookie 必须跟着过盾请求走，丢了拿回的
+        永远是确认页。"""
+        from types import SimpleNamespace
+
+        from app.modules.ladysite import base as base_mod
+        from app.modules.ladysite.mgstage import Mgstage
+
+        monkeypatch.setattr(
+            base_mod, "get_settings",
+            lambda: SimpleNamespace(bypass_url="http://solver:8191/v1", proxy=""),
+        )
+        seen = {}
+
+        def fake_bypass(url, params=None, timeout=60.0, quick=False, cookie=""):
+            seen["cookie"] = cookie
+            return ""
+
+        monkeypatch.setattr(base_mod, "fetch_via_bypass", fake_bypass)
+        site = Mgstage(host="https://www.mgstage.com")
+        site.client.get("/product/product_detail/SIRO-4321/")
+        assert "adc=1" in seen["cookie"]
+
+
 class TestCodeRuleParsing:
     @pytest.mark.parametrize("rule,only,skip", [
         ("only:FC2,SIRO", ["FC2", "SIRO"], []),
@@ -1743,6 +1887,36 @@ class TestSourceOrdering:
             session.execute(update(DataSource).values(enabled=False))
 
         assert _enabled_sites() == DETAIL_SITES
+
+    def test_fresh_seed_uses_curated_order(self, synced):
+        """priority 种子按 DEFAULT_ORDER 而非 SOURCES 字母序：首批并发位
+        有限，直连可用的 jav321/missav 必须排进第一梯队，不能被字母靠前、
+        需过盾的 airav/avbase 挤到队列里。"""
+        from app.modules.ladysite import _enabled_sites
+
+        assert _enabled_sites()[:5] == ("javbus", "javdb", "jav321", "avbase", "missav")
+
+    def test_main_site_pinned_survives_disable(self, synced, monkeypatch):
+        """MAIN_SITE 锁定单站且该站被停用时，不能悄悄扇出到全部源 ——
+        用户显式锁定过就只问那一站（旧行为），宁可没结果。"""
+        from types import SimpleNamespace
+
+        from sqlalchemy import select
+
+        import app.modules.ladysite as ladysite_mod
+        from app.database.models import DataSource
+        from app.database.session import session_scope
+
+        monkeypatch.setattr(
+            ladysite_mod, "get_settings",
+            lambda: SimpleNamespace(main_site="javbus"),
+        )
+        with session_scope() as session:
+            row = session.scalar(select(DataSource).where(DataSource.key == "javbus"))
+            row.enabled = False
+
+        assert ladysite_mod._enabled_sites() == ("javbus",)
+        assert ladysite_mod._sites_for_code("SSIS-001") == ("javbus",)
 
 
 class TestReorderEndpoint:

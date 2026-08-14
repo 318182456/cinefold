@@ -14,7 +14,9 @@ import re
 from loguru import logger
 from pyquery import PyQuery
 
-from app.modules.ladysite.base import CodeInfo, SiteClient, join_list
+from app.modules.ladysite.base import (
+    CodeInfo, SiteClient, absolute_url, join_list, normalize_date,
+)
 from app.utils import get_true_code
 
 HOST = "https://www.caribbeancom.com"
@@ -34,9 +36,6 @@ FIELD_MAP = {
 
 # 日期型番号：032416_267 或 032416-267
 DATE_CODE_RE = re.compile(r"^(\d{6})[-_](\d{2,4})$")
-
-# 配信日形如 2016/03/24
-DATE_RE = re.compile(r"(\d{4})[/\-](\d{1,2})[/\-](\d{1,2})")
 
 
 class Carib:
@@ -61,7 +60,7 @@ class Carib:
         html = self.client.get(f"/moviepages/{path_code}/index.html")
         if not html:
             return None
-        return html_to_code(html, normalized)
+        return html_to_code(html, normalized, host=self.client.host)
 
 
 def _to_path_code(code: str) -> str:
@@ -73,7 +72,7 @@ def _to_path_code(code: str) -> str:
     return f"{match.group(1)}-{match.group(2)}" if match else ""
 
 
-def html_to_code(html: str, code: str = "") -> CodeInfo | None:
+def html_to_code(html: str, code: str = "", host: str = HOST) -> CodeInfo | None:
     """解析 Caribbeancom 详情页。"""
     try:
         doc = PyQuery(html)
@@ -102,10 +101,7 @@ def html_to_code(html: str, code: str = "") -> CodeInfo | None:
                 setattr(info, field, value)
 
     if info.release_date:
-        match = DATE_RE.search(info.release_date)
-        if match:
-            year, month, day = match.groups()
-            info.release_date = f"{year}-{int(month):02d}-{int(day):02d}"
+        info.release_date = normalize_date(info.release_date) or info.release_date
 
     heading = (
         doc("h1.heading").eq(0).text()
@@ -122,11 +118,11 @@ def html_to_code(html: str, code: str = "") -> CodeInfo | None:
         or ""
     )
     if cover:
-        info.banner = _absolute(cover)
+        info.banner = absolute_url(cover, host)
         info.poster = info.banner
 
     stills = [
-        _absolute(node.attr("href") or node.attr("src") or "")
+        absolute_url(node.attr("href") or node.attr("src") or "", host)
         for node in doc(".gallery a, .movie-gallery img").items()
     ]
     if stills:
@@ -141,12 +137,3 @@ def html_to_code(html: str, code: str = "") -> CodeInfo | None:
         return None
     return info if info.code and info.title else None
 
-
-def _absolute(url: str) -> str:
-    if not url:
-        return ""
-    if url.startswith("//"):
-        return f"https:{url}"
-    if url.startswith("/"):
-        return f"{HOST}{url}"
-    return url

@@ -68,13 +68,23 @@ def _search_pt_cached(code: str, refresh: bool = False) -> list[Torrent]:
             except (ValueError, TypeError):
                 logger.debug(f"[{code}] 检索缓存解析失败，重新搜索")
 
-    torrents = ptsite.search_pt(code)
+    torrents, ok_sites, total_sites = ptsite.search_pt_detailed(code)
+
     # 空结果也缓存：搜不到的番号往往一段时间内都搜不到，
-    # 否则每次重投消息都要再跑一轮全站检索
-    set_rank_cache(
-        "torrent", key,
-        json.dumps([t.to_dict() for t in torrents], ensure_ascii=False),
-    )
+    # 否则每次重投消息都要再跑一轮全站检索。
+    #
+    # 但"没问成"不等于"没有"——站点没配、鉴权失败、超时都会返回空列表，
+    # 把它当结论缓存下来，接下来 TTL 内的每次搜索都会直接返回空，
+    # 连补好配置也救不回来，只能干等过期
+    if torrents or ok_sites:
+        set_rank_cache(
+            "torrent", key,
+            json.dumps([t.to_dict() for t in torrents], ensure_ascii=False),
+        )
+    else:
+        logger.warning(
+            f"[{code}] {total_sites} 个站点全部搜索失败或未配置，空结果不缓存"
+        )
     return torrents
 
 

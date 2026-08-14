@@ -134,36 +134,56 @@ def get_sites() -> list[PTSite]:
 
 def crawling(site: PTSite, keyword: str) -> list[Torrent]:
     """单站搜索，异常不外抛。"""
+    ok, torrents = crawling_checked(site, keyword)
+    return torrents
+
+
+def crawling_checked(site: PTSite, keyword: str) -> tuple[bool, list[Torrent]]:
+    """单站搜索，返回 (是否问成, 种子)。
+
+    站点未配置或抛异常都算没问成 —— 这两种情况返回的空列表不代表
+    "站上没有这个番号"，不能当作结论。
+    """
+    if not getattr(site, "enabled", True):
+        logger.debug(f"[{site.name}] 未配置，跳过")
+        return False, []
     try:
-        return site.search(keyword) or []
+        return True, site.search(keyword) or []
     except Exception as exc:
         logger.warning(f"[{site.name}] 搜索 {keyword} 失败: {exc}")
-        return []
+        return False, []
 
 
-def search_pt(
+def search_pt_detailed(
     keyword: str,
     sites: Sequence[PTSite] | None = None,
     timeout: float = SEARCH_TIMEOUT_SECONDS,
-) -> list[Torrent]:
-    """并发搜索所有站点，合并结果。
+) -> tuple[list[Torrent], int, int]:
+    """并发搜索所有站点，返回 (种子, 成功站点数, 目标站点数)。
 
     单站点卡住不应拖垮整体，超时后返回已完成站点的结果。
+
+    调用方需要靠成功站点数区分"站上确实没有"和"根本没问成"——
+    两者都是空列表，但后者不该被当作结论缓存下来。
     """
     targets = list(sites) if sites is not None else get_sites()
     if not targets:
         logger.warning("未配置任何 PT 站点")
-        return []
+        return [], 0, 0
 
     results: list[Torrent] = []
     finished = 0
     pool = ThreadPoolExecutor(max_workers=min(len(targets), 8))
     try:
-        futures = {pool.submit(crawling, site, keyword): site for site in targets}
+        futures = {
+            pool.submit(crawling_checked, site, keyword): site for site in targets
+        }
         try:
             for future in as_completed(futures, timeout=timeout):
-                results.extend(future.result())
-                finished += 1
+                ok, torrents = future.result()
+                results.extend(torrents)
+                if ok:
+                    finished += 1
         except FuturesTimeout:
             slow = [
                 site.name for future, site in futures.items() if not future.done()
@@ -175,9 +195,19 @@ def search_pt(
 
     logger.info(
         f"[{keyword}] 共搜到 {len(results)} 个种子，"
-        f"{finished}/{len(targets)} 个站点返回"
+        f"{finished}/{len(targets)} 个站点搜索成功"
     )
-    return results
+    return results, finished, len(targets)
+
+
+def search_pt(
+    keyword: str,
+    sites: Sequence[PTSite] | None = None,
+    timeout: float = SEARCH_TIMEOUT_SECONDS,
+) -> list[Torrent]:
+    """并发搜索所有站点，合并结果。"""
+    torrents, _, _ = search_pt_detailed(keyword, sites, timeout)
+    return torrents
 
 
 def get_site_by_name(name: str) -> PTSite | None:

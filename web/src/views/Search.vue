@@ -1,5 +1,5 @@
 <script setup>
-import { ref } from 'vue'
+import { ref, onMounted } from 'vue'
 import { searchCodes, searchTorrents, subscribeCode, downloadCode } from '@/api'
 import { useToast } from '@/composables/useToast'
 import CodeCard from '@/components/CodeCard.vue'
@@ -14,6 +14,53 @@ const searching = ref(false)
 const seeking = ref(false)
 const searched = ref(false)
 
+// 检索履历。只存在浏览器本地，不上报服务端 —— 搜索词属于个人痕迹，
+// 也没有跨设备同步的必要
+const HISTORY_KEY = 'search_history'
+const HISTORY_MAX = 12
+const history = ref([])
+
+onMounted(() => {
+  try {
+    const saved = JSON.parse(localStorage.getItem(HISTORY_KEY) || '[]')
+    // 存量数据可能被手工改坏，只收字符串
+    history.value = Array.isArray(saved)
+      ? saved.filter((s) => typeof s === 'string').slice(0, HISTORY_MAX)
+      : []
+  } catch {
+    history.value = []
+  }
+})
+
+function persistHistory() {
+  try {
+    localStorage.setItem(HISTORY_KEY, JSON.stringify(history.value))
+  } catch {
+    // 隐私模式下 localStorage 可能不可写，履历丢了不影响搜索
+  }
+}
+
+function pushHistory(value) {
+  // 重复搜同一个词时提到最前，而不是堆一串一样的
+  history.value = [value, ...history.value.filter((v) => v !== value)].slice(0, HISTORY_MAX)
+  persistHistory()
+}
+
+function removeHistory(value) {
+  history.value = history.value.filter((v) => v !== value)
+  persistHistory()
+}
+
+function clearHistory() {
+  history.value = []
+  persistHistory()
+}
+
+function searchFromHistory(value) {
+  keyword.value = value
+  search()
+}
+
 async function search() {
   const value = keyword.value.trim()
   if (!value) return
@@ -24,6 +71,8 @@ async function search() {
   try {
     const data = await searchCodes(value)
     results.value = data.items || []
+    // 搜过就记，搜不到的词同样值得留着改一改再试
+    pushHistory(value)
     if (!results.value.length) toast.info('本地与远程都没有找到')
   } catch (err) {
     toast.error(err.message)
@@ -32,14 +81,17 @@ async function search() {
   }
 }
 
-async function findTorrents(code) {
+async function findTorrents(code, refresh = false) {
   currentCode.value = code
   seeking.value = true
   torrents.value = []
   try {
-    const data = await searchTorrents(code)
+    const data = await searchTorrents(code, refresh)
     torrents.value = data.items || []
-    if (!torrents.value.length) toast.info('没有搜到符合过滤条件的种子')
+    if (!torrents.value.length) {
+      // 检索结果缓存 30 分钟，命中空缓存时重搜是唯一的出路
+      toast.info(refresh ? '各站点都没有这个番号的种子' : '没搜到种子，可点「重新搜索」跳过缓存再试')
+    }
   } catch (err) {
     toast.error(err.message)
   } finally {
@@ -88,6 +140,28 @@ const sizeText = (mb) => (mb >= 1024 ? `${(mb / 1024).toFixed(2)} GB` : `${mb.to
       <button class="btn-ghost hidden sm:inline-flex" @click="quickSubscribe">直接订阅</button>
     </div>
 
+    <!-- 检索履历 -->
+    <div v-if="history.length" class="flex flex-wrap items-center gap-2">
+      <span class="text-xs text-gray-500">最近搜索</span>
+      <span
+        v-for="item in history"
+        :key="item"
+        class="group inline-flex items-center gap-1 rounded bg-gray-800 py-1 pl-2 pr-1 text-xs text-gray-300"
+      >
+        <button class="hover:text-white" @click="searchFromHistory(item)">{{ item }}</button>
+        <button
+          class="px-1 text-gray-600 hover:text-gray-300"
+          :title="`删除 ${item}`"
+          @click.stop="removeHistory(item)"
+        >
+          ×
+        </button>
+      </span>
+      <button class="text-xs text-gray-600 hover:text-gray-400" @click="clearHistory">
+        清空
+      </button>
+    </div>
+
     <!-- 番号结果 -->
     <div v-if="results.length" class="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
       <div v-for="item in results" :key="item.code" class="space-y-2">
@@ -106,10 +180,20 @@ const sizeText = (mb) => (mb >= 1024 ? `${(mb / 1024).toFixed(2)} GB` : `${mb.to
 
     <!-- 种子列表 -->
     <section v-if="seeking || torrents.length" class="space-y-3">
-      <h2 class="text-sm font-medium text-gray-300">
-        {{ currentCode }} 的可用资源
-        <span v-if="torrents.length" class="text-gray-500">（{{ torrents.length }}）</span>
-      </h2>
+      <div class="flex items-center gap-3">
+        <h2 class="text-sm font-medium text-gray-300">
+          {{ currentCode }} 的可用资源
+          <span v-if="torrents.length" class="text-gray-500">（{{ torrents.length }}）</span>
+        </h2>
+        <button
+          class="btn-ghost px-2 py-1 text-xs"
+          :disabled="seeking"
+          title="跳过 30 分钟的检索缓存，直接重新搜各站点"
+          @click="findTorrents(currentCode, true)"
+        >
+          重新搜索
+        </button>
+      </div>
 
       <p v-if="seeking" class="text-sm text-gray-500">正在搜索各站点…</p>
 

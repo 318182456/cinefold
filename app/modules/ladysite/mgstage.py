@@ -14,7 +14,9 @@ from __future__ import annotations
 from loguru import logger
 from pyquery import PyQuery
 
-from app.modules.ladysite.base import CodeInfo, SiteClient, join_list, parse_star
+from app.modules.ladysite.base import (
+    CodeInfo, SiteClient, absolute_url, join_list, parse_star,
+)
 from app.utils import get_true_code
 
 HOST = "https://www.mgstage.com"
@@ -63,10 +65,10 @@ class Mgstage:
         html = self.client.get(f"/product/product_detail/{normalized}/")
         if not html:
             return None
-        return html_to_code(html, normalized)
+        return html_to_code(html, normalized, host=self.client.host)
 
 
-def html_to_code(html: str, code: str = "") -> CodeInfo | None:
+def html_to_code(html: str, code: str = "", host: str = HOST) -> CodeInfo | None:
     """解析 MGStage 详情页。"""
     try:
         doc = PyQuery(html)
@@ -113,11 +115,11 @@ def html_to_code(html: str, code: str = "") -> CodeInfo | None:
     if not cover:
         cover = doc('meta[property="og:image"]').attr("content") or ""
     if cover:
-        info.banner = _absolute(cover)
+        info.banner = absolute_url(cover, host)
         info.poster = info.banner
 
     stills = [
-        _absolute(node.attr("href") or node.attr("src") or "")
+        absolute_url(node.attr("href") or node.attr("src") or "", host)
         for node in doc("#sample-photo a, .sample_image a").items()
     ]
     if stills:
@@ -132,12 +134,3 @@ def html_to_code(html: str, code: str = "") -> CodeInfo | None:
         return None
     return info if info.code and info.title else None
 
-
-def _absolute(url: str) -> str:
-    if not url:
-        return ""
-    if url.startswith("//"):
-        return f"https:{url}"
-    if url.startswith("/"):
-        return f"{HOST}{url}"
-    return url

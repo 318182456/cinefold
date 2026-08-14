@@ -68,8 +68,12 @@ class _MoovBase(Bus):
         return html_to_detail_url(html, code, self.name) if html else ""
 
     def search_actor(self, name: str) -> ActorInfo | None:
-        """这两站的演员搜索路径与 javbus 不同。"""
-        html = self.client.get(f"/cn/search/{name}")
+        """演员要走专门的 searchstar 端点。
+
+        /cn/search/ 是影片搜索，返回的是影片瀑布流 —— html_to_actors
+        会把影片卡片当演员解析，影片封面就被当成头像存了。
+        """
+        html = self.client.get(f"/cn/searchstar/{name}")
         if not html:
             return None
         actors = self.html_to_actors(html)

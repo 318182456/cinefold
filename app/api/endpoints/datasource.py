@@ -46,12 +46,16 @@ def list_datasources(current_user: str = Depends(get_current_user)):
 
     已软删除的不在列表里，另外单列 removable_builtins 供页面做「恢复」。
     """
+    from app.modules.ladysite import DETAIL_SITES, SPECIAL_SITES
     from app.modules.ladysite.sources import (
         SOURCE_MAP, is_builtin, is_protected, sync_builtin_sources,
     )
 
     # 新增内置源后老库也能补上
     sync_builtin_sources()
+
+    # 参与详情抓取的源。javlibrary 有解析器但只用于榜单，不参与检索
+    detail_keys = set(DETAIL_SITES) | set(SPECIAL_SITES)
 
     with session_scope() as session:
         rows = session.scalars(
@@ -68,6 +72,7 @@ def list_datasources(current_user: str = Depends(get_current_user)):
             item["has_parser"] = bool(SOURCE_MAP.get(row.key, {}).get("parser"))
             item["builtin"] = is_builtin(row.key)
             item["protected"] = is_protected(row.key)
+            item["in_detail"] = row.key in detail_keys
             items.append(item)
 
     return ResponseEntity.ok({"items": items, "removed": removed})

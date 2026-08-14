@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import random
+import re
 import ssl
 import threading
 import time
@@ -196,9 +197,11 @@ class SiteClient:
         settings = get_settings()
         url = path if path.startswith("http") else f"{self.host}{path}"
 
-        # 直连必被拦的站点，配了 bypass 就不必先撞一次 403
+        # 直连必被拦的站点，配了 bypass 就不必先撞一次 403。
+        # Cookie 必须一并带过去：mgstage 的 adc、dmm 的 age_check_done
+        # 都是年龄门，丢了的话过盾拿回来的永远是确认页
         if self.bypass_first and settings.bypass_url:
-            return fetch_via_bypass(url, params, timeout)
+            return fetch_via_bypass(url, params, timeout, cookie=self.cookie)
 
         headers = self.headers(kwargs.pop("headers", None))
 
@@ -222,7 +225,7 @@ class SiteClient:
                 # 掐了直连。两类都值得让 bypass 服务再试一次
                 if status in (403, 503) or status >= 500:
                     logger.info(f"{url} 返回 {status}，尝试通过 bypass 服务获取")
-                    return fetch_via_bypass(url, params, timeout)
+                    return fetch_via_bypass(url, params, timeout, cookie=self.cookie)
                 logger.warning(f"请求 {url} 失败: {status}")
                 return ""
             except httpx.TimeoutException as exc:
@@ -230,7 +233,7 @@ class SiteClient:
                 # 但部分站点是对直连静默丢包而非返回挑战页，配了 bypass 就交给它
                 if settings.bypass_url:
                     logger.info(f"{url} 直连超时，尝试通过 bypass 服务获取")
-                    return fetch_via_bypass(url, params, timeout)
+                    return fetch_via_bypass(url, params, timeout, cookie=self.cookie)
                 logger.warning(f"请求 {url} 超时: {exc}")
                 return ""
             except (httpx.TransportError, ssl.SSLError) as exc:
@@ -245,11 +248,22 @@ class SiteClient:
         return ""
 
 
+def _cookie_pairs(cookie: str) -> list[dict]:
+    """把 "a=1; b=2" 形式的 Cookie 串拆成 FlareSolverr 的 cookies 数组。"""
+    out = []
+    for chunk in (cookie or "").split(";"):
+        name, sep, value = chunk.strip().partition("=")
+        if sep and name.strip():
+            out.append({"name": name.strip(), "value": value.strip()})
+    return out
+
+
 def fetch_via_bypass(
     url: str,
     params: dict | None = None,
     timeout: float = 60.0,
     quick: bool = False,
+    cookie: str = "",
 ) -> str:
     """通过用户自建的 bypass 服务抓取页面。
 
@@ -259,6 +273,8 @@ def fetch_via_bypass(
 
     通过 BYPASS_URL 配置服务地址；未配置时直接返回空串。
     quick=True 用更短的过盾上限，供连通性测试这类有人在等的场景。
+    cookie 会转交给 FlareSolverr（mgstage 的年龄门就靠它）；
+    GET /html 风格的服务没有传 Cookie 的口子，只能丢弃。
     """
     settings = get_settings()
     base = (settings.bypass_url or "").rstrip("/")
@@ -282,9 +298,13 @@ def fetch_via_bypass(
         ) as client:
             if base.endswith("/v1") or _is_flaresolverr(base):
                 endpoint = base if base.endswith("/v1") else f"{base}/v1"
+                body: dict = {"cmd": "request.get", "url": url, "maxTimeout": solver_timeout}
+                pairs = _cookie_pairs(clean_header_value(cookie))
+                if pairs:
+                    body["cookies"] = pairs
                 response = client.post(
                     endpoint,
-                    json={"cmd": "request.get", "url": url, "maxTimeout": solver_timeout},
+                    json=body,
                 )
                 response.raise_for_status()
                 payload = response.json()
@@ -346,3 +366,51 @@ def join_list(items) -> str:
             seen.add(item)
             out.append(item)
     return ",".join(out)
+
+
+def absolute_url(url: str, host: str) -> str:
+    """相对地址转绝对地址。
+
+    host 必须传配置里的（client.host），不能用模块常量：这些站换域名很
+    频繁，用户在页面上改了地址后，用常量拼出来的图片链接全指向死域名。
+    """
+    if not url:
+        return ""
+    if url.startswith("//"):
+        return f"https:{url}"
+    if url.startswith("/"):
+        return f"{host.rstrip('/')}{url}"
+    return url
+
+
+# 各式日期文本：2021-02-19 / 2021/2/19 / 2021年2月19日
+_ANY_DATE_RE = re.compile(r"(\d{4})[-/年](\d{1,2})[-/月](\d{1,2})")
+
+
+def normalize_date(text: str) -> str:
+    """从任意文本里取日期并统一成 YYYY-MM-DD。取不出返回空串。"""
+    match = _ANY_DATE_RE.search(text or "")
+    if not match:
+        return ""
+    year, month, day = match.groups()
+    return f"{year}-{int(month):02d}-{int(day):02d}"
+
+
+def text_contains_code(text: str, code: str) -> bool:
+    """文本（标题等）里是否含目标番号，按词比对、写法不敏感。
+
+    不能用整串拍平后的子串包含：MD-0180 会命中 "MD-0180-1 下集"，
+    "MDX-0123 1080P" 拍平后又会因 1080 贴在番号后面而漏判。
+    按空白切词后逐词拍平，词内要求整词相等、或番号后紧跟非数字
+    （-C 这类版本后缀算同一部片，-1 这类分集不算）。
+    """
+    target = re.sub(r"[^A-Za-z0-9]", "", code or "").upper()
+    if not target or not text:
+        return False
+    for token in re.split(r"\s+", text):
+        flat = re.sub(r"[^A-Za-z0-9]", "", token).upper()
+        if flat == target:
+            return True
+        if flat.startswith(target) and not flat[len(target):][:1].isdigit():
+            return True
+    return False

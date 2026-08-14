@@ -76,7 +76,8 @@ export const rollbackUpgrade = () => http.post('/upgrade/rollback')
 // ---------------------------------------------------------------- 番号
 export const listCodes = (params) => http.get('/codes/list', { params })
 export const searchCodes = (keyword) => http.get('/search', { params: { keyword } })
-export const searchTorrents = (code) => http.get('/torrents', { params: { code } })
+export const searchTorrents = (code, refresh = false) =>
+  http.get('/torrents', { params: refresh ? { code, refresh: true } : { code } })
 export const subscribeCode = (code) => http.post('/codes/sub', { code })
 export const cancelCode = (code) => http.post('/codes/cancel', { code })
 // 多选批量操作，一次请求走完，不在前端循环

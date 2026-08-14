@@ -8,12 +8,12 @@
 """
 from __future__ import annotations
 
-import re
-
 from loguru import logger
 from pyquery import PyQuery
 
-from app.modules.ladysite.base import CodeInfo, SiteClient, join_list
+from app.modules.ladysite.base import (
+    CodeInfo, SiteClient, absolute_url, join_list, normalize_date, text_contains_code,
+)
 from app.utils import get_true_code
 
 HOST = "https://xchina.co"
@@ -38,8 +38,6 @@ FIELD_MAP = {
     "演员": "casts",
     "模特": "casts",
 }
-
-DATE_RE = re.compile(r"(\d{4})[-/年](\d{1,2})[-/月](\d{1,2})")
 
 
 class Xchina:
@@ -67,7 +65,7 @@ class Xchina:
         if not html:
             return None
 
-        info = html_to_code(html, normalized)
+        info = html_to_code(html, normalized, host=self.client.host)
         # 搜索是模糊的，番号对不上就丢弃
         if info and info.code and info.code != normalized:
             logger.debug(f"[{normalized}] xchina 搜到的是 {info.code}，丢弃")
@@ -90,20 +88,19 @@ def html_to_detail_url(html: str, code: str = "") -> str:
     target = get_true_code(code)
     if not target:
         return ""
-    flat_target = target.replace("-", "").upper()
 
     for link in doc("a").items():
         href = link.attr("href") or ""
         if "/video/" not in href and "/photo/" not in href:
             continue
         title = (link.attr("title") or link.text() or "").strip()
-        flat_title = re.sub(r"[^A-Za-z0-9]", "", title).upper()
-        if flat_target and flat_target in flat_title:
+        # 整词比对（见 base.text_contains_code）：子串包含会拿错变体
+        if text_contains_code(title, target):
             return href
     return ""
 
 
-def html_to_code(html: str, code: str = "") -> CodeInfo | None:
+def html_to_code(html: str, code: str = "", host: str = HOST) -> CodeInfo | None:
     """解析 XChina 详情页。"""
     try:
         doc = PyQuery(html)
@@ -137,10 +134,7 @@ def html_to_code(html: str, code: str = "") -> CodeInfo | None:
             setattr(info, field, value)
 
     if info.release_date:
-        match = DATE_RE.search(info.release_date)
-        if match:
-            year, month, day = match.groups()
-            info.release_date = f"{year}-{int(month):02d}-{int(day):02d}"
+        info.release_date = normalize_date(info.release_date) or info.release_date
 
     heading = (doc("h1").eq(0).text() or doc(".title").eq(0).text() or "").strip()
     if heading:
@@ -155,11 +149,11 @@ def html_to_code(html: str, code: str = "") -> CodeInfo | None:
         or ""
     )
     if cover:
-        info.banner = _absolute(cover)
+        info.banner = absolute_url(cover, host)
         info.poster = info.banner
 
     stills = [
-        _absolute(node.attr("href") or node.attr("data-src") or node.attr("src") or "")
+        absolute_url(node.attr("href") or node.attr("data-src") or node.attr("src") or "", host)
         for node in doc(".gallery a, .photos img").items()
     ]
     if stills:
@@ -173,12 +167,3 @@ def html_to_code(html: str, code: str = "") -> CodeInfo | None:
         return None
     return info if info.code and info.title else None
 
-
-def _absolute(url: str) -> str:
-    if not url:
-        return ""
-    if url.startswith("//"):
-        return f"https:{url}"
-    if url.startswith("/"):
-        return f"{HOST}{url}"
-    return url

@@ -18,7 +18,9 @@ import re
 from loguru import logger
 from pyquery import PyQuery
 
-from app.modules.ladysite.base import CodeInfo, SiteClient, join_list
+from app.modules.ladysite.base import (
+    CodeInfo, SiteClient, absolute_url, join_list, normalize_date,
+)
 from app.utils import get_true_code
 
 HOST = "https://adult.contents.fc2.com"
@@ -30,8 +32,6 @@ ARTICLE_RE = re.compile(r"(\d{5,})")
 # 站点在标题里加的推广后缀
 TITLE_SUFFIXES = ("- FC2-PPV", "FC2-PPV", "- 動画", "無料")
 
-# 发布日形如「2021/02/19」或「販売日 : 2021/02/19」
-DATE_RE = re.compile(r"(\d{4})[/\-年](\d{1,2})[/\-月](\d{1,2})")
 
 
 def _article_id(code: str) -> str:
@@ -40,13 +40,8 @@ def _article_id(code: str) -> str:
     return match.group(1) if match else ""
 
 
-def _normalize_date(text: str) -> str:
-    """把各式日期文本统一成 YYYY-MM-DD。"""
-    match = DATE_RE.search(text or "")
-    if not match:
-        return ""
-    year, month, day = match.groups()
-    return f"{year}-{int(month):02d}-{int(day):02d}"
+# 日期归一化收敛到 base.normalize_date，这里留别名兼容既有调用与测试
+_normalize_date = normalize_date
 
 
 class Fc2:
@@ -76,7 +71,7 @@ class Fc2:
         html = self.client.get(f"/article/{article}/")
         if not html:
             return None
-        return html_to_code(html, normalized)
+        return html_to_code(html, normalized, host=self.client.host)
 
 
 class Fc2Hub:
@@ -105,10 +100,10 @@ class Fc2Hub:
         html = self.client.get(f"/video/{article}")
         if not html:
             return None
-        return hub_html_to_code(html, normalized)
+        return hub_html_to_code(html, normalized, host=self.client.host)
 
 
-def html_to_code(html: str, code: str = "") -> CodeInfo | None:
+def html_to_code(html: str, code: str = "", host: str = HOST) -> CodeInfo | None:
     """解析 FC2 官方站详情页。"""
     try:
         doc = PyQuery(html)
@@ -154,11 +149,11 @@ def html_to_code(html: str, code: str = "") -> CodeInfo | None:
         or ""
     )
     if cover:
-        info.banner = _absolute(cover, HOST)
+        info.banner = absolute_url(cover, host)
         info.poster = info.banner
 
     stills = [
-        _absolute(node.attr("href") or node.attr("src") or "", HOST)
+        absolute_url(node.attr("href") or node.attr("src") or "", host)
         for node in doc(".items_article_SampleImages a, #media_player img").items()
     ]
     if stills:
@@ -174,7 +169,7 @@ def html_to_code(html: str, code: str = "") -> CodeInfo | None:
     return info if info.code and info.title else None
 
 
-def hub_html_to_code(html: str, code: str = "") -> CodeInfo | None:
+def hub_html_to_code(html: str, code: str = "", host: str = HUB_HOST) -> CodeInfo | None:
     """解析 fc2hub 类镜像站详情页。
 
     结构是 <div class="row"><strong>标签</strong> 值</div> 的松散布局，
@@ -214,7 +209,7 @@ def hub_html_to_code(html: str, code: str = "") -> CodeInfo | None:
         or ""
     )
     if cover:
-        info.banner = _absolute(cover, HUB_HOST)
+        info.banner = absolute_url(cover, host)
         info.poster = info.banner
 
     if not info.code:
@@ -225,12 +220,3 @@ def hub_html_to_code(html: str, code: str = "") -> CodeInfo | None:
         return None
     return info if info.code and info.title else None
 
-
-def _absolute(url: str, host: str) -> str:
-    if not url:
-        return ""
-    if url.startswith("//"):
-        return f"https:{url}"
-    if url.startswith("/"):
-        return f"{host}{url}"
-    return url

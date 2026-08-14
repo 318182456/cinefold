@@ -208,7 +208,7 @@ class TestSiteClientFallback:
 
         monkeypatch.setattr(httpx.Client, "get", fake_get)
         monkeypatch.setattr(base, "fetch_via_bypass",
-                            lambda url, params=None, timeout=15.0: "<html>VIA</html>")
+                            lambda url, params=None, timeout=15.0, **kw: "<html>VIA</html>")
 
         assert client.get("/search") == "<html>VIA</html>"
 
@@ -223,7 +223,7 @@ class TestSiteClientFallback:
 
         monkeypatch.setattr(httpx.Client, "get", fake_get)
         monkeypatch.setattr(base, "fetch_via_bypass",
-                            lambda url, params=None, timeout=15.0: "<html>VIA</html>")
+                            lambda url, params=None, timeout=15.0, **kw: "<html>VIA</html>")
 
         assert client.get("/search") == "<html>VIA</html>"
 

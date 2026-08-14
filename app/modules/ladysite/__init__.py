@@ -41,15 +41,6 @@ SPECIAL_SITES: tuple[str, ...] = (
 )
 
 
-def _has_theporndb_token() -> bool:
-    """theporndb 的 API Token 配了没。Token 存在数据源的 Cookie 栏。"""
-    try:
-        from app.modules.ladysite.sources import get_source
-        return bool((get_source("theporndb") or {}).get("cookie", "").strip())
-    except Exception:
-        return False
-
-
 # key → (模块, 类名)。延迟导入：一次抓取只会用到其中几个，
 # 全量导入等于每次都把 21 个模块连带 pyquery 的解析开销都拉起来。
 _SITE_CLASSES: dict[str, tuple[str, str]] = {
@@ -91,35 +82,41 @@ def _get_site(name: str):
         return None
 
 
-def _enabled_sites() -> tuple[str, ...]:
-    """MAIN_SITE 为 ALL 时用全部站点，否则只用指定的。
+def _ordered_sites(items: list[dict] | None = None) -> tuple[str, ...]:
+    """按库里优先级排好的可用源清单。items 可传入已查好的结果避免重复查库。
 
     顺序以数据源页面上排的优先级为准（enabled_parser_sources 已按 priority
     排好），DETAIL_SITES 只作为兜底顺序 —— 用户在页面上调了顺序就该生效，
     否则那个排序功能是摆设。
 
-    数据源页面上停用的站会被排除；全停时退回 DETAIL_SITES，
-    免得配置失手把抓取彻底关死。
+    MAIN_SITE 指定单站时只用该站，即使它被停用也不扩大范围 —— 用户显式
+    锁定单站后静默扇出到十几个站，等于把他排除掉的源的数据写进库。
     """
     main = (get_settings().main_site or "ALL").strip().lower()
+    known = DETAIL_SITES + SPECIAL_SITES
     if main in ("", "all"):
-        sites = DETAIL_SITES + SPECIAL_SITES
+        sites = known
+        # 配置读不出来或全被停用时的兜底：只退回通用源。
+        # 专用源（fc2、carib 等）离开规则匹配就是白跑，不进盲退清单
+        fallback = DETAIL_SITES
     else:
-        # MAIN_SITE 也可以指定只对特定番号生效的源（如 fc2），
-        # 因此在两份清单里找
-        known = DETAIL_SITES + SPECIAL_SITES
         sites = tuple(s for s in known if s == main) or DETAIL_SITES
+        fallback = sites
 
     try:
         from app.modules.ladysite.sources import enabled_parser_sources
-        ordered = [item["key"] for item in enabled_parser_sources()]
+        if items is None:
+            items = enabled_parser_sources()
+        ordered = [item["key"] for item in items]
     except Exception as exc:
         logger.debug(f"读取数据源开关失败，按全部启用处理: {exc}")
-        return tuple(s for s in sites if s not in SPECIAL_SITES) or sites
+        return fallback
 
-    # 按库里的优先级重排。不在 ordered 里的是被停用/删除的，照旧排除；
-    # 全被排掉时退回 DETAIL_SITES，免得配置失手把抓取彻底关死
-    return tuple(s for s in ordered if s in sites) or DETAIL_SITES
+    return tuple(s for s in ordered if s in sites) or fallback
+
+
+def _enabled_sites() -> tuple[str, ...]:
+    return _ordered_sites()
 
 
 def _sites_for_code(code: str) -> tuple[str, ...]:
@@ -132,28 +129,38 @@ def _sites_for_code(code: str) -> tuple[str, ...]:
     规则全都不匹配时退回通用清单 —— 认不出的番号宁可多问几个源，
     也好过一个都不问。
     """
-    sites = _enabled_sites()
-    normalized = get_true_code(code)
-    if not normalized:
-        return sites
-
     # MAIN_SITE 指定了单站时不做过滤，用户的显式选择优先
     main = (get_settings().main_site or "ALL").strip().lower()
     if main not in ("", "all"):
-        return sites
+        return _ordered_sites()
 
     try:
         from app.modules.ladysite.sources import (
             SOURCE_MAP, code_allowed, enabled_parser_sources,
         )
-        # 一次查库拿全部规则，逐个 get_source 会打 20 多次查询
-        rules = {item["key"]: item.get("code_rule", "") for item in enabled_parser_sources()}
+        # 一次查库拿全部（顺序 + 规则 + cookie），逐个 get_source 会打
+        # 20 多次查询，_enabled_sites 再查一遍又是一次全表读
+        items = enabled_parser_sources()
     except Exception as exc:
-        logger.debug(f"读取番号规则失败，按不限制处理: {exc}")
-        return sites
+        logger.debug(f"读取数据源配置失败，按不限制处理: {exc}")
+        return _ordered_sites()
+
+    sites = _ordered_sites(items)
+    normalized = get_true_code(code)
+    if not normalized:
+        # 归一化不出番号（多半是标题）：专用源没得匹配，只问通用源
+        return tuple(s for s in sites if s not in SPECIAL_SITES) or sites
+
+    rules = {item["key"]: item.get("code_rule", "") for item in items}
+    cookies = {item["key"]: item.get("cookie", "") for item in items}
 
     matched, skipped = [], []
     for key in sites:
+        # theporndb 没配 API Token（存在 Cookie 栏）时接口一律 401，
+        # 白占一个并发位。不能靠"默认停用"：老库里这行是 enabled=True
+        if key == "theporndb" and not cookies.get(key, "").strip():
+            skipped.append(key)
+            continue
         # 库里没有这行时回落到内置默认规则（首次启动、表刚建好）
         rule = rules.get(key)
         if rule is None:
@@ -290,7 +297,8 @@ def search_code(keyword: str) -> list[dict]:
 def get_actor_photo(name: str) -> str:
     """查演员头像。同 get_code_detail，多站并发取最快的那个。"""
     # 演员查询与番号形态无关，用通用清单；且只有部分源实现了 search_actor
-    sites = tuple(s for s in _enabled_sites() if s in ACTOR_SITES) or _enabled_sites()
+    enabled = _enabled_sites()
+    sites = tuple(s for s in enabled if s in ACTOR_SITES) or enabled
     if len(sites) == 1:
         return _fetch_actor_photo(sites[0], name)
 

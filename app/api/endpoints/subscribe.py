@@ -89,10 +89,14 @@ def search_codes(keyword: str, current_user: str = Depends(get_current_user)):
 
 
 @router.get("/torrents")
-def search_torrents(code: str, current_user: str = Depends(get_current_user)):
-    """搜索番号对应的种子。"""
+def search_torrents(
+    code: str, refresh: bool = False, current_user: str = Depends(get_current_user)
+):
+    """搜索番号对应的种子。refresh=true 跳过缓存强制重搜。"""
     from app import services
-    torrents = services.search_torrents(get_true_code(code) or code)
+    torrents = services.search_torrents(
+        get_true_code(code) or code, refresh=refresh
+    )
     return ResponseEntity.ok({"items": [t.to_dict() for t in torrents]})
 
 

@@ -11,19 +11,17 @@ TM-0092）在日系源上完全查不到，只能靠这两个站。
 """
 from __future__ import annotations
 
-import re
-
 from loguru import logger
 from pyquery import PyQuery
 
-from app.modules.ladysite.base import CodeInfo, SiteClient, join_list
+from app.modules.ladysite.base import (
+    CodeInfo, SiteClient, join_list, normalize_date, text_contains_code,
+)
 from app.utils import get_true_code
 
 MADOU_HOST = "https://madou.club"
 MADOUQU_HOST = "https://madouqu.com"
 
-# 发布日期形如 2024-03-15 或 2024年3月15日
-DATE_RE = re.compile(r"(\d{4})[-/年](\d{1,2})[-/月](\d{1,2})")
 
 
 class _MadouBase:
@@ -113,13 +111,9 @@ def html_to_detail_url(html: str, code: str = "", site: str = "madou") -> str:
     return ""
 
 
-def _title_matches(title: str, target: str) -> bool:
-    """标题里是否含目标番号。大小写与横杠写法都归一化后比。"""
-    if not title or not target:
-        return False
-    flat_target = target.replace("-", "").upper()
-    flat_title = re.sub(r"[^A-Za-z0-9]", "", title).upper()
-    return flat_target in flat_title
+# 整词比对（见 base.text_contains_code）：单纯的拍平子串包含会让 MD-0180
+# 命中多部曲的 "MD-0180-1"，把别集的数据写进目标番号
+_title_matches = text_contains_code
 
 
 def html_to_code(html: str, code: str = "", site: str = "madou") -> CodeInfo | None:
@@ -167,10 +161,7 @@ def html_to_code(html: str, code: str = "", site: str = "madou") -> CodeInfo | N
         or doc(".entry-meta, .entry-date, .post-meta").eq(0).text()
         or ""
     )
-    match = DATE_RE.search(date_text)
-    if match:
-        year, month, day = match.groups()
-        info.release_date = f"{year}-{int(month):02d}-{int(day):02d}"
+    info.release_date = normalize_date(date_text)
 
     cover = (
         doc('meta[property="og:image"]').attr("content")

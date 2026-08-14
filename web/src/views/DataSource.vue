@@ -29,13 +29,26 @@ const STATUS = {
   '': { dot: 'bg-gray-600', text: '未测试' },
 }
 
-// 没有解析器的源只能测连通，不参与抓取，得让用户看清楚。
+// 只有参与详情抓取的源才进可排序组 —— javlibrary 有解析器但只用于榜单，
+// 混进来会让用户以为拖它的顺序能影响检索。
 // 按 priority 排：这一组的次序就是抓取顺序，页面上要能看出来
 const byPriority = (a, b) => a.priority - b.priority || a.key.localeCompare(b.key)
 const usable = computed(
-  () => items.value.filter((i) => i.has_parser).sort(byPriority),
+  () => items.value.filter((i) => i.has_parser && i.in_detail).sort(byPriority),
 )
-const registered = computed(() => items.value.filter((i) => !i.has_parser))
+const registered = computed(
+  () => items.value.filter((i) => !i.has_parser || !i.in_detail),
+)
+
+// 番号规则的影章文案。后端把不带 only:/skip: 前缀的裸规则当 only 处理
+// （见 sources.parse_code_rule），这里的判定必须与之同向，
+// 用 startsWith('only') 会把裸规则标成"排除"，正好说反
+function ruleLabel(rule) {
+  const hasSkip = /(^|[;\n])\s*skip\s*:/i.test(rule)
+  const hasOnly = rule.replace(/(^|[;\n])\s*skip\s*:[^;\n]*/gi, '').trim() !== ''
+  if (hasSkip && hasOnly) return '番号规则'
+  return hasSkip ? '排除番号' : '限定番号'
+}
 
 async function load() {
   loading.value = true
@@ -377,7 +390,7 @@ onMounted(load)
                 class="badge max-w-[9rem] truncate bg-indigo-950 text-indigo-300"
                 :title="`番号规则：${item.code_rule}`"
               >
-                {{ item.code_rule.startsWith('only') ? '限定番号' : '排除番号' }}
+                {{ ruleLabel(item.code_rule) }}
               </span>
               <button
                 class="btn-ghost ml-auto px-2 py-0.5 text-[11px]"
@@ -403,10 +416,10 @@ onMounted(load)
         </div>
       </div>
 
-      <!-- 仅登记，无解析器。内置源已全部接入解析，落到这里的基本是自定义源 -->
+      <!-- 不参与详情抓取：榜单专用源（javlibrary）与自定义源 -->
       <div v-if="registered.length" class="space-y-2 border-t border-gray-800 pt-4">
         <p class="text-xs text-gray-500">
-          无解析器（可测连通性，但不参与抓取，因此不排序）
+          不参与详情抓取（可测连通性，因此不排序）
         </p>
         <div class="grid gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
           <div
@@ -423,6 +436,13 @@ onMounted(load)
                 class="badge shrink-0 bg-gray-800 text-gray-400"
               >
                 自定义
+              </span>
+              <span
+                v-if="item.has_parser"
+                class="badge shrink-0 bg-sky-950 text-sky-300"
+                title="用于榜单抓取（最想看/女优榜），不参与番号详情检索"
+              >
+                榜单源
               </span>
               <button
                 class="btn-ghost ml-auto shrink-0 px-2 py-0.5 text-[11px]"

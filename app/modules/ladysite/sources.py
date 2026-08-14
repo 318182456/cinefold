@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import re
+from functools import lru_cache
 
 from loguru import logger
 from sqlalchemy import select
@@ -134,6 +135,31 @@ VERIFY_MARKS: tuple[str, ...] = ("age_check", "age-check", "driver-verify")
 # 所以拿一个真实番号页当探针。
 CHECK_PATH: dict[str, str] = {"javbus": "/SSIS-001"}
 
+# 抓取优先级的默认顺序（越靠前越优先）。不能沿用 SOURCES 的字母序：
+# 首批并发位有限（见 ladysite.MAX_PARALLEL_SITES），直连可用的主力源
+# 必须排在需过盾/新接入的源前面，否则字母靠前的 airav、avbase 把并发位
+# 占了，可靠的 jav321、missav 反而在队列里干等
+DEFAULT_ORDER: tuple[str, ...] = (
+    "javbus", "javdb", "jav321", "avbase", "missav",
+    "avmoo", "dmm", "airav", "7mmtv", "hbox", "xchina",
+    "javlibrary", "mgstage", "avsox", "carib",
+    "fc2", "fc2hub", "madou", "madouqu", "theporndb", "freejavbt",
+)
+
+
+def _default_priority(key: str) -> int:
+    try:
+        return DEFAULT_ORDER.index(key)
+    except ValueError:
+        return len(DEFAULT_ORDER)
+
+
+# 曾作为默认值下发过、后来被修订的规则。backfill 时视同"未定制"，
+# 直接替换成新默认；用户自己写的规则不会恰好等于这些串。
+# 以后修订某个源的默认规则时，把旧串登记到这里，存量库才能跟上 ——
+# 否则默认值的演进永远到不了已部署的实例（backfill 只补 NULL 行）
+_SUPERSEDED_RULES: dict[str, tuple[str, ...]] = {}
+
 
 # ----------------------------------------------------------------------
 # 番号路由规则
@@ -151,15 +177,17 @@ CHECK_PATH: dict[str, str] = {"javbus": "/SSIS-001"}
 _RULE_DATE = "date"
 
 
-def parse_code_rule(rule: str) -> dict[str, list[str]]:
-    """把规则文本解析成 {"only": [...], "skip": [...]}。
+@lru_cache(maxsize=256)
+def _parse_rule_cached(rule: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """解析规则文本，返回 (only, skip)。
 
-    容错优先：这是用户在文本框里手打的，写错的部分忽略掉而不是整条报废，
-    否则一个笔误会让整个源静默不参与抓取。
+    加缓存：每次检索要对每个 (番号, 源) 组合判定一遍，规则串是静态的，
+    没必要反复 split + 正则；规则种类撑死几十条，缓存不会涨。
     """
-    out: dict[str, list[str]] = {"only": [], "skip": []}
+    only: list[str] = []
+    skip: list[str] = []
     if not rule:
-        return out
+        return (), ()
 
     # 分号、换行都当分隔符 —— 用户多半会换行写
     for chunk in re.split(r"[;\n]+", rule):
@@ -173,21 +201,37 @@ def parse_code_rule(rule: str) -> dict[str, list[str]]:
         if kind not in ("only", "skip"):
             kind, raw = "only", chunk
 
+        target = only if kind == "only" else skip
         for token in re.split(r"[,，\s]+", raw):
             token = token.strip().upper().rstrip("-")
-            if token and token not in out[kind]:
-                out[kind].append(token)
+            if token and token not in target:
+                target.append(token)
 
-    return out
+    return tuple(only), tuple(skip)
+
+
+def parse_code_rule(rule: str) -> dict[str, list[str]]:
+    """把规则文本解析成 {"only": [...], "skip": [...]}。
+
+    容错优先：这是用户在文本框里手打的，写错的部分忽略掉而不是整条报废，
+    否则一个笔误会让整个源静默不参与抓取。
+    """
+    only, skip = _parse_rule_cached(rule or "")
+    return {"only": list(only), "skip": list(skip)}
+
+
+@lru_cache(maxsize=512)
+def _token_re(token: str) -> "re.Pattern[str]":
+    # 前缀匹配到分隔符或数字为止：MD 不该命中 MDBK，否则 skip:MD 会
+    # 顺带把 MDBK 也排除掉
+    return re.compile(rf"^{re.escape(token)}(?=[-_\d]|$)")
 
 
 def _matches_token(code: str, token: str) -> bool:
     """番号是否命中某个前缀 token。code 应已过 get_true_code。"""
     if token == _RULE_DATE.upper():
         return bool(_DATE_CODE_RE.match(code))
-    # 前缀匹配到分隔符或数字为止：MD 不该命中 MDBK，否则 skip:MD 会
-    # 顺带把 MDBK 也排除掉
-    return bool(re.match(rf"^{re.escape(token)}(?=[-_\d]|$)", code))
+    return bool(_token_re(token).match(code))
 
 
 def code_allowed(code: str, rule: str) -> bool:
@@ -196,8 +240,7 @@ def code_allowed(code: str, rule: str) -> bool:
     只有 only 时：命中才问。只有 skip 时：命中就不问。
     两者都有时 skip 优先 —— 排除是更强的意图。
     """
-    parsed = parse_code_rule(rule)
-    only, skip = parsed["only"], parsed["skip"]
+    only, skip = _parse_rule_cached(rule or "")
     if not only and not skip:
         return True
 
@@ -230,7 +273,7 @@ def sync_builtin_sources() -> int:
     with session_scope() as session:
         # 含已软删除的，这些 key 不该被当成"缺失"再插一遍
         existing = {row.key for row in session.scalars(select(DataSource)).all()}
-        for index, item in enumerate(SOURCES):
+        for item in SOURCES:
             if item["key"] in existing:
                 continue
             session.add(DataSource(
@@ -240,7 +283,9 @@ def sync_builtin_sources() -> int:
                 # 数据质量有问题的源默认停用，由用户显式开启
                 enabled=item.get("enabled", True),
                 interval=item.get("interval", 0.0),
-                priority=index,
+                # 按 DEFAULT_ORDER 而非 SOURCES 的字母序：首批并发位有限，
+                # 直连主力必须排在需过盾/新接入的源前面（restore 同此逻辑）
+                priority=_default_priority(item["key"]),
                 bypass_first=item.get("bypass_first", False),
                 code_rule=item.get("code_rule") or None,
             ))
@@ -259,23 +304,30 @@ def backfill_builtin_rules() -> int:
     番号规则是后加的字段，老库里这些行早就存在，sync_builtin_sources 不会
     回头改它们 —— 不补的话升级上来的用户拿不到任何路由优化。
 
-    只补 NULL 的行：用户自己改过（哪怕改成空串表示"不限制"）就不该覆盖。
+    两类行会被写：
+    - NULL 的行（还没补过）补上当前默认；
+    - 值恰好等于旧版默认（_SUPERSEDED_RULES）的行，替换成修订后的默认 ——
+      那是我们下发的、不是用户写的，修订就该跟着到位。
+    用户自己改过的（含清成空串表示"不限制"）一律不动。
     """
     from app.database.models import DataSource
 
     filled = 0
     with session_scope() as session:
-        rows = session.scalars(
-            select(DataSource).where(DataSource.code_rule.is_(None))
-        ).all()
+        rows = session.scalars(select(DataSource)).all()
         for row in rows:
-            rule = SOURCE_MAP.get(row.key, {}).get("code_rule")
-            if rule:
-                row.code_rule = rule
+            default = SOURCE_MAP.get(row.key, {}).get("code_rule", "")
+            if row.code_rule is None:
+                if default:
+                    row.code_rule = default
+                    filled += 1
+                continue
+            if row.code_rule in _SUPERSEDED_RULES.get(row.key, ()):
+                row.code_rule = default
                 filled += 1
 
     if filled:
-        logger.info(f"已为 {filled} 个内置数据源补上默认番号规则")
+        logger.info(f"已为 {filled} 个内置数据源更新默认番号规则")
     return filled
 
 
@@ -290,7 +342,7 @@ def restore_builtin_source(key: str) -> bool:
     if item is None:
         return False
 
-    index = next(i for i, s in enumerate(SOURCES) if s["key"] == key)
+    priority = _default_priority(key)
     with session_scope() as session:
         row = session.scalar(select(DataSource).where(DataSource.key == key))
         if row is None:
@@ -300,7 +352,7 @@ def restore_builtin_source(key: str) -> bool:
                 host=item["host"],
                 enabled=item.get("enabled", True),
                 interval=item.get("interval", 0.0),
-                priority=index,
+                priority=priority,
                 bypass_first=item.get("bypass_first", False),
                 code_rule=item.get("code_rule") or None,
             ))
@@ -311,7 +363,7 @@ def restore_builtin_source(key: str) -> bool:
         row.host = item["host"]
         row.enabled = item.get("enabled", True)
         row.interval = item.get("interval", 0.0)
-        row.priority = index
+        row.priority = priority
         row.bypass_first = item.get("bypass_first", False)
         row.code_rule = item.get("code_rule") or None
         # 连通性结果是删除前的旧数据，留着会误导
