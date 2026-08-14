@@ -1666,9 +1666,18 @@ def adopt_scrape_dir(
     try:
         for path in root.rglob("*"):
             try:
-                if path.suffix.lower() not in VIDEO_SUFFIXES or not path.is_file():
+                suffix = path.suffix.lower()
+                if suffix not in VIDEO_SUFFIXES or not path.is_file():
                     continue
             except OSError:
+                continue
+            # .strm 只是一行 URL 的文本文件，指向站外资源，本来就没有源文件
+            # 与种子；预告片是刮削工具生成的附属内容，不是下载来的正片。
+            # 两者都永远配不上源文件，收进来只会把真正值得纳管的条目淹掉
+            # （与 orphan._scan_unregistered 同一口径）
+            if suffix == ".strm":
+                continue
+            if "trailer" in path.stem.lower():
                 continue
             if _norm_path(str(path)) in registered:
                 continue
@@ -1688,7 +1697,13 @@ def adopt_scrape_dir(
     for path in pending:
         try:
             st = path.stat()
-        except OSError:
+        except OSError as exc:
+            # 记进 skipped 而不是静默跳过：静默丢弃会让 total 与
+            # adopted+passthrough+unmatched+skipped 对不上（388 = 0+376+2
+            # 差 10 条就是这么来的），用户看不出那些文件去哪了
+            result["skipped"].append({
+                "link_path": str(path), "reason": f"读取文件信息失败: {exc}",
+            })
             continue
         if not st.st_ino:
             # Windows 上取不到 inode，配对无从谈起

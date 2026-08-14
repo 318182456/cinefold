@@ -1312,6 +1312,110 @@ def test_adopt_scrape_dir_without_config(tmp_path, configure):
     assert result["errors"]
 
 
+def test_adopt_scrape_dir_ignores_strm_and_trailers(
+    tmp_path, configure, fake_downloader
+):
+    """.strm 与预告片不该进候选：它们永远配不上源文件，只会淹掉真实条目。"""
+    dl = tmp_path / "downloads"
+    dl.mkdir()
+    source = dl / "ABC-123.mp4"
+    source.write_bytes(b"V" * 64)
+
+    scrape = tmp_path / "lib" / "AV"
+    scrape.mkdir(parents=True)
+    os.link(source, scrape / "ABC-123.mp4")
+    # 这三个都该被过滤掉
+    (scrape / "SDMU-963-Trailer.strm").write_text("http://example.com/x")
+    (scrape / "START-257-Trailer.mp4").write_bytes(b"T")
+    (scrape / "DLDSS-385.strm").write_text("http://example.com/y")
+
+    fake_downloader.torrents["H1"] = [str(source)]
+    configure(
+        medialink_library_path=str(tmp_path / "lib"),
+        medialink_scrape_dir=str(scrape),
+    )
+    result = watchdir.adopt_scrape_dir(dry_run=True)
+
+    # 候选里只剩那一个真影片
+    assert result["total"] == 1
+    assert len(result["adopted"]) == 1
+    assert result["adopted"][0]["code"] == "ABC-123"
+    listed = str(result)
+    assert "Trailer" not in listed
+    assert ".strm" not in listed
+
+
+def test_adopt_scrape_dir_accounts_for_every_candidate(
+    tmp_path, configure, fake_downloader
+):
+    """total 必须等于各分类之和，不能有条目静默消失。"""
+    dl = tmp_path / "downloads"
+    dl.mkdir()
+    matched = dl / "ABC-123.mp4"
+    matched.write_bytes(b"V" * 64)
+
+    scrape = tmp_path / "lib" / "AV"
+    scrape.mkdir(parents=True)
+    os.link(matched, scrape / "ABC-123.mp4")       # 配得上
+    (scrape / "DEF-456.mp4").write_bytes(b"X")      # 配不上源文件
+    (scrape / "随手拍.mp4").write_bytes(b"Y")        # 提不出番号
+
+    fake_downloader.torrents["H1"] = [str(matched)]
+    configure(
+        medialink_library_path=str(tmp_path / "lib"),
+        medialink_scrape_dir=str(scrape),
+    )
+    result = watchdir.adopt_scrape_dir(dry_run=True)
+
+    counted = (
+        len(result["adopted"]) + len(result["passthrough"])
+        + len(result["unmatched"]) + len(result["skipped"])
+    )
+    assert result["total"] == 3
+    assert counted == result["total"]
+
+
+def test_adopt_scrape_dir_fallback_passthrough(
+    tmp_path, configure, fake_downloader
+):
+    """配不到源文件的降级直通：source_path 就是自己，且没有种子。"""
+    scrape = tmp_path / "lib" / "AV"
+    scrape.mkdir(parents=True)
+    orphan = scrape / "DEF-456.mp4"
+    orphan.write_bytes(b"X" * 64)
+
+    configure(
+        medialink_library_path=str(tmp_path / "lib"),
+        medialink_scrape_dir=str(scrape),
+    )
+
+    # 默认不降级：进 unmatched
+    plain = watchdir.adopt_scrape_dir(dry_run=True)
+    assert len(plain["unmatched"]) == 1
+    assert plain["passthrough"] == []
+
+    # 开了降级：进 passthrough
+    fb = watchdir.adopt_scrape_dir(dry_run=True, fallback_passthrough=True)
+    assert fb["unmatched"] == []
+    assert len(fb["passthrough"]) == 1
+    row = fb["passthrough"][0]
+    assert row["code"] == "DEF-456"
+    assert row["source_path"] == row["link_path"] == str(orphan)
+    assert row["torrents"] == []
+
+    # 真落库后是一条直通记录
+    watchdir.adopt_scrape_dir(dry_run=False, fallback_passthrough=True)
+    with session_scope() as session:
+        link = session.get(MediaLink, str(orphan))
+        assert link is not None
+        assert link.source_path == link.link_path
+    # 直通登记不该凭空造出 History 行
+    with session_scope() as session:
+        assert session.scalar(
+            sa.select(sa.func.count()).select_from(History)
+        ) == 0
+
+
 def test_adopt_scrape_endpoint_defaults_to_dry_run(
     client, tmp_path, configure, fake_downloader
 ):

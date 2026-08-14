@@ -31,6 +31,18 @@ class TestCodeRecognition:
         ("FC2PPV1234567", "FC2-PPV-1234567"),
         ("SSIS-001-C 中文字幕", "SSIS-001"),
         ("no code here", ""),
+        # 厂牌前缀内嵌数字（字母-数字-字母交错）。旧正则的
+        # [0-9]{0,4}[A-Za-z]{2,6} 匹配不上：数字段只能在最前面
+        ("S2MBD-002", "S2MBD-002"),
+        ("S2MBD-002-无码-C", "S2MBD-002"),
+        ("T28-544", "T28-544"),
+        # 不带 PPV 的 FC2。7 位数字与通用分支的 \d{2,5} 冲突，
+        # 不单列一支会被切成 FC2-13472
+        ("FC2-1347256", "FC2-PPV-1347256"),
+        ("FC2-1347256-无码", "FC2-PPV-1347256"),
+        # 纯数字加横杠不是番号，放宽字母段后仍不能误判
+        ("1080-1234", ""),
+        ("2160-4567", ""),
     ])
     def test_find_serial_number(self, text, expected):
         assert find_serial_number(text) == expected
