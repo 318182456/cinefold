@@ -44,4 +44,18 @@ class MediaLink(DBBase):
         DateTime, nullable=True
     )
 
+    # 首次发现源文件消失的时间。空表示源文件还在（或从没查过）。
+    #
+    # 记在这里而不是复用 pending_delete.detected_time，是因为那张表的记录
+    # 撑不到需要它的时候：扣留只在开了反向删除的规则下登记，宽限期一满就
+    # 连记录带扣留一起清掉。而「源文件没了、Emby 里还在」的关联恰恰是那些
+    # 永远走不到删除的 —— 规则没开反向删除、或压根不归任何规则管，
+    # 它们在扣留表里没有任何痕迹，时间只能自己存一份。
+    #
+    # 文件回来了要清空（移动/改名会让路径漂，同 inode 的文件仍在），
+    # 否则一次误报会永久留在列表里。
+    source_gone_time: Mapped[datetime | None] = mapped_column(
+        DateTime, nullable=True
+    )
+
     create_time: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)

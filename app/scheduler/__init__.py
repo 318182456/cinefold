@@ -238,6 +238,30 @@ def sync_watch_dirs() -> int:
     return len(results)
 
 
+def scan_orphans() -> int:
+    """扫描「下载侧已删、媒体库侧仍在」的关联。
+
+    只报告不删除。放进定时任务是为了 source_gone_time 这个时间戳 ——
+    它记的是「首次发现源文件消失」，只有定期扫才准。全靠页面触发的话，
+    一个月不打开页面，那一个月里删掉的文件全都会记成打开页面的那一刻。
+    """
+    from app.services.orphan import scan_orphans as _scan
+
+    try:
+        items = _scan()
+    except Exception as exc:
+        logger.exception(f"[任务] 孤儿关联扫描失败: {exc}")
+        return 0
+
+    if items:
+        logger.info(
+            f"[任务] 孤儿关联 {len(items)} 条 —— "
+            f"源文件已删 {sum(1 for i in items if i['source_gone'])}，"
+            f"种子已删 {sum(1 for i in items if i['torrent_gone'])}"
+        )
+    return len(items)
+
+
 def cache_photos() -> int:
     """图片本地化。未开启时跳过。"""
     settings = get_settings()
@@ -336,6 +360,11 @@ INTERVAL_JOBS: dict[str, dict] = {
     "sync_watch_dirs": {
         "func": sync_watch_dirs, "name": "监控目录对账", "minutes": 30,
         "interval_key": "watchdir_sync_interval",
+    },
+    # 只读扫描，不删任何东西。频率不用高 —— 它维护的是「首次发现消失」的
+    # 时间戳，一小时的精度对这个用途完全够，而每轮要拉下载器全量种子清单
+    "scan_orphans": {
+        "func": scan_orphans, "name": "孤儿关联扫描", "minutes": 60,
     },
     # 开关（SEED_TRANSFER_ENABLED）关着时直接返回，不打下载器接口
     "transfer_seeds": {

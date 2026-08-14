@@ -1,8 +1,8 @@
 <script setup>
 import { computed, onMounted, ref } from 'vue'
 import {
-  deleteMediaLink, dropMediaLinkRecord, getMediaLinkStats, listMediaLinks,
-  previewMediaLinkDelete, pruneMediaLinks, registerMediaLink,
+  deleteMediaLink, dropMediaLinkRecord, getMediaLinkStats, listMediaLinkOrphans,
+  listMediaLinks, previewMediaLinkDelete, pruneMediaLinks, registerMediaLink,
 } from '@/api'
 import { useToast } from '@/composables/useToast'
 import LoadingBlock from '@/components/LoadingBlock.vue'
@@ -18,6 +18,13 @@ const SIZE_OPTIONS = [20, 50, 100]
 const keyword = ref('')
 const missingOnly = ref(false)
 const loading = ref(false)
+
+// 视图模式：all = 全部关联，orphan = 下载侧已删但媒体库仍在的那批。
+// 两者数据源不同（后者要问下载器），共用搜索框与分页，切换时重置页码
+const view = ref('all')
+const isOrphan = computed(() => view.value === 'orphan')
+const orphanSourceGone = ref(0)
+const orphanTorrentGone = ref(0)
 const stats = ref(null)
 // 失效数要全表探测磁盘，NAS 上可能几十秒，跟总数分开请求单独渲染
 const missing = ref(null)
@@ -73,21 +80,65 @@ function deleteLabel(hold) {
 async function load() {
   loading.value = true
   try {
-    const data = await listMediaLinks({
-      keyword: keyword.value.trim(),
-      missing_only: missingOnly.value,
-      page: page.value,
-      size: size.value,
-    })
+    // refresh 只在用户显式点「重新扫描」时为真：默认走后端缓存，
+    // 否则翻一次页就要重拉一遍下载器全量种子清单
+    const data = isOrphan.value
+      ? await listMediaLinkOrphans({
+          keyword: keyword.value.trim(),
+          page: page.value,
+          size: size.value,
+        })
+      : await listMediaLinks({
+          keyword: keyword.value.trim(),
+          missing_only: missingOnly.value,
+          page: page.value,
+          size: size.value,
+        })
     items.value = data.items || []
     total.value = data.total || 0
     deleteEnabled.value = !!data.delete_enabled
-    libraryPath.value = data.library_path || ''
+    if (isOrphan.value) {
+      orphanSourceGone.value = data.source_gone || 0
+      orphanTorrentGone.value = data.torrent_gone || 0
+    } else {
+      libraryPath.value = data.library_path || ''
+    }
   } catch (err) {
     toast.error(err.message)
   } finally {
     loading.value = false
   }
+}
+
+// 重新扫描：绕过后端缓存，重新问一次下载器与磁盘
+async function rescanOrphans() {
+  loading.value = true
+  try {
+    const data = await listMediaLinkOrphans({
+      keyword: keyword.value.trim(),
+      page: page.value,
+      size: size.value,
+      refresh: true,
+    })
+    items.value = data.items || []
+    total.value = data.total || 0
+    orphanSourceGone.value = data.source_gone || 0
+    orphanTorrentGone.value = data.torrent_gone || 0
+    toast.success(`扫描完成，共 ${data.total || 0} 条`)
+  } catch (err) {
+    toast.error(err.message)
+  } finally {
+    loading.value = false
+  }
+}
+
+function switchView(next) {
+  if (view.value === next) return
+  view.value = next
+  page.value = 1
+  // 「只看已丢失」是全部视图的筛选，切到孤儿视图后不再适用
+  if (next === 'orphan') missingOnly.value = false
+  load()
 }
 
 // 纯 SQL 聚合，立刻返回
@@ -292,19 +343,146 @@ onMounted(() => {
       />
       <button class="btn-ghost px-3 py-1.5 text-xs" @click="search">搜索</button>
       <button
+        v-if="!isOrphan"
         class="btn-ghost px-3 py-1.5 text-xs"
         :class="missingOnly ? 'text-amber-300' : ''"
         @click="toggleMissing"
       >
         {{ missingOnly ? '显示全部' : '只看已丢失' }}
       </button>
-      <button class="btn-ghost ml-auto px-3 py-1.5 text-xs" @click="prune">清理失效记录</button>
-      <button class="btn-primary px-3 py-1.5 text-xs" @click="registerOpen = true">
+      <button
+        v-if="isOrphan"
+        class="btn-ghost px-3 py-1.5 text-xs"
+        @click="rescanOrphans"
+      >
+        重新扫描
+      </button>
+      <button
+        v-if="!isOrphan"
+        class="btn-ghost ml-auto px-3 py-1.5 text-xs"
+        @click="prune"
+      >
+        清理失效记录
+      </button>
+      <button
+        v-if="!isOrphan"
+        class="btn-primary px-3 py-1.5 text-xs"
+        @click="registerOpen = true"
+      >
         手工登记
       </button>
     </div>
 
+    <!-- 视图切换。孤儿一览的数据源与全部关联不同（要问下载器），
+         做成两个视图而不是一个筛选项 -->
+    <div class="flex flex-wrap items-center gap-2">
+      <button
+        class="btn-ghost px-3 py-1.5 text-xs"
+        :class="!isOrphan ? 'border-brand text-brand' : ''"
+        @click="switchView('all')"
+      >
+        全部关联
+      </button>
+      <button
+        class="btn-ghost px-3 py-1.5 text-xs"
+        :class="isOrphan ? 'border-amber-400 text-amber-300' : ''"
+        @click="switchView('orphan')"
+      >
+        下载侧已删 / Emby 仍在
+      </button>
+      <template v-if="isOrphan">
+        <span v-if="orphanSourceGone" class="badge bg-red-950/60 text-red-300">
+          源文件已删 {{ orphanSourceGone }}
+        </span>
+        <span v-if="orphanTorrentGone" class="badge bg-amber-950/60 text-amber-300">
+          种子已删 {{ orphanTorrentGone }}
+        </span>
+      </template>
+    </div>
+
     <LoadingBlock v-if="loading" :rows="5" />
+
+    <!-- 孤儿一览：下载侧已删、媒体库侧仍在。
+         不按番号分组 —— 每条都是要单独处置的问题记录，分组会把它藏起来 -->
+    <template v-else-if="isOrphan">
+      <p v-if="!items.length" class="card text-center text-sm text-gray-500">
+        没有发现下载侧已删、媒体库侧仍在的关联。
+      </p>
+      <div v-else class="space-y-2">
+        <div
+          v-for="item in items"
+          :key="item.link_path"
+          class="card space-y-2"
+        >
+          <div class="flex flex-wrap items-center gap-2">
+            <span class="font-mono text-sm font-medium text-brand">{{ item.code }}</span>
+            <span v-if="item.source_gone" class="badge bg-red-950/60 text-red-300">
+              源文件已删
+            </span>
+            <span v-if="item.torrent_gone" class="badge bg-amber-950/60 text-amber-300">
+              种子已删
+            </span>
+            <button
+              class="btn-ghost ml-auto px-2 py-0.5 text-[11px] text-red-400 hover:bg-red-950/40"
+              @click="askDelete({ code: item.code, links: [item] })"
+            >
+              联动删除
+            </button>
+            <button
+              class="btn-ghost px-2 py-0.5 text-[11px]"
+              @click="dropRecord(item)"
+            >
+              删记录
+            </button>
+          </div>
+
+          <div class="space-y-1 rounded-lg bg-gray-900/60 px-3 py-2">
+            <!-- 媒体库侧：还在，所以 Emby 里仍看得到这个条目 -->
+            <div class="flex items-start gap-2">
+              <span
+                class="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-500"
+                title="媒体库文件仍在，Emby 里仍可见"
+              />
+              <div class="min-w-0 flex-1">
+                <p class="truncate text-xs text-gray-300" :title="item.link_path">
+                  {{ fileName(item.link_path) }}
+                </p>
+                <p class="truncate text-[11px] text-gray-600" :title="item.link_path">
+                  {{ item.link_path }}
+                </p>
+              </div>
+            </div>
+
+            <div class="mt-1 border-t border-gray-800 pt-1">
+              <div class="flex items-start gap-2">
+                <span
+                  class="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full"
+                  :class="item.source_gone ? 'bg-red-500' : 'bg-emerald-500'"
+                  :title="item.source_gone ? '源文件已删除' : '源文件仍在'"
+                />
+                <p
+                  class="min-w-0 flex-1 truncate text-[11px] text-gray-600"
+                  :title="item.source_path"
+                >
+                  {{ item.source_path }}
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <div class="flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-gray-600">
+            <span>创建 {{ shortTime(item.create_time) || '未知' }}</span>
+            <!-- 只删种未删文件时源文件还在，没有删除时刻可言 -->
+            <span :class="item.delete_time ? 'text-red-400' : ''">
+              删除 {{ shortTime(item.delete_time) || '—' }}
+            </span>
+            <span v-if="item.torrent_hashes && item.torrent_hashes.length">
+              种子 {{ item.torrent_hashes.length }} 个
+            </span>
+          </div>
+        </div>
+      </div>
+    </template>
 
     <p v-else-if="!grouped.length" class="card text-center text-sm text-gray-500">
       暂无硬链接关联。刮削工具回调 /webhook/scrape 后会自动登记。

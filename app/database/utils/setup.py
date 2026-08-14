@@ -73,6 +73,10 @@ def update_database() -> None:
         # 存量记录从 0 开始，等于「还没查过」，与新建记录一致
         ("media_link", "torrent_miss", "INTEGER NOT NULL DEFAULT 0"),
         ("media_link", "torrent_probe_time", "TIMESTAMP"),
+        # 源文件消失的时间。存量记录为空，等于「源文件还在或还没查过」，
+        # 首次对账扫到消失时才补上 —— 存量记录的真实消失时间早已无从考证，
+        # 写个当前时间反而是假数据
+        ("media_link", "source_gone_time", "TIMESTAMP"),
     ]
     for table, column, column_type in migrations:
         check_and_create_column(engine, table, column, column_type)

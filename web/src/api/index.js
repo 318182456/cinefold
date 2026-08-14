@@ -115,6 +115,10 @@ export const deleteMediaLink = (payload) => http.post('/medialinks/delete', payl
 export const dropMediaLinkRecord = (linkPath) =>
   http.delete('/medialinks/record', { params: { link_path: linkPath } })
 export const pruneMediaLinks = () => http.post('/medialinks/prune')
+// 下载侧已删、媒体库侧仍在的关联。一轮要拉下载器全量种子清单再逐条探测文件，
+// 与 stats 那次一个量级，同样放宽超时
+export const listMediaLinkOrphans = (params) =>
+  http.get('/medialinks/orphans', { params, timeout: 300000 })
 
 // ---------------------------------------------------------------- 监控目录
 export const listWatchDirs = () => http.get('/watchdirs')

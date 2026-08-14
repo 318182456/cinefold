@@ -110,8 +110,10 @@ def _missing_links(force: bool = False) -> set[str]:
 
 
 def _drop_stats_cache() -> None:
-    global _missing_cache
+    """失效全部扫描缓存。删过文件或记录之后必须调，否则页面还显示旧结论。"""
+    global _missing_cache, _orphan_cache
     _missing_cache = None
+    _orphan_cache = None
 
 
 def _attach_holds(items: list[dict], grace: int) -> None:
@@ -249,6 +251,77 @@ def list_medialinks(
         # 页面要据此提示"联动删除未启用，删除只会演练"
         "delete_enabled": settings.medialink_delete_enabled,
         "library_path": settings.medialink_library_path,
+    })
+
+
+# 孤儿扫描的结果缓存。一轮要拉下载器全量种子清单 + 逐条 stat，
+# 与 _missing_links 一个量级，同样得缓存，否则翻页每次都重扫
+_ORPHAN_TTL = 300.0
+_orphan_cache: tuple[float, list[dict]] | None = None
+
+
+def _orphans_cached(force: bool = False) -> list[dict]:
+    global _orphan_cache
+
+    now = time.monotonic()
+    if not force and _orphan_cache is not None and now - _orphan_cache[0] < _ORPHAN_TTL:
+        return _orphan_cache[1]
+
+    from app.services.orphan import scan_orphans
+
+    items = scan_orphans()
+    _orphan_cache = (now, items)
+    return items
+
+
+@router.get("/orphans")
+def list_orphans(
+    keyword: str = "",
+    page: int = 1,
+    size: int = 50,
+    refresh: bool = False,
+    current_user: str = Depends(get_current_user),
+):
+    """下载侧已删、媒体库侧仍在的关联。
+
+    即「qb/tr 里删掉了，Emby 里还挂着」的那批 —— 点进去播不了的条目。
+    只报告不删除，要动手请用现成的删除接口（联动删除或只删记录）。
+
+    源文件消失与种子消失分开标注：只删种不删文件时源文件还占着空间，
+    两者要做的事不一样，合并成一个状态会丢掉信息。
+    """
+    page = max(1, page)
+    size = min(max(1, size), 200)
+
+    items = _orphans_cached(force=refresh)
+
+    if keyword:
+        kw = keyword.strip().lower()
+        items = [
+            i for i in items
+            if kw in i["code"].lower()
+            or kw in i["link_path"].lower()
+            or kw in i["source_path"].lower()
+        ]
+
+    # 删除时间倒序，最近删的排前面。源文件还在的（无删除时间）排最后 ——
+    # 那些只是种子没了，不急着处理
+    items = sorted(
+        items,
+        key=lambda i: (i["delete_time"] or "", i["create_time"] or ""),
+        reverse=True,
+    )
+
+    total = len(items)
+    start = (page - 1) * size
+    return ResponseEntity.ok({
+        "items": items[start:start + size],
+        "total": total,
+        "page": page,
+        "size": size,
+        "source_gone": sum(1 for i in items if i["source_gone"]),
+        "torrent_gone": sum(1 for i in items if i["torrent_gone"]),
+        "delete_enabled": get_settings().medialink_delete_enabled,
     })
 
 
