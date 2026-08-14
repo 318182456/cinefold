@@ -21,7 +21,9 @@ from app.core.config import get_settings
 from app.database.models import CodeAlias, History, MediaLink, PendingDelete
 from app.database.session import session_scope
 from app.schemas.reponse import ResponseEntity
-from app.services.medialink import handle_media_deleted, register_scrape
+from app.services.medialink import (
+    handle_media_deleted, register_scrape, torrent_batch,
+)
 
 router = APIRouter(prefix="/medialinks", tags=["硬链接"])
 
@@ -439,24 +441,36 @@ def batch_delete(
     deleted = 0
     downgraded = False
 
-    for path in paths:
-        try:
-            outcome = handle_media_deleted(link_path=path, dry_run=body.dry_run)
-        except Exception as exc:
-            msg = f"{path}: {exc}"
-            logger.error(f"批量联动删除异常 {msg}")
-            errors.append(msg)
-            continue
+    # 整批选中记录的源文件，供批内一次性反查种子用 —— 否则每条都要重新
+    # 拉一遍下载器的全量种子清单
+    with session_scope() as session:
+        sources = [
+            r.source_path for r in session.scalars(
+                select(MediaLink).where(MediaLink.link_path.in_(paths[:500]))
+            ).all() if r.source_path
+        ]
 
-        # 全局开关关着时 service 层会把 dry_run 兜回真，据此提示用户
-        if outcome.dry_run and not body.dry_run:
-            downgraded = True
-        elif not outcome.dry_run:
-            deleted += 1
+    # 批作用域：整批共用一次下载器查询。种子上千时这是分钟级与秒级的差别
+    with torrent_batch() as batch:
+        batch.preload_paths(sorted(set(sources)))
+        for path in paths:
+            try:
+                outcome = handle_media_deleted(link_path=path, dry_run=body.dry_run)
+            except Exception as exc:
+                msg = f"{path}: {exc}"
+                logger.error(f"批量联动删除异常 {msg}")
+                errors.append(msg)
+                continue
 
-        _invalidate(*outcome.files_deleted, *outcome.links_deleted)
-        errors.extend(f"{path}: {e}" for e in outcome.errors)
-        results.append(outcome.as_dict())
+            # 全局开关关着时 service 层会把 dry_run 兜回真，据此提示用户
+            if outcome.dry_run and not body.dry_run:
+                downgraded = True
+            elif not outcome.dry_run:
+                deleted += 1
+
+            _invalidate(*outcome.files_deleted, *outcome.links_deleted)
+            errors.extend(f"{path}: {e}" for e in outcome.errors)
+            results.append(outcome.as_dict())
 
     _drop_stats_cache()
 

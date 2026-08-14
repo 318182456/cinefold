@@ -295,6 +295,99 @@ def _torrent_hashes(code: str) -> list[str]:
         ).all())
 
 
+# 下载器查询的批内缓存。
+#
+# 为什么必须有：find_torrents_by_path 与 list_torrent_files 的成本都与
+# 「下载器里的种子总数」成正比而与查询量无关 —— 两者都得把每个种子的文件
+# 清单拉一遍才能回答问题。单条删除要调它们各一次，批量删 20 条就是 40 次
+# 全量拉取，种子上千时每次几秒，用户盯着转圈等好几分钟。
+#
+# 刻意做成「显式开启的作用域」而不是全局 TTL 缓存：
+# 陈旧的种子清单会让删除范围出错（多删或少删文件），这个代价太大，不能靠
+# 「时间还没到」来保证正确性。只有调用方明确知道「接下来这批操作可以共用
+# 一份快照」时才开启 —— 批量删除就是这种场景，整批在几秒内跑完，期间下载器
+# 的状态变化只会是我们自己删掉的那些种子。
+#
+# 不开启时行为与优化前完全一致：每次都问下载器要最新的。
+_batch_cache: dict | None = None
+
+
+class torrent_batch:
+    """在这个作用域内共用一份下载器查询结果。
+
+    用法：
+        with torrent_batch():
+            for path in paths:
+                handle_media_deleted(link_path=path)
+
+    嵌套安全（内层不会提前清掉外层的缓存），但不是线程安全的 ——
+    批量删除本就串行执行，够用。
+    """
+
+    def __enter__(self):
+        global _batch_cache
+        self._owner = _batch_cache is None
+        if self._owner:
+            _batch_cache = {"files": {}, "paths": None, "all_paths": None}
+        return self
+
+    def preload_paths(self, paths: list[str]) -> None:
+        """告知整批会用到的源文件路径。
+
+        按路径反查的成本与查询量无关（每次都要把全部种子的清单拉一遍建
+        索引），所以一次问完整批比逐条问便宜得多 —— 逐条问是 N 轮全量拉取，
+        一次问完是 1 轮。
+        """
+        if _batch_cache is not None and paths:
+            _batch_cache["all_paths"] = list(paths)
+
+    def __exit__(self, *exc):
+        global _batch_cache
+        if self._owner:
+            _batch_cache = None
+        return False
+
+
+def _files_for_hashes(hashes: list[str]) -> dict[str, list[str]]:
+    """取这些种子的文件清单。批作用域内只问下载器一次。
+
+    必须按传入的 hash 查而不是枚举下载器全部种子：History 里的 hash 可能
+    已经不在 monitor_torrent 的返回里（种子被删了但记录还在），枚举法会
+    查不到它的清单，删除范围就缩水成「只删登记的那个文件」，种子里的
+    样品图、说明 txt 全都留下。
+
+    逐个种子问而不是一次问全部：合集判定要数每个种子内的正片数，清单混成
+    一个列表后，两个单片种子加起来也有 2 部正片，会被误判成合集。
+    """
+    cached = _batch_cache["files"] if _batch_cache is not None else {}
+    todo = [h for h in hashes if h.lower() not in cached]
+
+    if todo:
+        from app.modules.downloadclient import (
+            get_download_client, list_configured_clients,
+        )
+
+        for name in list_configured_clients():
+            client = get_download_client(name)
+            if client is None:
+                continue
+            lister = getattr(client, "list_torrent_files", None)
+            if lister is None:
+                continue  # 老客户端未实现该接口，跳过即可
+            for h in todo:
+                try:
+                    paths = [p for p in lister([h]) if p]
+                except Exception as exc:
+                    logger.warning(f"{name} 读取种子 {h} 文件清单异常: {exc}")
+                    continue
+                if not paths:
+                    continue
+                bucket = cached.setdefault(h.lower(), [])
+                bucket.extend(p for p in paths if p not in bucket)
+
+    return {h: list(cached[h.lower()]) for h in hashes if h.lower() in cached}
+
+
 def _torrent_hashes_by_path(paths: set[str]) -> list[str]:
     """按源文件路径向下载器反查种子 hash。
 
@@ -304,11 +397,34 @@ def _torrent_hashes_by_path(paths: set[str]) -> list[str]:
     下载器手里有「这个文件属于哪个种子」的答案。
 
     两条路取并集：History 覆盖 cinefold 自己下载的，反查覆盖其余的。
+
+    批作用域内只反查一次：find_torrents_by_path 每次调用都要把下载器里每个
+    种子的文件清单拉一遍才能建索引，成本与种子总数成正比而与查询路径数无关。
+    批量删 20 条就是 20 轮全量拉取，种子上千时要等好几分钟。作用域内改成
+    一次性反查全部待删路径，之后各条删除只是查表。
     """
     if not paths:
         return []
 
     from app.modules.downloadclient import find_torrents_by_path
+
+    # 批作用域内：第一次就把整批的路径一次问完，后续直接查表
+    if _batch_cache is not None:
+        index = _batch_cache.get("paths")
+        if index is None:
+            targets = _batch_cache.get("all_paths") or sorted(paths)
+            try:
+                index = find_torrents_by_path(targets)
+            except Exception as exc:
+                logger.warning(f"按路径反查种子失败: {exc}")
+                index = {}
+            _batch_cache["paths"] = index
+        found: list[str] = []
+        for raw in sorted(paths):
+            for h in index.get(raw, []):
+                if h not in found:
+                    found.append(h)
+        return found
 
     try:
         mapping = find_torrents_by_path(sorted(paths))
@@ -316,7 +432,7 @@ def _torrent_hashes_by_path(paths: set[str]) -> list[str]:
         logger.warning(f"按路径反查种子失败: {exc}")
         return []
 
-    found: list[str] = []
+    found = []
     for hashes in mapping.values():
         for h in hashes:
             if h not in found:
@@ -593,28 +709,8 @@ def _torrent_files_by_hash(hashes: list[str]) -> dict[str, list[str]]:
     if not hashes:
         return {}
 
-    from app.modules.downloadclient import get_download_client, list_configured_clients
-
-    out: dict[str, list[str]] = {}
-    for name in list_configured_clients():
-        client = get_download_client(name)
-        if client is None:
-            continue
-        lister = getattr(client, "list_torrent_files", None)
-        if lister is None:
-            continue  # 老客户端未实现该接口，跳过即可
-        for h in hashes:
-            try:
-                paths = [p for p in lister([h]) if p]
-            except Exception as exc:
-                logger.warning(f"{name} 读取种子 {h} 文件清单异常: {exc}")
-                continue
-            if not paths:
-                continue
-            bucket = out.setdefault(h, [])
-            for p in paths:
-                if p not in bucket:
-                    bucket.append(p)
+    # 走带缓存的查询：同一批删除里重复出现的 hash 只问下载器一次
+    out = _files_for_hashes(hashes)
 
     if out:
         logger.info(

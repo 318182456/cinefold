@@ -29,6 +29,7 @@
 """
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -38,6 +39,10 @@ from sqlalchemy import select
 
 from app.database.models import History, MediaLink
 from app.database.session import session_scope
+
+# 存在性探测的并发度。全是 IO 等待，并发能把 NAS 往返时间叠起来。
+# 与 medialink 端点的 _PROBE_WORKERS 同值：群晖这类设备并发再高反而退化
+_PROBE_WORKERS = 16
 
 
 @dataclass
@@ -102,6 +107,32 @@ def _torrent_view() -> TorrentView:
     return view
 
 
+def _exists(path: str) -> bool:
+    """路径是否还在。探测不了（挂载掉了、权限问题）时报告「在」。
+
+    漏报好过误报：这个列表是给人看着去动手删文件的，把还在的说成没了，
+    用户会照着删掉不该删的东西。
+    """
+    try:
+        return Path(path).exists()
+    except OSError:
+        return True
+
+
+def _probe(paths: list[str]) -> dict[str, bool]:
+    """并发探测一批路径是否存在。
+
+    串行做不动：媒体库多半挂在 NAS 上，一次 exists() 就是一次网络往返，
+    上万条记录 × 两侧路径串行下来是分钟级。这里全是 IO 等待，并发能把
+    往返时间叠起来。同一路径可能被多条记录共用（源文件对多个硬链接），
+    去重后再探测。
+    """
+    if not paths:
+        return {}
+    with ThreadPoolExecutor(max_workers=_PROBE_WORKERS) as pool:
+        return dict(zip(paths, pool.map(_exists, paths)))
+
+
 def _norm(path: str) -> str:
     """路径归一化，仅用于比对是否同一个文件。
 
@@ -139,6 +170,11 @@ def scan_orphans(refresh_gone_time: bool = True) -> list[dict]:
     view = _torrent_view()
     torrent_files = {_norm(p) for p in view.files}
 
+    # 两侧路径一次性并发探完，之后全在内存里查。逐条 stat 在 NAS 上是分钟级
+    probed = _probe(list({
+        p for r in rows for p in (r["link_path"], r["source_path"]) if p
+    }))
+
     # 番号 → 该番号登记过的种子 hash。History 是「cinefold 下载过什么」的账本，
     # 种子从下载器消失后这行仍在，正好用来对比
     codes = {r["code"] for r in rows}
@@ -163,19 +199,10 @@ def scan_orphans(refresh_gone_time: bool = True) -> list[dict]:
 
         # 媒体库侧必须还在 —— 这正是「Emby 里还看得到」的含义。
         # 两侧都没了是普通的失效记录，已有 prune 管，不属于这个一览
-        try:
-            link_alive = Path(link_path).exists()
-        except OSError:
-            # 探测不了（挂载掉了、权限问题）就当它还在：漏报好过误报，
-            # 这个列表是给人看着去动手删的
-            link_alive = True
-        if not link_alive:
+        if not probed.get(link_path, True):
             continue
 
-        try:
-            source_gone = not Path(source_path).exists()
-        except OSError:
-            source_gone = False
+        source_gone = not probed.get(source_path, True)
 
         # 直通模式下 link_path 就是 source_path，同一个文件不可能一个在一个没。
         # 这类记录永远不会是孤儿，跳过免得自相矛盾

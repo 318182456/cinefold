@@ -349,3 +349,148 @@ def test_batch_delete_dry_run_keeps_files(tmp_path, no_downloader, monkeypatch):
     assert link.exists()
     with session_scope() as session:
         assert session.query(MediaLink).count() == 1
+
+
+# ---------------------------------------------------------------- 批内缓存
+def test_torrent_batch_queries_downloader_once(tmp_path, monkeypatch):
+    """批作用域内，同一个种子的文件清单只问下载器一次。
+
+    不带缓存时每条删除都要重拉一轮全量清单 —— 种子上千时这是分钟级与
+    秒级的差别，也是这个功能最初慢到不可用的原因。
+    """
+    from app.core.config import get_settings
+    from app.services import medialink
+
+    settings = get_settings()
+    monkeypatch.setattr(settings, "medialink_library_path", str(tmp_path / "library"))
+    monkeypatch.setattr(settings, "medialink_delete_enabled", True)
+
+    _, link_a = _link(tmp_path, "ABS-001", keep_source=False)
+    _, link_b = _link(tmp_path, "ABS-002", keep_source=False)
+
+    # 两条记录各有种子。hash 是主键，同一个 hash 插不了两行
+    with session_scope() as session:
+        session.add(History(hash="f" * 40, code="ABS-001"))
+        session.add(History(hash="e" * 40, code="ABS-002"))
+
+    calls: list[str] = []
+
+    class _Counting:
+        def monitor_torrent(self, hashes=None):
+            return [{"hash": "f" * 40}]
+
+        def list_torrent_files(self, hashes):
+            calls.append("list")
+            return []
+
+        def find_torrents_by_path(self, paths):
+            calls.append("find")
+            return {}
+
+        def delete_torrent(self, hashes, delete_files=False):
+            return list(hashes)
+
+    import app.modules.downloadclient as dc
+    monkeypatch.setattr(dc, "list_configured_clients", lambda: ["qbittorrent"])
+    monkeypatch.setattr(dc, "get_download_client", lambda name="": _Counting())
+
+    with medialink.torrent_batch():
+        medialink.handle_media_deleted(link_path=str(link_a), dry_run=True)
+        medialink.handle_media_deleted(link_path=str(link_b), dry_run=True)
+
+    # 按路径反查整批只做一次 —— 它的成本与种子总数成正比而与查询量无关，
+    # 逐条问就是 N 轮全量拉取，这是批量删除慢的主因
+    assert calls.count("find") == 1, f"路径反查应只做一次: {calls}"
+    # 两个不同的 hash 各查一次清单：缓存按 hash 去重，不同种子本就该各查各的。
+    # 真正省掉的是「同一 hash 在批内被反复问」，见下面的合集用例
+    assert calls.count("list") == 2, f"两个不同种子各查一次: {calls}"
+
+
+def test_torrent_batch_dedupes_same_hash(tmp_path, monkeypatch):
+    """同一个种子被多条记录共用（合集）时，清单在批内只查一次。"""
+    from app.core.config import get_settings
+    from app.services import medialink
+
+    settings = get_settings()
+    monkeypatch.setattr(settings, "medialink_library_path", str(tmp_path / "library"))
+
+    _, link_a = _link(tmp_path, "ABS-001", keep_source=False)
+    _, link_b = _link(tmp_path, "ABS-002", keep_source=False)
+
+    # 合集种子：一个 hash 打包两部片。History 的主键是 hash，所以两个番号
+    # 的映射靠按路径反查建立，而不是两行 History
+    shared = "f" * 40
+    with session_scope() as session:
+        session.add(History(hash=shared, code="ABS-001"))
+
+    calls: list[str] = []
+
+    class _Counting:
+        def monitor_torrent(self, hashes=None):
+            return [{"hash": shared}]
+
+        def list_torrent_files(self, hashes):
+            calls.append("list")
+            return []
+
+        def find_torrents_by_path(self, paths):
+            # 两条记录的源文件都属于这一个种子
+            return {p: [shared] for p in paths}
+
+        def delete_torrent(self, hashes, delete_files=False):
+            return list(hashes)
+
+    import app.modules.downloadclient as dc
+    monkeypatch.setattr(dc, "list_configured_clients", lambda: ["qbittorrent"])
+    monkeypatch.setattr(dc, "get_download_client", lambda name="": _Counting())
+
+    with medialink.torrent_batch():
+        medialink.handle_media_deleted(link_path=str(link_a), dry_run=True)
+        medialink.handle_media_deleted(link_path=str(link_b), dry_run=True)
+
+    assert calls.count("list") == 1, f"同一 hash 应只查一次清单: {calls}"
+
+
+def test_no_batch_scope_keeps_original_behaviour(tmp_path, monkeypatch):
+    """不开批作用域时行为与优化前一致：每次都问下载器要最新的。
+
+    缓存必须是显式开启的 —— 陈旧的种子清单会让删除范围出错，
+    这个代价不能靠「时间还没到」来兜。
+    """
+    from app.core.config import get_settings
+    from app.services import medialink
+
+    settings = get_settings()
+    monkeypatch.setattr(settings, "medialink_library_path", str(tmp_path / "library"))
+
+    _, link_a = _link(tmp_path, "ABS-001", keep_source=False)
+    _, link_b = _link(tmp_path, "ABS-002", keep_source=False)
+    with session_scope() as session:
+        session.add(History(hash="f" * 40, code="ABS-001"))
+        session.add(History(hash="e" * 40, code="ABS-002"))
+
+    calls: list[str] = []
+
+    class _Counting:
+        def monitor_torrent(self, hashes=None):
+            return [{"hash": "f" * 40}]
+
+        def list_torrent_files(self, hashes):
+            calls.append("list")
+            return []
+
+        def find_torrents_by_path(self, paths):
+            return {}
+
+        def delete_torrent(self, hashes, delete_files=False):
+            return list(hashes)
+
+    import app.modules.downloadclient as dc
+    monkeypatch.setattr(dc, "list_configured_clients", lambda: ["qbittorrent"])
+    monkeypatch.setattr(dc, "get_download_client", lambda name="": _Counting())
+
+    medialink.handle_media_deleted(link_path=str(link_a), dry_run=True)
+    medialink.handle_media_deleted(link_path=str(link_b), dry_run=True)
+
+    # 没有批作用域，两次删除各查各的
+    assert calls.count("list") == 2, f"无缓存时应各查一次: {calls}"
