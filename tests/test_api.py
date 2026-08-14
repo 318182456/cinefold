@@ -873,6 +873,52 @@ class TestBtAutoDownload:
         )
         assert services.find_torrent("ABC-123") is None
 
+    def test_interface_reported_site_does_not_bypass_filter(self, monkeypatch):
+        """接口自报 site 时，BT 源仍必须被标成 BT。
+
+        从前是 `site or self.name`，接口只要回一个 site 字段，种子就顶着
+        别人的站名混过 find_torrent 的过滤，关掉开关照样自动下载。
+        """
+        from app import services
+        from app.modules.bt.bt import BT
+
+        class _Response:
+            @staticmethod
+            def raise_for_status():
+                return None
+
+            @staticmethod
+            def json():
+                return {"data": [
+                    {"id": 1, "site": "MTeam", "title": "t1", "seeders": 100},
+                ]}
+
+        class _Client:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                return False
+
+            def request(self, *_, **__):
+                return _Response()
+
+        monkeypatch.setattr("app.modules.bt.bt.httpx.Client", lambda **kw: _Client())
+
+        source = BT(url="http://example.invalid/api")
+        torrents = source.search("ABC-123")
+
+        assert torrents[0].site == "BT"
+        # 原站名保留下来只作展示，不参与过滤
+        assert torrents[0].source_site == "MTeam"
+        assert torrents[0].display_site == "BT · MTeam"
+
+        monkeypatch.setattr(services, "search_torrents", lambda code: torrents)
+        monkeypatch.setattr(
+            services.get_settings(), "bt_auto_download", False, raising=False
+        )
+        assert services.find_torrent("ABC-123") is None
+
 
 class TestDetailRace:
     """番号情报多站并发，谁先出结果用谁。"""

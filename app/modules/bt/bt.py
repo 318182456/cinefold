@@ -100,7 +100,11 @@ class BT:
         for item in items:
             try:
                 torrent = Torrent.from_dict(item)
-                torrent.site = torrent.site or self.name
+                # site 无条件覆写：过滤、排序、种子反查都按它认站，接口自报的
+                # 站名若能覆盖，BT_AUTO_DOWNLOAD 关掉也拦不住这些种子。
+                # 原站名挪到 source_site，只用于展示。
+                torrent.source_site = torrent.source_site or torrent.site
+                torrent.site = self.name
                 torrent.code = torrent.code or keyword
                 results.append(torrent)
             except Exception as exc:

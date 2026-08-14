@@ -1165,7 +1165,10 @@ def send_downloading_message(code: str, torrent: Torrent | None = None) -> int:
     detail = ""
     if torrent is not None:
         size_gb = torrent.size_mb / 1024
-        detail = f"\n站点: {torrent.site}  大小: {size_gb:.2f}GB  做种: {torrent.seeders}"
+        detail = (
+            f"\n站点: {torrent.display_site}  "
+            f"大小: {size_gb:.2f}GB  做种: {torrent.seeders}"
+        )
     text = f"⬇️ 开始下载\n{title}{detail}"
     return notify.broadcast_photo(photo, text, title) if photo else notify.broadcast_text(text)
 

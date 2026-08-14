@@ -261,7 +261,7 @@ def _dispatch_command(text: str) -> str:
         lines = [f"🔍 {code} 找到 {len(torrents)} 个资源，前 5 条："]
         for torrent in torrents[:5]:
             lines.append(
-                f"• [{torrent.site}] {torrent.title[:40]} "
+                f"• [{torrent.display_site}] {torrent.title[:40]} "
                 f"{torrent.size_mb / 1024:.1f}GB ↑{torrent.seeders}"
             )
         return "\n".join(lines)

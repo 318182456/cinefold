@@ -223,7 +223,7 @@ const sizeText = (mb) => (mb >= 1024 ? `${(mb / 1024).toFixed(2)} GB` : `${mb.to
               <td class="max-w-md truncate py-2 pr-3 text-gray-300" :title="torrent.title">
                 {{ torrent.title }}
               </td>
-              <td class="py-2 pr-3 text-gray-400">{{ torrent.site }}</td>
+              <td class="py-2 pr-3 text-gray-400">{{ torrent.display_site || torrent.site }}</td>
               <td class="py-2 pr-3 tabular-nums text-gray-400">{{ sizeText(torrent.size_mb) }}</td>
               <td class="py-2 pr-3 tabular-nums text-gray-400">{{ torrent.seeders }}</td>
               <td class="py-2 pr-3">
