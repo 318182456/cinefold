@@ -4,7 +4,7 @@
 """
 from __future__ import annotations
 
-import re
+import time
 from importlib import import_module
 
 from loguru import logger
@@ -33,39 +33,11 @@ MAX_PARALLEL_SITES = 6
 # _fetch_actor_photo 虽有 hasattr 兜底，但先筛掉能省下建实例的开销
 ACTOR_SITES = frozenset({"javbus", "javdb", "avmoo", "avsox"})
 
-# 只对特定番号形态有意义的源。放进 DETAIL_SITES 会让每次查询都白开几个
-# 线程去撞必然 404 的地址，因此按番号形态单独路由（见 _sites_for_code）。
-#
-# 判定函数收到的是 get_true_code 归一化后的番号。
-SPECIAL_SITES: tuple[tuple[str, object], ...] = (
-    # FC2-PPV 在日系源上基本查不到，反之这两个站只收 FC2
-    ("fc2", lambda code: code.startswith("FC2")),
-    ("fc2hub", lambda code: code.startswith("FC2")),
-    # 日期型番号（032416_267）是无码站的写法，有码源不认
-    ("carib", lambda code: bool(_DATE_CODE_RE.match(code))),
-    # 素人系番号，官方站是唯一可靠来源
-    ("mgstage", lambda code: bool(_AMATEUR_RE.match(code))),
-    ("avsox", lambda code: bool(_DATE_CODE_RE.match(code)) or bool(_AMATEUR_RE.match(code))),
-    # 国产番号前缀
-    ("madou", lambda code: bool(_DOMESTIC_RE.match(code))),
-    ("madouqu", lambda code: bool(_DOMESTIC_RE.match(code))),
-    # 番号形态不限，但没配 API Token 时接口一律 401，白占一个线程。
-    # 不能只靠"默认停用"：老库里这行已存在，sync_builtin_sources 不会
-    # 回头改它的 enabled，所以这里按 token 是否配了来判断
-    ("theporndb", lambda code: _has_theporndb_token()),
-)
-
-# 日期型番号：032416_267
-_DATE_CODE_RE = re.compile(r"^\d{6}[-_]\d{2,4}$")
-# 素人系前缀（MGStage 的主要番号段）
-_AMATEUR_RE = re.compile(
-    r"^(SIRO|GANA|LUXU|MIUM|ARA|KNB|SCUTE|MAAN|CHN|ABW|300M|200GANA|259LUXU|261ARA)"
-    r"|^\d{3}[A-Z]{2,6}-", re.I
-)
-# 国产番号前缀（麻豆、天美、蜜桃、精东等）
-_DOMESTIC_RE = re.compile(
-    r"^(MD|MDX|MDBK|MDSJ|MDCM|MSD|MKY|MTVQ|TM|TMW|PME|JD|JDBC|91CM|91BCM|RS|XSJ|LY)-",
-    re.I,
+# 只对特定番号形态有意义的源，不放进 DETAIL_SITES：每次查询都白开几个
+# 线程去撞必然 404 的地址不划算。它们由番号规则决定何时参与（见
+# _sites_for_code），规则本身配在数据源页面上、存在 datasource.code_rule。
+SPECIAL_SITES: tuple[str, ...] = (
+    "fc2", "fc2hub", "carib", "mgstage", "avsox", "madou", "madouqu", "theporndb",
 )
 
 
@@ -131,11 +103,11 @@ def _enabled_sites() -> tuple[str, ...]:
     """
     main = (get_settings().main_site or "ALL").strip().lower()
     if main in ("", "all"):
-        sites = DETAIL_SITES
+        sites = DETAIL_SITES + SPECIAL_SITES
     else:
         # MAIN_SITE 也可以指定只对特定番号生效的源（如 fc2），
         # 因此在两份清单里找
-        known = DETAIL_SITES + tuple(key for key, _ in SPECIAL_SITES)
+        known = DETAIL_SITES + SPECIAL_SITES
         sites = tuple(s for s in known if s == main) or DETAIL_SITES
 
     try:
@@ -143,54 +115,65 @@ def _enabled_sites() -> tuple[str, ...]:
         ordered = [item["key"] for item in enabled_parser_sources()]
     except Exception as exc:
         logger.debug(f"读取数据源开关失败，按全部启用处理: {exc}")
-        return sites
+        return tuple(s for s in sites if s not in SPECIAL_SITES) or sites
 
     # 按库里的优先级重排。不在 ordered 里的是被停用/删除的，照旧排除；
     # 全被排掉时退回 DETAIL_SITES，免得配置失手把抓取彻底关死
-    return tuple(s for s in ordered if s in sites) or sites
+    return tuple(s for s in ordered if s in sites) or DETAIL_SITES
 
 
 def _sites_for_code(code: str) -> tuple[str, ...]:
     """给定番号该问哪些源。
 
-    通用源全上，专用源只在番号形态对得上时才加进来 —— 拿 SSIS-001 去问
-    carib 或 fc2 是必然的 404，白占一个线程和一次请求。
+    每个源自带番号规则（datasource.code_rule，页面上可改），这里按规则过滤：
+    拿 SSIS-001 去问只收 FC2 的 carib/fc2 是必然的 404，白占一个线程和
+    一次请求；反过来 FC2 番号问日系源同样是白跑。
+
+    规则全都不匹配时退回通用清单 —— 认不出的番号宁可多问几个源，
+    也好过一个都不问。
     """
     sites = _enabled_sites()
     normalized = get_true_code(code)
     if not normalized:
         return sites
 
-    # MAIN_SITE 指定了单站时不做形态过滤，用户的显式选择优先
+    # MAIN_SITE 指定了单站时不做过滤，用户的显式选择优先
     main = (get_settings().main_site or "ALL").strip().lower()
     if main not in ("", "all"):
         return sites
 
     try:
-        from app.modules.ladysite.sources import enabled_parser_sources
-        allowed = {item["key"] for item in enabled_parser_sources()} or None
-    except Exception:
-        allowed = None
-    # allowed 为空集时按"全部启用"处理，与 _enabled_sites 的兜底一致：
-    # 库还没登记内置源（首次启动、或表刚建好）时不能把专用源全过滤掉
+        from app.modules.ladysite.sources import (
+            SOURCE_MAP, code_allowed, enabled_parser_sources,
+        )
+        # 一次查库拿全部规则，逐个 get_source 会打 20 多次查询
+        rules = {item["key"]: item.get("code_rule", "") for item in enabled_parser_sources()}
+    except Exception as exc:
+        logger.debug(f"读取番号规则失败，按不限制处理: {exc}")
+        return sites
 
-    extra = []
-    for key, matches in SPECIAL_SITES:
-        if key in sites:
-            continue
-        if allowed is not None and key not in allowed:
-            continue
-        try:
-            if matches(normalized):
-                extra.append(key)
-        except Exception:
-            continue
+    matched, skipped = [], []
+    for key in sites:
+        # 库里没有这行时回落到内置默认规则（首次启动、表刚建好）
+        rule = rules.get(key)
+        if rule is None:
+            rule = SOURCE_MAP.get(key, {}).get("code_rule", "")
+        if code_allowed(normalized, rule):
+            matched.append(key)
+        else:
+            skipped.append(key)
 
-    # FC2 与日期型番号在通用日系源上一条都查不到，通用清单整个是白跑，
-    # 直接换成专用源。找不到专用源时仍退回通用清单，总比什么都不问好
-    if extra and (normalized.startswith("FC2") or _DATE_CODE_RE.match(normalized)):
-        return tuple(extra)
-    return sites + tuple(extra)
+    if matched:
+        if skipped:
+            logger.debug(
+                f"[{normalized}] 番号规则过滤掉 {len(skipped)} 个源：{', '.join(skipped)}"
+            )
+        return tuple(matched)
+
+    # 一个都没匹配上：番号形态很可能是规则没覆盖到的，退回通用清单
+    fallback = tuple(s for s in sites if s not in SPECIAL_SITES)
+    logger.debug(f"[{normalized}] 没有源的番号规则匹配，退回通用清单")
+    return fallback or sites
 
 
 # ----------------------------------------------------------------------
@@ -201,15 +184,26 @@ def get_code_detail(code: str) -> dict:
 
     多个站点并发抓，谁先给出结果就用谁。串行 fallback 时前一个站点
     卡住或超时，后面的要干等——两站不同域名，节流互不影响，没必要排队。
+
+    全过程打日志：选了哪些源、每个源返回什么、最终用了谁。抓不到东西时
+    光看结果分不清是"番号不存在"还是"源被规则过滤光了/全都超时"，
+    没有这些日志只能靠猜。
     """
     if not code:
         return {}
 
     sites = _sites_for_code(code)
     if not sites:
+        logger.warning(f"[{code}] 没有可用数据源，检查数据源开关与番号规则")
         return {}
+
+    logger.info(f"[{code}] 检索数据源（共 {len(sites)} 个）：{', '.join(sites)}")
+    started = time.perf_counter()
+
     if len(sites) == 1:
-        return _fetch_detail(sites[0], code)
+        detail = _fetch_detail(sites[0], code)
+        _log_detail_result(code, sites[0] if detail else "", detail, started, sites)
+        return detail
 
     from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 
@@ -220,33 +214,70 @@ def get_code_detail(code: str) -> dict:
         while pending:
             done, pending = wait(pending, return_when=FIRST_COMPLETED)
             for future in done:
+                name = futures[future]
                 try:
                     detail = future.result()
                 except Exception as exc:
-                    logger.debug(f"[{code}] {futures[future]} 抓取异常: {exc}")
+                    logger.info(f"[{code}] ← {name} 抓取异常: {exc}")
                     continue
                 if detail:
+                    _log_detail_result(code, name, detail, started, sites)
                     return detail
     finally:
         # 已经拿到结果就不等剩下的站点
         pool.shutdown(wait=False, cancel_futures=True)
+
+    _log_detail_result(code, "", {}, started, sites)
     return {}
+
+
+def _log_detail_result(
+    code: str, winner: str, detail: dict, started: float, sites: tuple[str, ...]
+) -> None:
+    """汇总一次检索的结果。"""
+    elapsed = time.perf_counter() - started
+    if not winner:
+        logger.info(
+            f"[{code}] 检索无结果，{len(sites)} 个源都没给出详情，耗时 {elapsed:.1f}s"
+        )
+        return
+
+    # 列出拿到了哪些关键字段，光说"成功"看不出数据够不够用
+    filled = [
+        name for name, value in (
+            ("标题", detail.get("title")),
+            ("日期", detail.get("release_date")),
+            ("演员", detail.get("casts")),
+            ("封面", detail.get("banner")),
+            ("类别", detail.get("genres")),
+        ) if value
+    ]
+    logger.info(
+        f"[{code}] 检索命中 {winner}，耗时 {elapsed:.1f}s，"
+        f"字段 {len(detail)} 项（{'/'.join(filled) or '无关键字段'}）"
+    )
 
 
 def _fetch_detail(site_name: str, code: str) -> dict:
     """单站抓详情，失败返回空字典。"""
+    started = time.perf_counter()
     site = _get_site(site_name)
     if site is None:
+        logger.info(f"[{code}] ← {site_name} 初始化失败（源不存在或被停用）")
         return {}
     try:
         info = site.crawler_original(code)
     except Exception as exc:
-        logger.debug(f"[{code}] {site_name} 抓取失败: {exc}")
+        elapsed = time.perf_counter() - started
+        logger.info(f"[{code}] ← {site_name} 抓取失败（{elapsed:.1f}s）: {exc}")
         return {}
 
+    elapsed = time.perf_counter() - started
     if info and info.title:
-        logger.debug(f"[{code}] 从 {site_name} 获取到详情")
+        logger.info(f"[{code}] ← {site_name} 返回详情（{elapsed:.1f}s）：{info.title[:40]}")
         return info.to_dict()
+
+    logger.info(f"[{code}] ← {site_name} 无此番号（{elapsed:.1f}s）")
     return {}
 
 

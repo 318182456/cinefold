@@ -1483,6 +1483,26 @@ class TestHboxParse:
 # 番号形态路由
 # ----------------------------------------------------------------------
 class TestCodeRouting:
+    @pytest.fixture(autouse=True)
+    def _synced(self):
+        """路由要读库里的番号规则，库是空的就只剩内置默认值兜底。
+
+        专用源（fc2/madou 等）不在 DETAIL_SITES 里，只有登记进库、被
+        enabled_parser_sources 列出来之后才会参与路由。
+        """
+        from sqlalchemy import delete
+
+        from app.database.models import DataSource
+        from app.database.session import session_scope
+        from app.modules.ladysite.sources import sync_builtin_sources
+
+        with session_scope() as session:
+            session.execute(delete(DataSource))
+        sync_builtin_sources()
+        yield
+        with session_scope() as session:
+            session.execute(delete(DataSource))
+
     def test_all_builtin_sources_have_parsers(self):
         """内置源全部接入解析，不再有只能测连通性的源。"""
         from app.modules.ladysite.sources import SOURCES
@@ -1499,20 +1519,34 @@ class TestCodeRouting:
             assert key in _SITE_CLASSES, f"{key} 未登记到 _SITE_CLASSES"
             assert _get_site(key) is not None, f"{key} 构造失败"
 
-    def test_fc2_code_only_asks_fc2_sites(self):
-        """FC2 番号在日系源上查不到，不该白开线程。"""
+    def test_fc2_code_skips_jav_sites(self):
+        """FC2 番号在日系有码源上查不到，不该白开线程。
+
+        missav/7mmtv/xchina 这类收录面广的站仍会问 —— 它们确实收 FC2。
+        """
         from app.modules.ladysite import _sites_for_code
 
         sites = _sites_for_code("FC2-PPV-1234567")
-        assert set(sites) <= {"fc2", "fc2hub", "theporndb"}
-        assert "javbus" not in sites
+        assert "fc2" in sites and "fc2hub" in sites
+        for key in ("javbus", "javdb", "dmm", "avbase"):
+            assert key not in sites
 
     def test_date_code_only_asks_uncensored_sites(self):
         from app.modules.ladysite import _sites_for_code
 
         sites = _sites_for_code("032416_267")
-        assert "carib" in sites
-        assert "javbus" not in sites
+        assert "carib" in sites and "avsox" in sites
+        for key in ("javbus", "javdb", "dmm"):
+            assert key not in sites
+
+    def test_uncensored_brand_skips_jav_sites(self):
+        """HEYZO/1PONDO 这类无码厂牌同理。"""
+        from app.modules.ladysite import _sites_for_code
+
+        for code in ("HEYZO-1234", "1PONDO-123"):
+            sites = _sites_for_code(code)
+            assert "avsox" in sites, code
+            assert "javbus" not in sites, code
 
     def test_normal_code_skips_special_sites(self):
         """普通番号不该去问只收 FC2 或日期型番号的源。"""
@@ -1534,6 +1568,15 @@ class TestCodeRouting:
 
         sites = _sites_for_code("MDX-0123")
         assert "madou" in sites and "madouqu" in sites
+        assert "javbus" not in sites
+
+    def test_prefix_match_does_not_bleed(self):
+        """MD 不能顺带命中 MDBK —— 否则 skip:MD 会把 MDBK 一起排掉。"""
+        from app.modules.ladysite import _sites_for_code
+
+        sites = _sites_for_code("MDBK-001")
+        assert "madou" in sites
+        assert "javbus" not in sites
 
     def test_theporndb_skipped_without_token(self):
         """没配 Token 时接口必然 401，不该占一个并发位。"""
@@ -1551,6 +1594,96 @@ class TestCodeRouting:
 # ----------------------------------------------------------------------
 # 抓取顺序按数据源页面上排的优先级走
 # ----------------------------------------------------------------------
+class TestCodeRuleParsing:
+    @pytest.mark.parametrize("rule,only,skip", [
+        ("only:FC2,SIRO", ["FC2", "SIRO"], []),
+        ("skip:MD,MDX", [], ["MD", "MDX"]),
+        ("only:FC2;skip:MD", ["FC2"], ["MD"]),
+        # 没写前缀时按 only 处理，那是更常见的意图
+        ("FC2,SIRO", ["FC2", "SIRO"], []),
+        # 中文逗号、空格、换行都当分隔符 —— 用户手打什么都有
+        ("only:FC2，SIRO GANA\nskip:MD", ["FC2", "SIRO", "GANA"], ["MD"]),
+        ("", [], []),
+        ("   ", [], []),
+    ])
+    def test_parse(self, rule, only, skip):
+        from app.modules.ladysite.sources import parse_code_rule
+
+        parsed = parse_code_rule(rule)
+        assert parsed["only"] == only
+        assert parsed["skip"] == skip
+
+    def test_parse_dedupes_and_uppercases(self):
+        from app.modules.ladysite.sources import parse_code_rule
+
+        assert parse_code_rule("only:fc2,FC2,Fc2-")["only"] == ["FC2"]
+
+    @pytest.mark.parametrize("code,rule,allowed", [
+        # 空规则不限制
+        ("SSIS-001", "", True),
+        # only：命中才问
+        ("FC2-PPV-1", "only:FC2", True),
+        ("SSIS-001", "only:FC2", False),
+        # skip：命中就不问
+        ("SSIS-001", "skip:FC2", True),
+        ("FC2-PPV-1", "skip:FC2", False),
+        # 日期型
+        ("032416_267", "only:date", True),
+        ("SSIS-001", "only:date", False),
+        ("032416_267", "skip:date", False),
+        # 前缀整段匹配：MD 不命中 MDBK
+        ("MDBK-001", "skip:MD", True),
+        ("MD-0180", "skip:MD", False),
+        ("MDBK-001", "skip:MDBK", False),
+        # 两者都有时 skip 优先
+        ("FC2-PPV-1", "only:FC2;skip:FC2", False),
+    ])
+    def test_code_allowed(self, code, rule, allowed):
+        from app.modules.ladysite.sources import code_allowed
+
+        assert code_allowed(code, rule) is allowed
+
+    def test_bad_rule_does_not_kill_source(self):
+        """写错的规则忽略掉而不是整条报废，否则一个笔误会让源静默失联。"""
+        from app.modules.ladysite.sources import code_allowed
+
+        # 只有冒号没有内容，等于没写规则
+        assert code_allowed("SSIS-001", "only:") is True
+        assert code_allowed("SSIS-001", ";;;") is True
+
+
+class TestCodeRuleBackfill:
+    def test_backfill_fills_null_only(self):
+        """存量行补默认规则，但用户改过的（含清空）不能被覆盖。"""
+        from sqlalchemy import delete, select
+
+        from app.database.models import DataSource
+        from app.database.session import session_scope
+        from app.modules.ladysite.sources import (
+            backfill_builtin_rules, sync_builtin_sources,
+        )
+
+        with session_scope() as session:
+            session.execute(delete(DataSource))
+        sync_builtin_sources()
+
+        with session_scope() as session:
+            # 模拟老库：一行规则为空（还没补过），一行被用户清成空串
+            javbus = session.scalar(select(DataSource).where(DataSource.key == "javbus"))
+            javbus.code_rule = None
+            fc2 = session.scalar(select(DataSource).where(DataSource.key == "fc2"))
+            fc2.code_rule = ""
+
+        backfill_builtin_rules()
+
+        with session_scope() as session:
+            javbus = session.scalar(select(DataSource).where(DataSource.key == "javbus"))
+            fc2 = session.scalar(select(DataSource).where(DataSource.key == "fc2"))
+            assert javbus.code_rule, "NULL 的行应补上默认规则"
+            assert fc2.code_rule == "", "用户清空的规则不该被写回默认值"
+            session.execute(delete(DataSource))
+
+
 class TestSourceOrdering:
     @pytest.fixture
     def synced(self):

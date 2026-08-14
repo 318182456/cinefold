@@ -16,57 +16,101 @@
 """
 from __future__ import annotations
 
+import re
+
 from loguru import logger
 from sqlalchemy import select
 
 from app.database.session import session_scope
 
-# key, 显示名, 默认地址, 解析器, 直连是否必被拦
+# 日期型番号：032416_267。与 utils.get_true_code 的归一化结果对齐
+_DATE_CODE_RE = re.compile(r"^\d{6}[-_]\d{2,4}$")
+
+# key, 显示名, 默认地址, 解析器, 直连是否必被拦, 番号路由规则
+#
+# 番号前缀分组。前缀比对是"整段匹配"（MD 不会命中 MDBK，见 _matches_token），
+# 所以每个厂牌前缀都要列全，不能靠 MD 顺带覆盖 MDBK
+_DOMESTIC = "MD,MDX,MDBK,MDSJ,MDCM,MSD,MKY,MTVQ,TM,TMW,PME,JD,JDBC,91CM,91BCM,RS,XSJ,LY"
+_UNCENSORED = ("HEYZO,CARIB,1PONDO,10MUSUME,PACO,PACOPACOMAMA,MURAMURA,"
+               "GACHINCO,TOKYOHOT,KIN8,XXXAV,C0930,H0930,H4610")
+_AMATEUR = ("SIRO,GANA,LUXU,MIUM,ARA,KNB,SCUTE,MAAN,CHN,ABW,"
+            "300MIUM,200GANA,259LUXU,261ARA,336KNB,390JAC")
+
+# 日系有码源共用的排除规则：FC2 个人投稿、日期型与厂牌无码、国产片，
+# 这几类在这些站上基本查不到，问了也是白跑一次请求 + 占一个并发位。
+# javbus/javdb 对素人番号（SIRO 等）有收录，因此不排除素人段
+_SKIP_NON_JAV = f"skip:FC2,date,{_UNCENSORED},{_DOMESTIC}"
+
 SOURCES: tuple[dict, ...] = (
     {"key": "javbus", "name": "JavBus", "host": "https://www.javbus.com",
-     "parser": "bus", "bypass_first": False},
+     "parser": "bus", "bypass_first": False, "code_rule": _SKIP_NON_JAV},
     {"key": "javdb", "name": "JavDB", "host": "https://javdb.com",
-     "parser": "javdb", "bypass_first": False, "interval": 10.0},
+     "parser": "javdb", "bypass_first": False, "interval": 10.0,
+     "code_rule": _SKIP_NON_JAV},
     {"key": "javlibrary", "name": "JavLibrary", "host": "https://www.javlibrary.com/cn",
-     "parser": "library", "bypass_first": True},
+     "parser": "library", "bypass_first": True, "code_rule": _SKIP_NON_JAV},
     {"key": "airav", "name": "Airav", "host": "https://airav.io/cn",
-     "parser": "airav", "bypass_first": True, "interval": 2.0},
+     "parser": "airav", "bypass_first": True, "interval": 2.0,
+     "code_rule": _SKIP_NON_JAV},
     {"key": "avbase", "name": "Avbase", "host": "https://www.avbase.net",
-     "parser": "avbase", "bypass_first": True, "interval": 2.0},
+     "parser": "avbase", "bypass_first": True, "interval": 2.0,
+     "code_rule": _SKIP_NON_JAV},
+    # 与 javbus 同模板同收录范围
     {"key": "avmoo", "name": "Avmoo", "host": "https://avmoo.website",
-     "parser": "avmoo", "bypass_first": False, "interval": 2.0},
+     "parser": "avmoo", "bypass_first": False, "interval": 2.0,
+     "code_rule": _SKIP_NON_JAV},
+    # 素人与无码为主：日期型番号、HEYZO/1PONDO 这类无码厂牌，以及素人段
     {"key": "avsox", "name": "Avsox", "host": "https://avsox.click",
-     "parser": "avsox", "bypass_first": False, "interval": 2.0},
+     "parser": "avsox", "bypass_first": False, "interval": 2.0,
+     "code_rule": f"only:date,{_UNCENSORED},{_AMATEUR}"},
+    # 只收日期型番号（032416_267），普通番号一律 404
     {"key": "carib", "name": "Caribbeancom", "host": "https://www.caribbeancom.com",
-     "parser": "carib", "bypass_first": False, "interval": 2.0},
+     "parser": "carib", "bypass_first": False, "interval": 2.0,
+     "code_rule": "only:date"},
+    # 日系官方站，不收 FC2 个人投稿、无码与国产片
     {"key": "dmm", "name": "DMM", "host": "https://www.dmm.co.jp",
-     "parser": "dmm", "bypass_first": False, "interval": 2.0},
+     "parser": "dmm", "bypass_first": False, "interval": 2.0,
+     "code_rule": _SKIP_NON_JAV},
+    # 只收自家投稿，反之 FC2 番号在日系源上基本查不到
     {"key": "fc2", "name": "FC2", "host": "https://adult.contents.fc2.com",
-     "parser": "fc2", "bypass_first": False, "interval": 2.0},
+     "parser": "fc2", "bypass_first": False, "interval": 2.0,
+     "code_rule": "only:FC2"},
     {"key": "fc2hub", "name": "FC2 Hub", "host": "https://javten.com",
-     "parser": "fc2hub", "bypass_first": True, "interval": 2.0},
+     "parser": "fc2hub", "bypass_first": True, "interval": 2.0,
+     "code_rule": "only:FC2"},
     # 有解析器但数据会串号，默认停用；详见 freejavbt.py 的说明
     {"key": "freejavbt", "name": "FreeJavBT", "host": "https://freejavbt.com",
      "parser": "freejavbt", "bypass_first": False, "interval": 2.0, "enabled": False},
     {"key": "hbox", "name": "Hbox", "host": "https://hbox.jp",
-     "parser": "hbox", "bypass_first": False, "interval": 2.0},
+     "parser": "hbox", "bypass_first": False, "interval": 2.0,
+     "code_rule": _SKIP_NON_JAV},
     {"key": "jav321", "name": "Jav321", "host": "https://www.jav321.com",
-     "parser": "jav321", "bypass_first": False, "interval": 1.5},
+     "parser": "jav321", "bypass_first": False, "interval": 1.5,
+     "code_rule": _SKIP_NON_JAV},
+    # 国产厂牌（麻豆、天美、蜜桃、精东等）
     {"key": "madou", "name": "Madou", "host": "https://madou.club",
-     "parser": "madou", "bypass_first": False, "interval": 2.0},
+     "parser": "madou", "bypass_first": False, "interval": 2.0,
+     "code_rule": f"only:{_DOMESTIC}"},
     {"key": "madouqu", "name": "Madouqu", "host": "https://madouqu.com",
-     "parser": "madouqu", "bypass_first": True, "interval": 2.0},
+     "parser": "madouqu", "bypass_first": True, "interval": 2.0,
+     "code_rule": f"only:{_DOMESTIC}"},
+    # 素人系官方站，这类番号在二手站上信息往往缺失或错乱
     {"key": "mgstage", "name": "MGStage", "host": "https://www.mgstage.com",
-     "parser": "mgstage", "bypass_first": True, "interval": 2.0},
+     "parser": "mgstage", "bypass_first": True, "interval": 2.0,
+     "code_rule": f"only:{_AMATEUR}"},
+    # 收录面广（有码、FC2、国产都有），只排掉日期型无码
     {"key": "missav", "name": "MissAV", "host": "https://missav123.com",
-     "parser": "missav", "bypass_first": True, "interval": 2.0},
+     "parser": "missav", "bypass_first": True, "interval": 2.0,
+     "code_rule": "skip:date"},
     {"key": "7mmtv", "name": "7mmTV", "host": "https://7mmtv.sx/zh",
-     "parser": "7mmtv", "bypass_first": True, "interval": 2.0},
+     "parser": "7mmtv", "bypass_first": True, "interval": 2.0,
+     "code_rule": "skip:date"},
     # 需要 API Token 才能用（填在 Cookie 栏），没配等于抓不到，默认停用
     {"key": "theporndb", "name": "ThePornDB", "host": "https://api.theporndb.net",
      "parser": "theporndb", "bypass_first": False, "interval": 1.5, "enabled": False},
     {"key": "xchina", "name": "XChina", "host": "https://xchina.co",
-     "parser": "xchina", "bypass_first": False, "interval": 2.0},
+     "parser": "xchina", "bypass_first": False, "interval": 2.0,
+     "code_rule": "skip:date"},
 )
 
 SOURCE_MAP: dict[str, dict] = {item["key"]: item for item in SOURCES}
@@ -89,6 +133,80 @@ VERIFY_MARKS: tuple[str, ...] = ("age_check", "age-check", "driver-verify")
 # javbus 首页固定跳 /doc/driver-verify（过盾也一样），而详情页可直接抓，
 # 所以拿一个真实番号页当探针。
 CHECK_PATH: dict[str, str] = {"javbus": "/SSIS-001"}
+
+
+# ----------------------------------------------------------------------
+# 番号路由规则
+# ----------------------------------------------------------------------
+# 规则控制"哪些番号该问这个源"。抓取时多个源并发跑，拿 SSIS-001 去问只收
+# FC2 的站是必然的 404 —— 白费一次请求，还占掉一个并发位（见
+# ladysite.MAX_PARALLEL_SITES 的说明）。
+#
+# 语法（填在数据源页面的「番号规则」里）：
+#   only:FC2,SIRO   只有这些前缀的番号才问这个源
+#   skip:MD,MDX     这些前缀的番号不问这个源
+#   date            日期型番号（032416_267）
+#   only:FC2;skip:X 两条用分号分隔
+# 空规则表示不限制。前缀比对在 get_true_code 归一化之后做，大小写不敏感。
+_RULE_DATE = "date"
+
+
+def parse_code_rule(rule: str) -> dict[str, list[str]]:
+    """把规则文本解析成 {"only": [...], "skip": [...]}。
+
+    容错优先：这是用户在文本框里手打的，写错的部分忽略掉而不是整条报废，
+    否则一个笔误会让整个源静默不参与抓取。
+    """
+    out: dict[str, list[str]] = {"only": [], "skip": []}
+    if not rule:
+        return out
+
+    # 分号、换行都当分隔符 —— 用户多半会换行写
+    for chunk in re.split(r"[;\n]+", rule):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+
+        kind, _, raw = chunk.partition(":")
+        kind = kind.strip().lower()
+        # 没写 only:/skip: 前缀时按 only 处理，那是更常见的意图
+        if kind not in ("only", "skip"):
+            kind, raw = "only", chunk
+
+        for token in re.split(r"[,，\s]+", raw):
+            token = token.strip().upper().rstrip("-")
+            if token and token not in out[kind]:
+                out[kind].append(token)
+
+    return out
+
+
+def _matches_token(code: str, token: str) -> bool:
+    """番号是否命中某个前缀 token。code 应已过 get_true_code。"""
+    if token == _RULE_DATE.upper():
+        return bool(_DATE_CODE_RE.match(code))
+    # 前缀匹配到分隔符或数字为止：MD 不该命中 MDBK，否则 skip:MD 会
+    # 顺带把 MDBK 也排除掉
+    return bool(re.match(rf"^{re.escape(token)}(?=[-_\d]|$)", code))
+
+
+def code_allowed(code: str, rule: str) -> bool:
+    """按规则判断这个番号该不该问对应的源。
+
+    只有 only 时：命中才问。只有 skip 时：命中就不问。
+    两者都有时 skip 优先 —— 排除是更强的意图。
+    """
+    parsed = parse_code_rule(rule)
+    only, skip = parsed["only"], parsed["skip"]
+    if not only and not skip:
+        return True
+
+    code = (code or "").upper()
+    if skip and any(_matches_token(code, t) for t in skip):
+        return False
+    if only:
+        return any(_matches_token(code, t) for t in only)
+    return True
 
 
 def is_builtin(key: str) -> bool:
@@ -124,12 +242,41 @@ def sync_builtin_sources() -> int:
                 interval=item.get("interval", 0.0),
                 priority=index,
                 bypass_first=item.get("bypass_first", False),
+                code_rule=item.get("code_rule") or None,
             ))
             added += 1
 
     if added:
         logger.info(f"已登记 {added} 个内置数据源")
+
+    backfill_builtin_rules()
     return added
+
+
+def backfill_builtin_rules() -> int:
+    """给存量的内置源补上默认番号规则。
+
+    番号规则是后加的字段，老库里这些行早就存在，sync_builtin_sources 不会
+    回头改它们 —— 不补的话升级上来的用户拿不到任何路由优化。
+
+    只补 NULL 的行：用户自己改过（哪怕改成空串表示"不限制"）就不该覆盖。
+    """
+    from app.database.models import DataSource
+
+    filled = 0
+    with session_scope() as session:
+        rows = session.scalars(
+            select(DataSource).where(DataSource.code_rule.is_(None))
+        ).all()
+        for row in rows:
+            rule = SOURCE_MAP.get(row.key, {}).get("code_rule")
+            if rule:
+                row.code_rule = rule
+                filled += 1
+
+    if filled:
+        logger.info(f"已为 {filled} 个内置数据源补上默认番号规则")
+    return filled
 
 
 def restore_builtin_source(key: str) -> bool:
@@ -155,6 +302,7 @@ def restore_builtin_source(key: str) -> bool:
                 interval=item.get("interval", 0.0),
                 priority=index,
                 bypass_first=item.get("bypass_first", False),
+                code_rule=item.get("code_rule") or None,
             ))
             return True
 
@@ -165,6 +313,7 @@ def restore_builtin_source(key: str) -> bool:
         row.interval = item.get("interval", 0.0)
         row.priority = index
         row.bypass_first = item.get("bypass_first", False)
+        row.code_rule = item.get("code_rule") or None
         # 连通性结果是删除前的旧数据，留着会误导
         row.status = None
         row.status_message = None
@@ -191,13 +340,20 @@ def get_source(key: str) -> dict | None:
                 "interval": row.interval,
                 "cookie": row.cookie or "",
                 "bypass_first": row.bypass_first,
+                "code_rule": row.code_rule or "",
                 "parser": SOURCE_MAP.get(key, {}).get("parser", ""),
             }
 
     item = SOURCE_MAP.get(key)
     if item is None:
         return None
-    return {**item, "enabled": True, "cookie": "", "interval": item.get("interval", 0.0)}
+    return {
+        **item,
+        "enabled": True,
+        "cookie": "",
+        "interval": item.get("interval", 0.0),
+        "code_rule": item.get("code_rule", ""),
+    }
 
 
 def _check_direct(url: str, timeout: float, key: str = "") -> tuple[str, str]:
@@ -344,6 +500,7 @@ def enabled_parser_sources() -> list[dict]:
                 "interval": row.interval,
                 "cookie": row.cookie or "",
                 "bypass_first": row.bypass_first,
+                "code_rule": row.code_rule or "",
                 "parser": parser,
             })
         return out

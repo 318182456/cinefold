@@ -248,6 +248,7 @@ function open(item) {
     priority: item.priority,
     cookie: '',
     bypass_first: item.bypass_first,
+    code_rule: item.code_rule || '',
   }
 }
 
@@ -370,6 +371,13 @@ onMounted(load)
               </span>
               <span v-if="item.has_cookie" class="badge bg-gray-800 text-gray-400">
                 已配 Cookie
+              </span>
+              <span
+                v-if="item.code_rule"
+                class="badge max-w-[9rem] truncate bg-indigo-950 text-indigo-300"
+                :title="`番号规则：${item.code_rule}`"
+              >
+                {{ item.code_rule.startsWith('only') ? '限定番号' : '排除番号' }}
               </span>
               <button
                 class="btn-ghost ml-auto px-2 py-0.5 text-[11px]"
@@ -506,6 +514,23 @@ onMounted(load)
             />
             清除已配置的 Cookie
           </label>
+        </div>
+
+        <div>
+          <label class="label">番号规则</label>
+          <input
+            v-model="draft.code_rule"
+            class="input font-mono text-xs"
+            placeholder="留空表示不限制"
+          />
+          <!-- 抓取时多个源并发跑，拿 SSIS-001 去问只收 FC2 的站是必然的
+               404，白占一个并发位。规则就是用来剪掉这些组合的 -->
+          <p class="mt-1 text-[11px] leading-relaxed text-gray-600">
+            控制哪些番号会问这个源。<code class="text-gray-500">only:FC2,SIRO</code>
+            只问这些前缀；<code class="text-gray-500">skip:MD,MDX</code> 排除这些前缀；
+            <code class="text-gray-500">date</code> 指日期型番号（032416_267）。
+            两条可用 <code class="text-gray-500">;</code> 分隔。
+          </p>
         </div>
 
         <label class="flex items-center gap-2">

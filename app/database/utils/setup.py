@@ -65,6 +65,9 @@ def update_database() -> None:
         ("user", "token", "TEXT"),
         # FALSE 而非 0：PostgreSQL 的 boolean 列不接受整数字面量
         ("datasource", "deleted", "BOOLEAN NOT NULL DEFAULT FALSE"),
+        # 番号路由规则。存量行为空，等于「不限制」；内置源的默认规则由
+        # sync_builtin_sources 补，见 sources.backfill_builtin_rules
+        ("datasource", "code_rule", "TEXT"),
         # 目标目录改为可填任意绝对路径。旧规则该列为空，回退到 target_subdir
         ("watch_dir", "target_dir", "VARCHAR(500) NOT NULL DEFAULT ''"),
         # 直通模式：不建硬链接，只登记关联。存量规则一律为假，行为不变
