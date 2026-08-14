@@ -141,17 +141,26 @@ def crawling(site: PTSite, keyword: str) -> list[Torrent]:
 def crawling_checked(site: PTSite, keyword: str) -> tuple[bool, list[Torrent]]:
     """单站搜索，返回 (是否问成, 种子)。
 
-    站点未配置或抛异常都算没问成 —— 这两种情况返回的空列表不代表
-    "站上没有这个番号"，不能当作结论。
+    站点未配置、抛异常、或自报搜索失败都算没问成 —— 这几种情况返回的
+    空列表不代表"站上没有这个番号"，不能当作结论缓存下来。
+
+    各站的 search() 都在内部吞掉异常返回空列表（网络错误、鉴权失败都
+    一样），光靠这里的 try/except 抓不到，所以要额外看 search_failed。
     """
     if not getattr(site, "enabled", True):
         logger.debug(f"[{site.name}] 未配置，跳过")
         return False, []
     try:
-        return True, site.search(keyword) or []
+        torrents = site.search(keyword) or []
     except Exception as exc:
         logger.warning(f"[{site.name}] 搜索 {keyword} 失败: {exc}")
         return False, []
+
+    # 站点自报的失败标记。没实现这个属性的站按"问成了"处理，
+    # 与加这个机制之前的行为一致
+    if getattr(site, "search_failed", False):
+        return False, torrents
+    return True, torrents
 
 
 def search_pt_detailed(

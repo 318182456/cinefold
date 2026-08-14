@@ -25,6 +25,9 @@ class MTeam:
         self.api_key = api_key or settings.mteam_api_key
         self.proxy = settings.proxy or None
         self._host: str | None = None
+        # 最近一次 search 是否失败。search 内部吞异常返回空列表，
+        # 调用方靠这个区分"站上没有"和"没问成"（见 crawling_checked）
+        self.search_failed = False
 
     @property
     def enabled(self) -> bool:
@@ -86,7 +89,9 @@ class MTeam:
             return False, str(exc)
 
     def search(self, keyword: str) -> list[Torrent]:
+        self.search_failed = False
         if not self.enabled:
+            self.search_failed = True
             return []
 
         try:
@@ -106,12 +111,14 @@ class MTeam:
 
             if not _is_success(payload):
                 logger.warning(f"[MTeam] 搜索失败: {payload.get('message')}")
+                self.search_failed = True
                 return []
 
             items = ((payload.get("data") or {}).get("data")) or []
             return [self._convert(item, keyword) for item in items]
         except Exception as exc:
             logger.warning(f"[MTeam] 搜索异常: {exc}")
+            self.search_failed = True
             return []
 
     def _convert(self, item: dict, code: str) -> Torrent:

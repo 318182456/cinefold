@@ -39,6 +39,9 @@ def add_keyword_param(target: str, keyword: str) -> str:
 class BT:
     name = "BT"
 
+    # 最近一次 search 是否失败，见 ptsite.crawling_checked
+    search_failed = False
+
     def __init__(self, url: str = "", method: str = "", headers: str = "", body: str = ""):
         settings = get_settings()
         self.url = url or settings.bt_url
@@ -63,7 +66,9 @@ class BT:
 
     # ------------------------------------------------------------------
     def search(self, keyword: str) -> list[Torrent]:
+        self.search_failed = False
         if not self.enabled:
+            self.search_failed = True
             return []
 
         url = add_keyword_param(self.url, keyword)
@@ -83,6 +88,7 @@ class BT:
                 data = response.json()
         except Exception as exc:
             logger.warning(f"[BT] 请求失败: {exc}")
+            self.search_failed = True
             return []
 
         items = data.get("data") if isinstance(data, dict) else data

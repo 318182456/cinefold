@@ -32,6 +32,9 @@ TOKEN_REFRESH_MARGIN = 300
 class Rousi:
     name = "Rousi"
 
+    # 最近一次 search 是否失败，见 ptsite.crawling_checked
+    search_failed = False
+
     # 登录换来的 token 存在类上：get_sites() 每次搜索都会新建实例，
     # 存在实例里等于每搜一个番号就重新登录一次
     _shared_token: str = ""
@@ -181,7 +184,9 @@ class Rousi:
 
     # ------------------------------------------------------------------
     def search(self, keyword: str) -> list[Torrent]:
+        self.search_failed = False
         if not self.enabled:
+            self.search_failed = True
             return []
 
         code = get_true_code(keyword) or keyword
@@ -189,10 +194,12 @@ class Rousi:
             payload = self._get("/torrent/search", {"query": code, "page": 0})
         except Exception as exc:
             logger.warning(f"[Rousi] 搜索异常: {exc}")
+            self.search_failed = True
             return []
 
         if payload.get("code") != 0:
             logger.warning(f"[Rousi] 搜索失败: {payload.get('message')}")
+            self.search_failed = True
             return []
 
         items = self._extract_items(payload.get("data"))

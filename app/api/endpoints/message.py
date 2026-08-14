@@ -253,7 +253,9 @@ def _dispatch_command(text: str) -> str:
         code = get_true_code(argument)
         if not code:
             return "用法: /search 番号"
-        torrents = services.search_torrents(code)
+        # 同页面检索，不套过滤规则：这里问的是"站上有什么"，
+        # 不是"该自动下哪个"
+        torrents = services.search_torrents(code, use_filter=False)
         if not torrents:
             return f"{code} 未搜到资源"
         lines = [f"🔍 {code} 找到 {len(torrents)} 个资源，前 5 条："]

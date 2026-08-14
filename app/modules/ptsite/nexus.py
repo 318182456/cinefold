@@ -36,6 +36,10 @@ class NexusSite:
     host = ""
     search_path = "/torrents.php"
 
+    # 最近一次 search 是否失败。search 内部吞异常返回空列表，调用方靠这个
+    # 区分"站上没有"和"没问成"（见 ptsite.crawling_checked）
+    search_failed = False
+
     # 熔断状态按站点名共享：每次搜索都新建实例，存实例上等于没有
     _breakers: dict[str, list] = {}
     _breaker_lock = threading.Lock()
@@ -74,6 +78,9 @@ class NexusSite:
         return False
 
     def _record_failure(self, reason: str) -> None:
+        # 本次搜索没问成。熔断计数是站点级共享的，这个标记只针对本次调用
+        # （见 ptsite.crawling_checked）
+        self.search_failed = True
         state = self._breaker()
         state[0] += 1
         if state[0] >= FAILURE_THRESHOLD and not state[1]:
@@ -110,11 +117,14 @@ class NexusSite:
 
     # ------------------------------------------------------------------
     def search(self, keyword: str) -> list[Torrent]:
+        self.search_failed = False
         if not self.enabled:
+            self.search_failed = True
             return []
 
         # 站点已知不可用时直接跳过，不然每个订阅都会去撞一次
         if self._is_tripped():
+            self.search_failed = True
             return []
 
         try:

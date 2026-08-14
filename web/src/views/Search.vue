@@ -199,7 +199,7 @@ const sizeText = (mb) => (mb >= 1024 ? `${(mb / 1024).toFixed(2)} GB` : `${mb.to
 
       <!-- 检索结果缓存 30 分钟，命中空缓存时点上面的「重新搜索」是唯一的出路 -->
       <p v-else-if="!torrents.length" class="text-sm text-gray-500">
-        没搜到种子，可点「重新搜索」跳过缓存再试
+        各站点都没有这个番号的种子，可点「重新搜索」跳过缓存再试
       </p>
 
       <div v-else class="overflow-x-auto">

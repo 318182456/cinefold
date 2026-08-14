@@ -1212,6 +1212,50 @@ class TestFilter:
         assert result[0].uhd is True
 
 
+class TestFilterReasons:
+    """被过滤的原因要能从日志里看出来，否则十几个配置项只能靠猜。"""
+
+    def _capture(self, items, config):
+        from loguru import logger
+
+        lines = []
+        sink = logger.add(lambda m: lines.append(m), level="INFO")
+        try:
+            filter_torrents(items, config)
+        finally:
+            logger.remove(sink)
+        return "\n".join(lines)
+
+    def test_reason_names_the_rule(self):
+        out = self._capture([_t(id=1, free=False)], {"only_free": True})
+        assert "only_free" in out
+
+    def test_reason_includes_actual_values(self):
+        """光说"做种不够"还得回头翻配置，得带上实际数字。"""
+        out = self._capture([_t(id=1, seeders=3)], {"min_seeders": "10"})
+        assert "3" in out and "10" in out
+
+    def test_size_reason_includes_both_sides(self):
+        out = self._capture([_t(id=1, size_mb=2454)], {"max_size": "2GB"})
+        assert "2454" in out and "2048" in out
+
+    def test_warns_when_everything_filtered(self):
+        """全被挡掉时用户面对空列表，日志得升级成 warning。"""
+        from loguru import logger
+
+        levels = []
+        sink = logger.add(lambda m: levels.append(m.record["level"].name), level="INFO")
+        try:
+            filter_torrents([_t(id=1, free=False)], {"only_free": True})
+        finally:
+            logger.remove(sink)
+        assert "WARNING" in levels
+
+    def test_no_reason_log_when_nothing_filtered(self):
+        out = self._capture([_t(id=1, free=True)], {"only_free": True})
+        assert "过滤掉" not in out
+
+
 class TestSort:
     def test_free_first(self):
         items = [_t(id=1, free=False), _t(id=2, free=True)]

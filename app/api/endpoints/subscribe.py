@@ -92,10 +92,15 @@ def search_codes(keyword: str, current_user: str = Depends(get_current_user)):
 def search_torrents(
     code: str, refresh: bool = False, current_user: str = Depends(get_current_user)
 ):
-    """搜索番号对应的种子。refresh=true 跳过缓存强制重搜。"""
+    """搜索番号对应的种子。refresh=true 跳过缓存强制重搜。
+
+    不套过滤规则：那套条件是给自动选种用的（"该下哪个"），而人工检索
+    问的是"站上有什么"。拿订阅口味把列表筛空，用户只会对着空页面猜
+    是没资源还是配置太严 —— 挑哪个种子，让他自己看着列表决定。
+    """
     from app import services
     torrents = services.search_torrents(
-        get_true_code(code) or code, refresh=refresh
+        get_true_code(code) or code, use_filter=False, refresh=refresh
     )
     return ResponseEntity.ok({"items": [t.to_dict() for t in torrents]})
 

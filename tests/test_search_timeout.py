@@ -111,6 +111,32 @@ class TestSearchSuccessCount:
         torrents, ok, total = search_pt_detailed("X", sites=sites, timeout=5)
         assert (torrents, ok, total) == ([], 0, 1)
 
+    def test_self_reported_failure_not_counted(self):
+        """站点内部吞掉异常返回空列表时，靠 search_failed 上报。"""
+        from app.modules.ptsite import search_pt_detailed
+
+        site = _FakeSite("Quiet", 0.01, [])
+        site.search_failed = True
+        torrents, ok, total = search_pt_detailed("X", sites=[site], timeout=5)
+        assert (torrents, ok, total) == ([], 0, 1)
+
+    def test_site_without_the_attribute_counts_as_success(self):
+        """没实现 search_failed 的站点按问成处理，保持旧行为。"""
+        from app.modules.ptsite import search_pt_detailed
+
+        class _Bare:
+            name = "Bare"
+            enabled = True
+
+            def search(self, keyword):
+                return []
+
+            def download_seed(self, torrent):
+                return None
+
+        torrents, ok, total = search_pt_detailed("X", sites=[_Bare()], timeout=5)
+        assert (torrents, ok, total) == ([], 1, 1)
+
 
 class TestEmptyResultCaching:
     """全站失败时的空结果不该被缓存成结论。"""

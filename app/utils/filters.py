@@ -35,6 +35,9 @@ VR_RE = re.compile(
 
 SIZE_RE = re.compile(r"^\s*([\d.]+)\s*(gb|mb|g|m)?\s*$", re.IGNORECASE)
 
+# 逐条打被过滤原因，热门番号一次能搜出几十个种子，全打会刷屏
+MAX_LOGGED_REASONS = 10
+
 
 def has_chinese(title: str) -> bool:
     if not title:
@@ -114,6 +117,10 @@ def filter_torrents(
     max_seeders = _parse_int(config.get("max_seeders"))
 
     out: list[Torrent] = []
+    # 被挡的原因逐条记下来。"过滤: 5 → 0" 这种汇总看不出该松哪一条，
+    # 配置项有十几个，靠猜要试很多轮
+    reasons: list[str] = []
+
     for torrent in torrents:
         title = torrent.title or ""
 
@@ -123,41 +130,55 @@ def filter_torrents(
         uhd = torrent.uhd or has_uhd(title)
         vr = torrent.vr or has_vr(title)
 
+        # 命中即出局。带上实际值 —— 只说"体积不合要求"还得回头翻配置
         if only_chinese and not chinese:
-            continue
-        if only_uc and not uc:
-            continue
-        if exclude_uc and uc:
-            continue
-        if only_uhd and not uhd:
-            continue
-        if exclude_uhd and uhd:
-            continue
-        if only_vr and not vr:
-            continue
-        if exclude_vr and vr:
-            continue
-        if only_free and not torrent.free:
-            continue
-        if include_keywords and not _match_keywords(title, include_keywords):
-            continue
-        if exclude_keywords and _match_keywords(title, exclude_keywords):
-            continue
-        if min_size and torrent.size_mb < min_size:
-            continue
-        if max_size and torrent.size_mb > max_size:
-            continue
+            reason = "only_chinese: 无中文字幕"
+        elif only_uc and not uc:
+            reason = "only_uc: 非无码"
+        elif exclude_uc and uc:
+            reason = "exclude_uc: 是无码"
+        elif only_uhd and not uhd:
+            reason = "only_uhd: 非 4K"
+        elif exclude_uhd and uhd:
+            reason = "exclude_uhd: 是 4K"
+        elif only_vr and not vr:
+            reason = "only_vr: 非 VR"
+        elif exclude_vr and vr:
+            reason = "exclude_vr: 是 VR"
+        elif only_free and not torrent.free:
+            reason = "only_free: 非免费种"
+        elif include_keywords and not _match_keywords(title, include_keywords):
+            reason = f"include_keywords: 标题不含 {include_keywords}"
+        elif exclude_keywords and _match_keywords(title, exclude_keywords):
+            reason = f"exclude_keywords: 标题命中 {exclude_keywords}"
+        elif min_size and torrent.size_mb < min_size:
+            reason = f"min_size: {torrent.size_mb:.0f}MB < {min_size:.0f}MB"
+        elif max_size and torrent.size_mb > max_size:
+            reason = f"max_size: {torrent.size_mb:.0f}MB > {max_size:.0f}MB"
         # 做种数太少下不动，太多的往往是老片合集
-        if min_seeders and torrent.seeders < min_seeders:
-            continue
-        if max_seeders and torrent.seeders > max_seeders:
+        elif min_seeders and torrent.seeders < min_seeders:
+            reason = f"min_seeders: {torrent.seeders} < {min_seeders}"
+        elif max_seeders and torrent.seeders > max_seeders:
+            reason = f"max_seeders: {torrent.seeders} > {max_seeders}"
+        else:
+            # 回填推断结果，后续排序直接用
+            torrent.chinese, torrent.uc, torrent.uhd, torrent.vr = chinese, uc, uhd, vr
+            out.append(torrent)
             continue
 
-        # 回填推断结果，后续排序直接用
-        torrent.chinese, torrent.uc, torrent.uhd, torrent.vr = chinese, uc, uhd, vr
-        out.append(torrent)
+        reasons.append(f"[{torrent.site}] {title[:40]} —— {reason}")
 
     logger.debug(f"过滤: {len(torrents)} → {len(out)}")
+    if reasons:
+        # 全被挡掉时升级成 warning：这时候用户面对的是空列表，
+        # 日志是唯一能告诉他"该松哪一条"的地方
+        log = logger.warning if not out else logger.info
+        log(
+            f"过滤掉 {len(reasons)} 个种子：\n  "
+            + "\n  ".join(reasons[:MAX_LOGGED_REASONS])
+            + (f"\n  …另有 {len(reasons) - MAX_LOGGED_REASONS} 条"
+               if len(reasons) > MAX_LOGGED_REASONS else "")
+        )
     return out
 
 
