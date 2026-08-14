@@ -125,6 +125,12 @@ export const batchDeleteMediaLinks = (payload) =>
 // 批量只删记录，不碰文件
 export const batchDropMediaLinkRecords = (linkPaths) =>
   http.post('/medialinks/batch-record', { link_paths: linkPaths })
+// 从 History 反推重建缺失的关联记录。要扫整个媒体库，放宽超时
+export const recoverMediaLinks = (dryRun = true) =>
+  http.post('/medialinks/recover', null, {
+    params: { dry_run: dryRun },
+    timeout: 600000,
+  })
 
 // ---------------------------------------------------------------- 监控目录
 export const listWatchDirs = () => http.get('/watchdirs')

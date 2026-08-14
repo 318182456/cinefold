@@ -29,6 +29,7 @@
 """
 from __future__ import annotations
 
+import os
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -266,6 +267,172 @@ def scan_orphans(refresh_gone_time: bool = True) -> list[dict]:
             f"种子已删 {sum(1 for o in orphans if o['torrent_gone'])}"
         )
     return orphans
+
+
+def recover_records(dry_run: bool = True) -> dict:
+    """从 History 反推，重建被误删的 media_link 记录。
+
+    针对的是「误点了删记录」：那个操作只删库里的关联行，文件与种子都还在，
+    但对应关系丢了 —— 媒体库里的文件从此不受联动删除管辖，Emby 里删掉它
+    不会再删源文件与种子。
+
+    为什么能重建：删掉的是 media_link，History 一行没动。而建链接时
+    source_path 就被一并写进了 History.save_path（见 watchdir._record_torrents），
+    番号又能从媒体库的文件名提出来，两边按 code 一对就配上了。
+
+    配对口径：
+        媒体库文件  /库/日本AV/笠木いちか/AGMX-259 笠木いちか/AGMX-259-有码.mp4
+                    └─ find_serial_number 提出 AGMX-259
+        History     code=AGMX-259 → save_path=/下载/日本AV/AGMX-259/hhd800.com@AGMX-259.mp4
+
+    源文件路径推不出来只能靠 History：它带着站点前缀（hhd800.com@），
+    与链接侧的命名毫无关系。
+
+    与 adopt_scrape_dir 的分工：那个按 inode 配对，要求源文件当前还在，
+    针对的是「从没登记过」的既存文件；这个按 History 配对，源文件已经删了
+    也能重建，针对的是「登记过但记录被误删」。两者互补，都跑一遍覆盖面最全。
+
+    dry_run 默认为真 —— 重建的是反向删除的依据，配错了等于把删除权指向
+    错误的源文件。先让用户看清配对结果。
+    """
+    from app.core.config import get_settings
+    from app.utils import find_serial_number
+
+    settings = get_settings()
+    scrape_dir = (settings.medialink_scrape_dir or "").strip() \
+        or settings.medialink_library_path
+
+    result: dict = {
+        "scrape_dir": scrape_dir,
+        "dry_run": dry_run,
+        "total": 0,
+        "recovered": [],
+        "unmatched": [],
+        "errors": [],
+    }
+    if not scrape_dir:
+        result["errors"].append(
+            "未配置刮削输出目录（MEDIALINK_SCRAPE_DIR）与媒体库根目录"
+        )
+        return result
+
+    root = Path(scrape_dir)
+    if not root.is_dir():
+        result["errors"].append(f"刮削输出目录不存在或不可读: {scrape_dir}")
+        return result
+
+    # 已登记的跳过：只补真正缺失的那些，不动现有记录
+    with session_scope() as session:
+        registered = {
+            _norm(p) for (p,) in session.execute(
+                select(MediaLink.link_path)
+            ).all() if p
+        }
+
+    from app.services.medialink import VIDEO_SUFFIXES
+
+    pending: list[Path] = []
+    try:
+        for path in root.rglob("*"):
+            try:
+                suffix = path.suffix.lower()
+                if suffix not in VIDEO_SUFFIXES or not path.is_file():
+                    continue
+            except OSError:
+                continue
+            # .strm 只是一行 URL 的文本文件，指向站外资源，本来就没有源文件
+            # 与种子。给它建关联毫无意义，还会在一览里刷一堆永远配不上的条目
+            if suffix == ".strm":
+                continue
+            # 预告片同理：刮削工具生成的附属内容，不是下载来的正片
+            if "trailer" in path.stem.lower():
+                continue
+            if _norm(str(path)) not in registered:
+                pending.append(path)
+    except OSError as exc:
+        result["errors"].append(f"扫描媒体库失败: {exc}")
+        return result
+
+    result["total"] = len(pending)
+    if not pending:
+        return result
+
+    # code → save_path。同一番号可能有多条 History（转种），取第一条非空的 ——
+    # 转种只是换了个种子，文件还是那个文件，save_path 都一样
+    codes = {
+        c for c in (find_serial_number(p.stem) or find_serial_number(p.parent.name)
+                    for p in pending) if c
+    }
+    saved: dict[str, str] = {}
+    if codes:
+        with session_scope() as session:
+            code_list = list(codes)
+            for start in range(0, len(code_list), 500):
+                for code, path in session.execute(
+                    select(History.code, History.save_path).where(
+                        History.code.in_(code_list[start:start + 500])
+                    )
+                ).all():
+                    if path and code not in saved:
+                        saved[code] = path
+
+    plan: list[dict] = []
+    for link in pending:
+        code = find_serial_number(link.stem) or find_serial_number(link.parent.name)
+        if not code:
+            result["unmatched"].append({
+                "link_path": str(link), "reason": "文件名里提不出番号",
+            })
+            continue
+        source = saved.get(code)
+        if not source:
+            result["unmatched"].append({
+                "link_path": str(link),
+                "reason": f"History 里没有 {code} 的源文件路径",
+            })
+            continue
+        plan.append({
+            "code": code,
+            "link_path": str(link),
+            "source_path": source,
+            # 源文件此刻多半已经不在（正是它进孤儿一览的原因），如实标出来
+            "source_exists": _exists(source),
+        })
+
+    result["recovered"] = plan
+    if dry_run or not plan:
+        return result
+
+    now = datetime.now()
+    with session_scope() as session:
+        for row in plan:
+            # 源文件还在就取 inode，取不到留空 —— _register 也是这个口径。
+            # inode 为空时按路径匹配，功能不受影响
+            try:
+                st = os.stat(row["source_path"])
+                inode, device = (st.st_ino or None), (st.st_dev or None)
+            except OSError:
+                inode, device = None, None
+
+            existing = session.get(MediaLink, row["link_path"])
+            if existing is not None:
+                continue  # 期间被别处登记了，不覆盖
+            session.add(MediaLink(
+                link_path=row["link_path"],
+                code=row["code"],
+                source_path=row["source_path"],
+                inode=inode,
+                device=device,
+                # 源文件已经不在的，直接把删除时间补上，免得下一轮扫描
+                # 才发现、把时间记成「重建那一刻」
+                source_gone_time=None if row["source_exists"] else now,
+            ))
+
+    logger.warning(
+        f"记录重建完成 —— 恢复 {len(plan)} 条，"
+        f"未配上 {len(result['unmatched'])} 条"
+    )
+    return result
 
 
 def _persist_gone_time(

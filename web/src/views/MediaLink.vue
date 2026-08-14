@@ -3,7 +3,7 @@ import { computed, onMounted, ref } from 'vue'
 import {
   batchDeleteMediaLinks, batchDropMediaLinkRecords, deleteMediaLink,
   dropMediaLinkRecord, getMediaLinkStats, listMediaLinkOrphans, listMediaLinks,
-  previewMediaLinkDelete, pruneMediaLinks, registerMediaLink,
+  previewMediaLinkDelete, pruneMediaLinks, recoverMediaLinks, registerMediaLink,
 } from '@/api'
 import { useToast } from '@/composables/useToast'
 import LoadingBlock from '@/components/LoadingBlock.vue'
@@ -366,6 +366,37 @@ async function dropRecord(item) {
   }
 }
 
+// ---------------------------------------------------------------- 记录重建
+// 误删记录后的补救：按 History.save_path 把关联配回来。
+// 先演练看配对结果，确认无误再落库 —— 重建的是反向删除的依据
+const recoverPreview = ref(null)
+const recovering = ref(false)
+
+async function askRecover() {
+  recovering.value = true
+  try {
+    recoverPreview.value = await recoverMediaLinks(true)
+  } catch (err) {
+    toast.error(err.message)
+  } finally {
+    recovering.value = false
+  }
+}
+
+async function confirmRecover() {
+  recovering.value = true
+  try {
+    const data = await recoverMediaLinks(false)
+    toast.success(`已重建 ${(data.recovered || []).length} 条关联`)
+    recoverPreview.value = null
+    await Promise.all([load(), reloadStats()])
+  } catch (err) {
+    toast.error(err.message)
+  } finally {
+    recovering.value = false
+  }
+}
+
 async function prune() {
   try {
     const data = await pruneMediaLinks()
@@ -454,8 +485,12 @@ onMounted(() => {
       <button
         v-if="!isOrphan"
         class="btn-ghost ml-auto px-3 py-1.5 text-xs"
-        @click="prune"
+        :disabled="recovering"
+        @click="askRecover"
       >
+        {{ recovering ? '扫描中…' : '重建缺失记录' }}
+      </button>
+      <button v-if="!isOrphan" class="btn-ghost px-3 py-1.5 text-xs" @click="prune">
         清理失效记录
       </button>
       <button
@@ -968,6 +1003,79 @@ onMounted(() => {
             @click="runBatchDropRecords"
           >
             {{ batching ? '处理中…' : `确认删除 ${pickedCount} 条记录` }}
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 记录重建的配对结果 -->
+    <div
+      v-if="recoverPreview"
+      class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+      @click.self="recoverPreview = null"
+    >
+      <div class="card max-h-[80vh] w-full max-w-lg space-y-3 overflow-y-auto">
+        <p class="text-sm font-medium text-gray-200">重建缺失的关联记录</p>
+        <p class="text-[11px] text-gray-500">
+          按番号从下载历史里找回源文件路径。补的是「纳入管理」配不上的那批 ——
+          那个要求源文件当前还在下载器里，这个源文件已删也能重建。
+        </p>
+
+        <div class="flex flex-wrap gap-2 text-[11px]">
+          <span class="badge bg-gray-800 text-gray-400">
+            未登记 {{ recoverPreview.total }}
+          </span>
+          <span class="badge bg-emerald-950/60 text-emerald-300">
+            可重建 {{ (recoverPreview.recovered || []).length }}
+          </span>
+          <span class="badge bg-gray-800 text-gray-500">
+            配不上 {{ (recoverPreview.unmatched || []).length }}
+          </span>
+        </div>
+
+        <div v-if="(recoverPreview.recovered || []).length" class="space-y-1">
+          <p class="text-[11px] text-gray-400">将重建（显示前 10 条）</p>
+          <div
+            v-for="row in recoverPreview.recovered.slice(0, 10)"
+            :key="row.link_path"
+            class="rounded bg-gray-900/60 px-2 py-1.5"
+          >
+            <p class="font-mono text-[11px] text-brand">
+              {{ row.code }}
+              <span v-if="!row.source_exists" class="text-red-400">（源文件已删）</span>
+            </p>
+            <p class="truncate text-[11px] text-gray-500" :title="row.link_path">
+              {{ fileName(row.link_path) }}
+            </p>
+            <p class="truncate text-[11px] text-gray-600" :title="row.source_path">
+              → {{ row.source_path }}
+            </p>
+          </div>
+          <p
+            v-if="recoverPreview.recovered.length > 10"
+            class="text-[11px] text-gray-600"
+          >
+            还有 {{ recoverPreview.recovered.length - 10 }} 条…
+          </p>
+        </div>
+
+        <p
+          v-if="(recoverPreview.errors || []).length"
+          class="rounded-lg bg-red-950/40 px-3 py-2 text-[11px] text-red-300"
+        >
+          {{ recoverPreview.errors.join('; ') }}
+        </p>
+
+        <div class="flex justify-end gap-2 pt-1">
+          <button class="btn-ghost px-3 py-1.5 text-xs" @click="recoverPreview = null">
+            取消
+          </button>
+          <button
+            class="btn-primary px-3 py-1.5 text-xs"
+            :disabled="recovering || !(recoverPreview.recovered || []).length"
+            @click="confirmRecover"
+          >
+            {{ recovering ? '重建中…' : `确认重建 ${(recoverPreview.recovered || []).length} 条` }}
           </button>
         </div>
       </div>

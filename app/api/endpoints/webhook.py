@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import re
+from pathlib import Path
 
 from fastapi import APIRouter, Request
 from loguru import logger
@@ -200,6 +201,19 @@ async def emby_webhook(request: Request):
     if not link_path and not code:
         logger.warning(f"Emby 回调缺少路径与番号，无法定位，已忽略。收到字段: {list(data)}")
         return ResponseEntity.fail("缺少 path 或 number", code=400)
+
+    # 目录级删除事件：Emby 删完影片后，空掉的演员/系列目录也会各来一条回调，
+    # 路径指向目录、番号为空。这类事件本就不该有关联记录，走下去只会在日志里
+    # 刷一堆「未找到关联记录」的 WARNING，把真正失效的联动淹掉。
+    #
+    # 判据是「没有番号 + 路径没有影片扩展名」：两个条件都满足才算目录。
+    # 只看扩展名会误伤 .strm，只看番号会误伤命名不规范的影片文件
+    if not code and link_path:
+        from app.services.medialink import VIDEO_SUFFIXES
+
+        if Path(link_path).suffix.lower() not in VIDEO_SUFFIXES:
+            logger.info(f"Emby 回调为目录级删除事件，忽略: {link_path}")
+            return ResponseEntity.ok({"ignored": True, "reason": "目录级事件"})
 
     dry_run = str(
         request.query_params.get("dry_run") or data.get("dry_run") or ""

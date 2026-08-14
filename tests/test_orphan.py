@@ -494,3 +494,169 @@ def test_no_batch_scope_keeps_original_behaviour(tmp_path, monkeypatch):
 
     # 没有批作用域，两次删除各查各的
     assert calls.count("list") == 2, f"无缓存时应各查一次: {calls}"
+
+
+# ---------------------------------------------------------------- 记录重建
+@pytest.fixture
+def scrape_dir(tmp_path, monkeypatch):
+    """把刮削输出目录指向 tmp，并返回它。"""
+    from app.core.config import get_settings
+
+    library = tmp_path / "library"
+    library.mkdir(parents=True, exist_ok=True)
+    settings = get_settings()
+    monkeypatch.setattr(settings, "medialink_library_path", str(library))
+    monkeypatch.setattr(settings, "medialink_scrape_dir", "")
+    return library
+
+
+def test_recover_rebuilds_from_history(scrape_dir, tmp_path, no_downloader):
+    """误删记录后，按 History.save_path 把关联重建回来。
+
+    这是「点错了删记录」的补救路径：文件与种子都还在，只是对应关系没了。
+    """
+    from app.services.orphan import recover_records
+
+    movie = scrape_dir / "笠木いちか" / "AGMX-259 笠木いちか"
+    movie.mkdir(parents=True)
+    link = movie / "AGMX-259-有码.mp4"
+    link.write_bytes(b"x" * 1024)
+
+    # History 还在 —— 删记录只删 media_link，没碰这张表
+    source = tmp_path / "downloads" / "hhd800.com@AGMX-259.mp4"
+    source.parent.mkdir(parents=True)
+    with session_scope() as session:
+        session.add(History(
+            hash="a" * 40, code="AGMX-259", save_path=str(source),
+        ))
+
+    preview = recover_records(dry_run=True)
+    assert preview["total"] == 1
+    assert len(preview["recovered"]) == 1
+    assert preview["recovered"][0]["code"] == "AGMX-259"
+    assert preview["recovered"][0]["source_path"] == str(source)
+    # 演练不写库
+    with session_scope() as session:
+        assert session.query(MediaLink).count() == 0
+
+    recover_records(dry_run=False)
+    with session_scope() as session:
+        row = session.get(MediaLink, str(link))
+        assert row is not None
+        assert row.code == "AGMX-259"
+        assert row.source_path == str(source)
+
+
+def test_recover_marks_gone_time_when_source_missing(scrape_dir, tmp_path, no_downloader):
+    """源文件已经不在时，重建的同时把删除时间补上。
+
+    不补的话要等下一轮扫描才发现，时间会被记成「重建那一刻」，不是真实的
+    消失时刻 —— 虽然真实时刻已无从考证，但至少不该是个明显错误的值。
+    """
+    from app.services.orphan import recover_records
+
+    movie = scrape_dir / "ABS-001"
+    movie.mkdir(parents=True)
+    link = movie / "ABS-001.mp4"
+    link.write_bytes(b"x" * 1024)
+
+    with session_scope() as session:
+        session.add(History(
+            hash="b" * 40, code="ABS-001", save_path="/gone/abs-001.mp4",
+        ))
+
+    plan = recover_records(dry_run=True)
+    assert plan["recovered"][0]["source_exists"] is False
+
+    recover_records(dry_run=False)
+    with session_scope() as session:
+        row = session.get(MediaLink, str(link))
+        assert row.source_gone_time is not None
+
+
+def test_recover_skips_strm_and_trailers(scrape_dir, no_downloader):
+    """.strm 与预告片不该被纳管 —— 它们本来就没有源文件与种子。"""
+    from app.services.orphan import recover_records
+
+    movie = scrape_dir / "SDMU-963"
+    movie.mkdir(parents=True)
+    (movie / "SDMU-963-Trailer.strm").write_text("http://example.com/x")
+    (movie / "SDMU-963-Trailer.mp4").write_bytes(b"x")
+
+    with session_scope() as session:
+        session.add(History(hash="c" * 40, code="SDMU-963", save_path="/x/y.mp4"))
+
+    result = recover_records(dry_run=True)
+    assert result["total"] == 0
+    assert result["recovered"] == []
+
+
+def test_recover_leaves_existing_records_alone(scrape_dir, tmp_path, no_downloader):
+    """已登记的记录不动 —— 只补真正缺失的那些。"""
+    from app.services.orphan import recover_records
+
+    movie = scrape_dir / "ABS-001"
+    movie.mkdir(parents=True)
+    link = movie / "ABS-001.mp4"
+    link.write_bytes(b"x" * 1024)
+
+    with session_scope() as session:
+        session.add(MediaLink(
+            link_path=str(link), code="ABS-001", source_path="/original/path.mp4",
+        ))
+        session.add(History(hash="d" * 40, code="ABS-001", save_path="/other/x.mp4"))
+
+    result = recover_records(dry_run=True)
+    assert result["total"] == 0
+
+    with session_scope() as session:
+        # 原记录的 source_path 没被覆盖
+        assert session.get(MediaLink, str(link)).source_path == "/original/path.mp4"
+
+
+def test_recover_reports_unmatched(scrape_dir, no_downloader):
+    """History 里查不到源路径的，如实报告而不是硬造一条。"""
+    from app.services.orphan import recover_records
+
+    movie = scrape_dir / "ZZZ-999"
+    movie.mkdir(parents=True)
+    (movie / "ZZZ-999.mp4").write_bytes(b"x")
+
+    result = recover_records(dry_run=True)
+    assert result["recovered"] == []
+    assert len(result["unmatched"]) == 1
+    assert "ZZZ-999" in result["unmatched"][0]["reason"]
+
+
+# ---------------------------------------------------------------- 目录级事件
+def test_directory_delete_event_ignored(monkeypatch):
+    """Emby 删完影片后，空掉的演员目录也会来一条回调，应当直接忽略。
+
+    这类事件路径指向目录、番号为空，本就不该有关联记录。走下去只会在日志里
+    刷「未找到关联记录」的 WARNING，把真正失效的联动淹掉。
+    """
+    from fastapi.testclient import TestClient
+
+    from app.api import create_app
+    from app.core.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "medialink_webhook_token", "")
+
+    called: list[str] = []
+
+    import app.api.endpoints.webhook as wh
+    monkeypatch.setattr(
+        wh, "handle_media_deleted",
+        lambda *a, **k: called.append("hit") or wh.handle_media_deleted,
+    )
+
+    with TestClient(create_app()) as client:
+        resp = client.post("/api/v1/webhook/emby", json={
+            "Event": "library.deleted",
+            "Item": {"Path": "/volume3/h_video/日本AV/风间由美"},
+        })
+
+    assert resp.status_code == 200
+    assert resp.json()["data"]["ignored"] is True
+    # 删除流程压根没被调用
+    assert called == []

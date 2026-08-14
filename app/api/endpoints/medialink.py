@@ -338,6 +338,26 @@ def list_orphans(
     })
 
 
+@router.post("/recover")
+def recover_medialinks(
+    dry_run: bool = True, current_user: str = Depends(get_current_user)
+):
+    """从 History 反推，重建缺失的 media_link 记录。
+
+    补的是「纳入管理」配不上的那批：那个按 inode 配对，要求源文件当前还在
+    下载器里；这个按 History.save_path 配对，源文件已经删了也能重建。
+
+    dry_run 默认为真 —— 重建的是反向删除的依据，配错了等于把删除权指向
+    错误的源文件。先看清配对结果再落库。
+    """
+    from app.services.orphan import recover_records
+
+    result = recover_records(dry_run=dry_run)
+    if not dry_run:
+        _drop_stats_cache()
+    return ResponseEntity.ok(result)
+
+
 @router.get("/stats")
 def medialink_stats(
     check_missing: bool = True, current_user: str = Depends(get_current_user)
