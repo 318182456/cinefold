@@ -75,7 +75,12 @@ def download_seed_by_url(
     if not url:
         return None
 
+    from app.utils import clean_header_value
+
     request_headers = {"User-Agent": "Mozilla/5.0 cinefold"}
+    # 清换行：粘贴进来的 Cookie 常带首尾换行，原样进 header 会让 httpx
+    # 拒绝整个请求，种子下不下来却报成网络异常
+    cookie = clean_header_value(cookie)
     if cookie:
         request_headers["Cookie"] = cookie
     request_headers.update(headers or {})

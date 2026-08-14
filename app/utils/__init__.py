@@ -236,6 +236,26 @@ def get_torrent_hash(content: bytes) -> str:
         return hashlib.sha1(content).hexdigest()
 
 
+def clean_header_value(value: str) -> str:
+    """清掉 header 值里的换行与首尾空白。
+
+    从浏览器 DevTools 复制 Cookie 时很容易带上前后的换行，粘进配置框后
+    原样进了 header，httpx 会直接拒绝整个请求：
+
+        Illegal header value b'\\nPHPSESSID=...'
+
+    报错里那个 \\n 不显眼，看着像站点或番号的问题，实际是配置值脏了 ——
+    一个换行就让这个数据源的所有请求全废，且每次都以「请求异常」的形式
+    出现，很难联想到是复制粘贴带进来的。
+
+    换行不能只 strip 首尾：值中间的 \\r\\n 是 HTTP 头注入的经典载体，
+    必须整体去掉。Cookie / UA 内部本来也不该有换行，去掉不损坏合法值。
+    """
+    if not value:
+        return ""
+    return value.replace("\r", "").replace("\n", "").strip()
+
+
 def to_cookie_dict(cookie: str) -> dict:
     """"a=1; b=2" → {"a": "1", "b": "2"}"""
     out: dict[str, str] = {}

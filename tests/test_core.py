@@ -9,6 +9,7 @@ import pytest
 
 from app.schemas.torrent import Torrent
 from app.utils import (
+    clean_header_value,
     find_serial_number,
     find_serial_numbers,
     get_magnet_hash,
@@ -1309,6 +1310,29 @@ class TestMisc:
 
     def test_cookie_dict(self):
         assert to_cookie_dict("a=1; b=2") == {"a": "1", "b": "2"}
+
+    @pytest.mark.parametrize("raw, expected", [
+        # 从 DevTools 复制 Cookie 常带首尾换行，原样进 header 会让 httpx
+        # 拒绝整个请求：Illegal header value b'\nPHPSESSID=...'
+        ("\nPHPSESSID=abc; existmag=mag", "PHPSESSID=abc; existmag=mag"),
+        ("  a=1; b=2  \n", "a=1; b=2"),
+        # 值中间的换行是 HTTP 头注入的载体，不能只 strip 首尾
+        ("a=1\r\nX-Injected: evil", "a=1X-Injected: evil"),
+        ("", ""),
+        (None, ""),
+    ])
+    def test_clean_header_value(self, raw, expected):
+        assert clean_header_value(raw) == expected
+
+    def test_site_client_headers_reject_nothing(self):
+        """脏 cookie 清洗后必须能被 httpx 接受，否则整个数据源全废。"""
+        import httpx
+
+        from app.modules.ladysite.base import SiteClient
+
+        headers = SiteClient("https://x.com", cookie="\nPHPSESSID=abc").headers()
+        assert headers["Cookie"] == "PHPSESSID=abc"
+        httpx.Headers(headers)  # 非法值会在这里抛异常
 
     def test_torrent_roundtrip(self):
         original = _t(id=7, title="X", chinese=True)

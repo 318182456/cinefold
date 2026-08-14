@@ -15,6 +15,7 @@ import httpx
 from loguru import logger
 
 from app.core.config import get_settings
+from app.utils import clean_header_value
 
 # bypass 服务类型探测结果缓存：{base_url: 是否为 FlareSolverr}
 _BYPASS_KIND: dict[str, bool] = {}
@@ -91,6 +92,8 @@ class ActorInfo:
         return {k: v for k, v in data.items() if v} if skip_empty else data
 
 
+
+
 class SiteClient:
     """带限速的 HTTP 客户端。
 
@@ -164,8 +167,9 @@ class SiteClient:
             "Accept-Language": "zh-CN,zh;q=0.9,ja;q=0.8,en;q=0.7",
             "Referer": f"{self.host}/",
         }
-        if self.cookie:
-            base["Cookie"] = self.cookie
+        cookie = clean_header_value(self.cookie)
+        if cookie:
+            base["Cookie"] = cookie
         base.update(extra or {})
         return base
 

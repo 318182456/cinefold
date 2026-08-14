@@ -15,6 +15,9 @@ const checking = ref('')
 const checkingAll = ref(false)
 const editing = ref(null)
 const draft = ref({})
+// 显式清除 Cookie。不能靠「输入框留空」表达 —— 框里从不回显已有值，
+// 留空是常态，那样每次只改间隔都会把 cookie 误清
+const clearCookie = ref(false)
 const creating = ref(false)
 const newSource = ref({})
 const removingKey = ref('')
@@ -146,6 +149,7 @@ const editingItem = computed(
 
 function open(item) {
   editing.value = item.key
+  clearCookie.value = false
   draft.value = {
     host: item.host,
     interval: item.interval,
@@ -158,14 +162,20 @@ function open(item) {
 async function save() {
   const key = editing.value
   const payload = { ...draft.value }
-  // 留空表示不改 cookie，避免把已配置的清掉
-  if (!payload.cookie) delete payload.cookie
+  // Cookie 框打开时不回显已有值（避免泄露到页面上），所以「留空」只能
+  // 表示「不修改」—— 否则每次只改间隔都会把 cookie 误清掉。
+  // 想真的清除得走 clearCookie 这个显式开关
+  if (clearCookie.value) {
+    payload.cookie = ''
+  } else if (!payload.cookie) {
+    delete payload.cookie
+  }
   payload.interval = Number(payload.interval) || 0
   payload.priority = Number(payload.priority) || 0
 
   try {
     await updateDataSource(key, payload)
-    toast.success('已保存')
+    toast.success(clearCookie.value ? '已保存，Cookie 已清除' : '已保存')
     editing.value = null
     await load()
   } catch (err) {
@@ -362,9 +372,23 @@ onMounted(load)
           <textarea
             v-model="draft.cookie"
             class="input font-mono text-xs"
+            :disabled="clearCookie"
             rows="2"
             placeholder="留空表示不修改"
           />
+          <!-- 输入框不回显已有值，所以「留空」只能表示不修改。
+               清除得有个显式开关，否则配错的 cookie 永远删不掉 -->
+          <label
+            v-if="editingItem?.has_cookie"
+            class="mt-1.5 flex items-center gap-2 text-[11px] text-gray-400"
+          >
+            <input
+              v-model="clearCookie"
+              type="checkbox"
+              class="h-3.5 w-3.5 accent-red-500"
+            />
+            清除已配置的 Cookie
+          </label>
         </div>
 
         <label class="flex items-center gap-2">

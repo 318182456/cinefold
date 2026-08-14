@@ -18,6 +18,7 @@ from pyquery import PyQuery
 from app.core.config import get_settings
 from app.modules.ptsite import convert_to_mb, download_seed_by_url
 from app.schemas.torrent import Torrent
+from app.utils import clean_header_value
 from app.utils.filters import has_chinese, has_uc, has_uhd
 
 # free 的标识在不同站点分别用图片 alt、span class 或背景色表示
@@ -96,7 +97,10 @@ class NexusSite:
 
     def _headers(self) -> dict:
         return {
-            "Cookie": self.cookie,
+            # 清换行：从 DevTools 复制的 Cookie 常带首尾换行，原样进 header
+            # 会让 httpx 拒绝整个请求（Illegal header value），报错看着
+            # 像站点故障而不是配置脏了
+            "Cookie": clean_header_value(self.cookie),
             "User-Agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                 "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"
