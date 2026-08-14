@@ -202,22 +202,41 @@ async def emby_webhook(request: Request):
         logger.warning(f"Emby 回调缺少路径与番号，无法定位，已忽略。收到字段: {list(data)}")
         return ResponseEntity.fail("缺少 path 或 number", code=400)
 
-    # 目录级删除事件：Emby 删完影片后，空掉的演员/系列目录也会各来一条回调，
-    # 路径指向目录、番号为空。这类事件本就不该有关联记录，走下去只会在日志里
-    # 刷一堆「未找到关联记录」的 WARNING，把真正失效的联动淹掉。
-    #
-    # 判据是「没有番号 + 路径没有影片扩展名」：两个条件都满足才算目录。
-    # 只看扩展名会误伤 .strm，只看番号会误伤命名不规范的影片文件
-    if not code and link_path:
-        from app.services.medialink import VIDEO_SUFFIXES
-
-        if Path(link_path).suffix.lower() not in VIDEO_SUFFIXES:
-            logger.info(f"Emby 回调为目录级删除事件，忽略: {link_path}")
-            return ResponseEntity.ok({"ignored": True, "reason": "目录级事件"})
-
     dry_run = str(
         request.query_params.get("dry_run") or data.get("dry_run") or ""
     ).lower() in ("1", "true", "yes")
+
+    # 路径指向目录（没有番号 + 没有影片扩展名）的回调有两种，磁盘上分不出来
+    # —— 回调到达时 Emby 已经删完了，两种情况要么不存在要么是空目录：
+    #
+    #   1. 一部影片就是一个目录：DVD 目录结构、合集里每部片各占一个子目录。
+    #      联动必须照走，否则种子里那些文件永远不会被标记为不需要。
+    #   2. 影片删完后空掉的演员 / 系列目录，Emby 会各补一条回调。这类目录
+    #      本就没有关联记录，走下去只会刷「未找到关联记录」的 WARNING。
+    #
+    # 库里能分：第 1 种查得到目录下的关联记录，第 2 种查不到。查得到就按
+    # 查出来的影片逐个联动，查不到才静默忽略。
+    #
+    # 判据两个条件都要满足：只看扩展名会误伤 .strm，只看番号会误伤命名
+    # 不规范的影片文件
+    if not code and link_path:
+        from app.services.medialink import VIDEO_SUFFIXES, lookup_links_under_dir
+
+        if Path(link_path).suffix.lower() not in VIDEO_SUFFIXES:
+            videos = await run_in_threadpool(lookup_links_under_dir, link_path)
+            if not videos:
+                logger.info(f"Emby 回调为目录级删除事件且目录下无关联记录，忽略: {link_path}")
+                return ResponseEntity.ok({"ignored": True, "reason": "目录级事件"})
+
+            logger.info(
+                f"Emby 回调路径指向目录，其下有 {len(videos)} 条关联记录，"
+                f"逐个联动: {link_path}"
+            )
+            results = []
+            for video in videos:
+                r = await run_in_threadpool(handle_media_deleted, video, "", dry_run)
+                results.append(r.as_dict())
+            return ResponseEntity.ok({"dir_path": link_path, "items": results})
 
     result = await run_in_threadpool(
         handle_media_deleted, link_path, code or "", dry_run

@@ -315,7 +315,9 @@ def backfill(watch_id: int = 0, current_user: str = Depends(get_current_user)):
 
 @router.post("/adopt-scrape")
 def adopt_scrape(
-    dry_run: bool = True, current_user: str = Depends(get_current_user)
+    dry_run: bool = True,
+    fallback_passthrough: bool = False,
+    current_user: str = Depends(get_current_user),
 ):
     """把刮削输出目录里已存在但没登记的影片纳入管理。
 
@@ -323,10 +325,17 @@ def adopt_scrape(
     刮削工具建好的那批链接因此一直在管辖范围之外，Emby 里删掉不会联动
     删源文件与种子。这个接口按 inode 把它们配回下载器里的源文件。
 
+    fallback_passthrough 为真时，配不到源文件的那批登记成直通模式，让 Emby
+    删掉它们时至少能删掉文件本身。代价是没有种子线索，回收不了下载器空间 ——
+    inode 配不上不等于源文件真的不在，建议先跑默认配对与 rebuild-from-history，
+    两轮都配不上的再降级。
+
     dry_run 默认为真：登记结果是反向删除的依据，配错等于把删除权指向错误的
     源文件，必须先让用户核对配对结果。
     """
-    return ResponseEntity.ok(adopt_scrape_dir(dry_run=dry_run))
+    return ResponseEntity.ok(adopt_scrape_dir(
+        dry_run=dry_run, fallback_passthrough=fallback_passthrough,
+    ))
 
 
 @router.get("/holds")

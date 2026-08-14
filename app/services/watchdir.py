@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -436,6 +437,37 @@ def _unlink(path: Path) -> tuple[bool, str]:
 # ----------------------------------------------------------------------
 # 单个规则的同步
 # ----------------------------------------------------------------------
+# 每条规则一把锁，保证同一规则同时只跑一轮对账。
+#
+# 触发 sync_rule 的路径有三条，彼此完全独立、都可能在同一时刻到达：
+#   1. watchdog 事件（防抖 5s 后）—— 只挡得住「同一规则的连续事件」，
+#      挡不住它与下面两条撞车
+#   2. 定时任务的 sync_all（默认 30 分钟一轮）
+#   3. 用户在页面上点「全部对账」/ 单条对账
+#
+# 三者共用同一份 media_link 与磁盘状态，没有锁时会真的互相打架：
+# 一轮正判定「该删链接了」，另一轮同时在为同一个源文件建链接，来回拉锯；
+# 更糟的是两轮同时走到反向删除，对同一批文件各执行一次删除动作。
+#
+# 用「拿不到就跳过」而不是排队等待：这是对账，不是必须逐次执行的任务 ——
+# 已经有一轮在跑，它看到的就是最新状态，后来者再跑一遍纯属重复劳动。
+# 排队反而会让事件风暴堆出一长串等待中的对账，全部跑完要很久。
+_rule_locks: dict[int, threading.Lock] = {}
+# 保护 _rule_locks 本身的增删。锁的创建必须原子，否则两个线程可能各自
+# 建一把锁，互斥就失效了
+_rule_locks_guard = threading.Lock()
+
+
+def _rule_lock(rule_id: int) -> threading.Lock:
+    """取这条规则的锁，没有就建一把。"""
+    with _rule_locks_guard:
+        lock = _rule_locks.get(rule_id)
+        if lock is None:
+            lock = threading.Lock()
+            _rule_locks[rule_id] = lock
+        return lock
+
+
 def _existing_links(rule: WatchDir, base: Path) -> dict[str, MediaLink]:
     """取这条规则已登记的关联，按 link_path 索引。
 
@@ -463,7 +495,30 @@ def sync_rule(rule_id: int, dry_run: bool = False) -> SyncResult:
 
     第 2、3 类靠「记录在不在」区分：记录存在说明这条关联曾经建立过，
     现在某一侧文件消失了，才需要判断是哪一侧先没的。
+
+    同一规则同时只跑一轮（见 _rule_locks）。已有一轮在跑时直接返回，
+    不排队 —— 那一轮看到的就是最新状态，再跑一遍是重复劳动。
+
+    演练不占锁：它不改任何东西，没有互斥的必要，而且用户点演练时后台
+    很可能正跑着定时对账，占锁会让演练白白失败。
     """
+    if dry_run:
+        return _sync_rule_locked(rule_id, dry_run=True)
+
+    lock = _rule_lock(rule_id)
+    if not lock.acquire(blocking=False):
+        logger.info(f"[监控目录] 规则 {rule_id} 正在对账中，本次触发跳过")
+        result = SyncResult(watch_id=rule_id, dry_run=dry_run)
+        result.skipped.append("上一轮对账尚未结束，本次跳过")
+        return result
+    try:
+        return _sync_rule_locked(rule_id, dry_run=dry_run)
+    finally:
+        lock.release()
+
+
+def _sync_rule_locked(rule_id: int, dry_run: bool = False) -> SyncResult:
+    """sync_rule 的实际实现。调用方负责持有该规则的锁。"""
     result = SyncResult(watch_id=rule_id, dry_run=dry_run)
 
     with session_scope() as session:
@@ -1523,7 +1578,9 @@ def _record_probe(pending: list[dict], mapping: dict, now: datetime) -> None:
             )
 
 
-def adopt_scrape_dir(dry_run: bool = True) -> dict:
+def adopt_scrape_dir(
+    dry_run: bool = True, fallback_passthrough: bool = False,
+) -> dict:
     """把刮削输出目录里「已存在但没登记」的影片纳入管理。
 
     针对的是启用 cinefold 之前刮削工具就建好的那批链接：文件在媒体库里，
@@ -1551,9 +1608,25 @@ def adopt_scrape_dir(dry_run: bool = True) -> dict:
     dry_run 默认为真：这个操作会写 media_link，而 media_link 是反向删除的
     依据 —— 配错了等于把删除权指向错误的源文件。先让用户看清配对结果。
 
-    返回 {"adopted": [...], "unmatched": [...], "skipped": [...], "total": N}。
+    fallback_passthrough 为真时，配不到源文件的那批降级登记成直通模式
+    （source_path == link_path，媒体库里那个文件自己就是源文件）：
+
+        效果   Emby 删掉它时联动能真正删掉这个文件，不再是管辖范围之外。
+        代价   没有种子线索，删了也回收不了下载器里的空间。
+
+    默认关闭是有意的。inode 配不上不等于源文件真的不在下载器里 ——
+    跨文件系统复制过、被重新建过硬链接、NAS 快照都会让 inode 对不上。
+    这种情况下登记成直通，等于主动放弃那条种子线索：以后 Emby 删掉它，
+    源文件与种子会永远留在下载器里占空间，且再没有记录能追回来。
+
+    所以正确的用法是先跑一遍默认配对，再跑 rebuild_from_history 按
+    History.save_path 补一轮（源文件已删也能重建），两轮都配不上的
+    才值得降级直通。
+
+    返回 {"adopted": [...], "passthrough": [...], "unmatched": [...],
+          "skipped": [...], "total": N}。
     """
-    from app.modules.downloadclient import find_torrents_by_path
+    from app.modules.downloadclient import all_torrent_files_with_hashes
     from app.utils import find_serial_number
 
     settings = get_settings()
@@ -1562,8 +1635,10 @@ def adopt_scrape_dir(dry_run: bool = True) -> dict:
     result: dict = {
         "scrape_dir": scrape_dir,
         "dry_run": dry_run,
+        "fallback_passthrough": fallback_passthrough,
         "total": 0,
         "adopted": [],
+        "passthrough": [],
         "unmatched": [],
         "skipped": [],
         "errors": [],
@@ -1626,16 +1701,18 @@ def adopt_scrape_dir(dry_run: bool = True) -> dict:
     if not by_inode:
         return result
 
-    # 下载器里全部种子的文件清单 —— 一次全量拉取，这也是 find_torrents_by_path
-    # 内部本来就要做的事，顺带把 hash 一起拿到
-    source_files = _all_torrent_files()
+    # 下载器里全部种子内文件 → hash 的映射，一趟拉完。
+    #
+    # 从前这里是「_all_torrent_files() 取路径」+「find_torrents_by_path()
+    # 把 hash 找回来」两趟全量拉取 —— 第一趟内部已经读到过 hash 却只返回
+    # 路径，第二趟纯属重建它刚扔掉的信息。种子上千、文件数万时白等一倍
+    torrent_map = all_torrent_files_with_hashes()
+    source_files = list(torrent_map)
     if not source_files:
         result["errors"].append(
             "下载器里没有取到任何种子文件，无法反查源文件。"
             "请确认下载器已配置且可连通"
         )
-
-    torrent_map = find_torrents_by_path(source_files) if source_files else {}
 
     matched: dict[tuple[int, int], str] = {}
     for source in source_files:
@@ -1650,13 +1727,20 @@ def adopt_scrape_dir(dry_run: bool = True) -> dict:
             matched.setdefault(key, source)
 
     plan: list[dict] = []
+    # 配不到源文件的降级方案，与 plan 分开攒：两者登记方式相同，但
+    # 前者有种子线索、后者没有，报给用户时必须能分清各是多少条
+    passthrough_plan: list[dict] = []
+
     for key, links in by_inode.items():
         source = matched.get(key)
-        if source is None:
-            for path in links:
-                result["unmatched"].append({"link_path": str(path)})
-            continue
         for path in links:
+            if source is None and not fallback_passthrough:
+                result["unmatched"].append({"link_path": str(path)})
+                continue
+
+            # 提不出番号一律跳过，直通也不例外。硬造一个 code 会在
+            # media_link 里留下永远对不上号的脏记录，而直通登记的
+            # code 同样要参与订阅去重与反查，不是可以随便填的字段
             code = find_serial_number(path.stem) or find_serial_number(
                 path.parent.name
             )
@@ -1665,6 +1749,17 @@ def adopt_scrape_dir(dry_run: bool = True) -> dict:
                     "link_path": str(path), "reason": "文件名里提不出番号",
                 })
                 continue
+
+            if source is None:
+                # 直通：自己就是源文件，没有种子
+                passthrough_plan.append({
+                    "code": code,
+                    "link_path": str(path),
+                    "source_path": str(path),
+                    "torrents": [],
+                })
+                continue
+
             plan.append({
                 "code": code,
                 "link_path": str(path),
@@ -1673,7 +1768,8 @@ def adopt_scrape_dir(dry_run: bool = True) -> dict:
             })
 
     result["adopted"] = plan
-    if dry_run or not plan:
+    result["passthrough"] = passthrough_plan
+    if dry_run or not (plan or passthrough_plan):
         return result
 
     with session_scope() as session:
@@ -1690,45 +1786,24 @@ def adopt_scrape_dir(dry_run: bool = True) -> dict:
                 f"{row['link_path']}，种子 {len(row['torrents'])} 个"
             )
 
+        for row in passthrough_plan:
+            # 不调 _record_torrents：没配到源文件就没有种子，
+            # 调了只会拿 link_path 去下载器再白查一轮
+            _register(
+                row["code"], row["source_path"], row["link_path"], session=session
+            )
+            mark_completed(row["code"], session=session)
+            logger.info(
+                f"[{row['code']}] 纳入管理（直通，无种子线索）: {row['link_path']}"
+            )
+
     logger.info(
         f"刮削输出目录纳管完成：登记 {len(plan)} 条，"
+        f"直通登记 {len(passthrough_plan)} 条，"
         f"未配到源文件 {len(result['unmatched'])} 条，"
         f"跳过 {len(result['skipped'])} 条"
     )
     return result
-
-
-def _all_torrent_files() -> list[str]:
-    """下载器里全部种子包含的文件路径，去重保序。
-
-    adopt_scrape_dir 用它当源文件候选集：媒体库里的链接要配回源文件，
-    而「源文件在哪」只有下载器知道 —— 猜下载根目录会漏掉「完成后移动」
-    到别处的、分类目录各异的、多个下载器的。
-    """
-    from app.modules.downloadclient import get_download_client, list_configured_clients
-
-    found: list[str] = []
-    seen: set[str] = set()
-    for name in list_configured_clients():
-        client = get_download_client(name)
-        if client is None:
-            continue
-        monitor = getattr(client, "monitor_torrent", None)
-        lister = getattr(client, "list_torrent_files", None)
-        if monitor is None or lister is None:
-            continue
-        try:
-            hashes = [t.get("hash", "") for t in monitor() if t.get("hash")]
-            for path in lister(hashes):
-                if path and path not in seen:
-                    seen.add(path)
-                    found.append(path)
-        except Exception as exc:
-            logger.warning(f"{name} 读取全部种子文件清单异常: {exc}")
-
-    if found:
-        logger.info(f"下载器里共 {len(found)} 个种子内文件，作为源文件候选")
-    return found
 
 
 def _norm_path(path: str) -> str:

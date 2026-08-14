@@ -17,7 +17,8 @@ class DownloadClient(Protocol):
     # 迅雷未实现，调用方需先探测该方法是否存在
     def control_torrent(self, action: str, hashes: Sequence[str]) -> list[str]: ...
     def list_torrent_files(self, hashes: Sequence[str]) -> list[str]: ...
-    def find_torrents_by_path(self, paths: Sequence[str]) -> dict[str, list[str]]: ...
+    # paths 传 None 表示不过滤，返回下载器里全部文件的映射
+    def find_torrents_by_path(self, paths: Sequence[str] | None) -> dict[str, list[str]]: ...
     # 迅雷未实现，调用方需先探测该方法是否存在
     def unwant_torrent_files(
         self, torrent_hash: str, paths: Sequence[str]
@@ -72,6 +73,42 @@ def find_torrents_by_path_checked(
                     bucket.append(h)
 
     return merged, answered
+
+
+def all_torrent_files_with_hashes() -> dict[str, list[str]]:
+    """下载器里全部种子内文件 → 种子 hash 的完整映射，一趟拉完。
+
+    存在的理由是省掉一次全量拉取。调用方（adopt_scrape_dir）原先要:
+
+        _all_torrent_files()        取全部文件路径 —— 内部已经读到了 hash，却只返回路径
+        find_torrents_by_path(...)  为了把 hash 找回来，再全量拉一遍
+
+    两趟拉的是同一份数据，第二趟纯属重建第一趟刚扔掉的信息。种子上千、
+    文件数万时每趟十几秒，白等一倍。
+
+    各下载器的 find_torrents_by_path 本来就是「全量拉取建索引，再拿待查
+    路径去命中」，唯一与路径有关的只有最后那道命中过滤。paths 传 None
+    即表示不过滤、全都要，于是同一次拉取直接产出完整映射。
+    """
+    merged: dict[str, list[str]] = {}
+    for name in list_configured_clients():
+        client = get_download_client(name)
+        if client is None:
+            continue
+        finder = getattr(client, "find_torrents_by_path", None)
+        if finder is None:
+            continue  # 该下载器未实现反查，跳过
+        try:
+            result = finder(None)
+        except Exception as exc:
+            logger.warning(f"{name} 读取全部种子文件映射异常: {exc}")
+            continue
+        for path, hashes in result.items():
+            bucket = merged.setdefault(path, [])
+            for h in hashes:
+                if h not in bucket:
+                    bucket.append(h)
+    return merged
 
 
 def get_download_client(name: str = "") -> DownloadClient | None:

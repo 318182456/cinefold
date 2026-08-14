@@ -290,6 +290,92 @@ def test_sync_is_idempotent(rule):
     assert again.errors == []
 
 
+def test_concurrent_sync_of_same_rule_runs_once(rule):
+    """同一规则并发触发时只跑一轮，后来者跳过。
+
+    定时对账、watchdog 事件、页面手动触发三条路径互相独立，随时可能撞在
+    一起。没有互斥时两轮会同时改同一份 media_link 与磁盘状态。
+    """
+    import threading
+
+    rule_id, source_dir, _ = rule
+    (source_dir / "a.mp4").write_bytes(b"A" * 64)
+
+    entered = threading.Event()
+    release = threading.Event()
+    calls = []
+    original = watchdir._sync_rule_locked
+
+    def blocking(rid, dry_run=False):
+        calls.append(rid)
+        entered.set()
+        release.wait(timeout=5)
+        return original(rid, dry_run=dry_run)
+
+    watchdir._sync_rule_locked = blocking
+    try:
+        first = threading.Thread(target=lambda: watchdir.sync_rule(rule_id))
+        first.start()
+        assert entered.wait(timeout=5), "第一轮没能进入"
+
+        # 第一轮还卡在里面，此时的第二次触发应当直接跳过
+        second = watchdir.sync_rule(rule_id)
+
+        release.set()
+        first.join(timeout=5)
+    finally:
+        watchdir._sync_rule_locked = original
+
+    assert len(calls) == 1
+    assert any("上一轮对账尚未结束" in s for s in second.skipped)
+
+
+def test_dry_run_sync_does_not_take_the_lock(rule):
+    """演练不占锁：它什么都不改，且用户点演练时后台常在跑定时对账。"""
+    rule_id, source_dir, _ = rule
+    (source_dir / "a.mp4").write_bytes(b"A" * 64)
+
+    lock = watchdir._rule_lock(rule_id)
+    lock.acquire()
+    try:
+        result = watchdir.sync_rule(rule_id, dry_run=True)
+    finally:
+        lock.release()
+
+    assert not any("上一轮对账尚未结束" in s for s in result.skipped)
+    assert len(result.linked) == 1
+
+
+def test_different_rules_sync_concurrently(rule, tmp_path):
+    """锁是按规则分的，不同规则之间不该互相阻塞。"""
+    rule_id, _, library = rule
+
+    other_source = tmp_path / "src2"
+    other_source.mkdir()
+    with session_scope() as session:
+        session.add(WatchDir(
+            source_dir=str(other_source), target_dir=str(library / "sv2"),
+            name="second", enabled=True, recursive=True,
+            reverse_delete=False, code_prefix="SV2",
+        ))
+    with session_scope() as session:
+        other_id = session.scalar(
+            sa.select(WatchDir.id).where(WatchDir.name == "second")
+        )
+
+    lock = watchdir._rule_lock(rule_id)
+    lock.acquire()
+    try:
+        # 第一条规则的锁被占着，第二条仍应正常跑完
+        (other_source / "b.mp4").write_bytes(b"B" * 64)
+        result = watchdir.sync_rule(other_id)
+    finally:
+        lock.release()
+
+    assert not any("上一轮对账尚未结束" in s for s in result.skipped)
+    assert len(result.linked) == 1
+
+
 def test_sync_skips_partial_download_files(rule):
     rule_id, source_dir, library = rule
     (source_dir / "incomplete.mp4.part").write_bytes(b"X")
@@ -611,11 +697,12 @@ class _FakeClient:
         self.deleted: list[str] = []
 
     def find_torrents_by_path(self, paths):
-        wanted = set(paths)
+        # paths 为 None 表示不过滤、返回全部文件的映射，与真实客户端一致
+        wanted = None if paths is None else set(paths)
         out: dict[str, list[str]] = {}
         for h, files in self.torrents.items():
             for f in files:
-                if f in wanted:
+                if wanted is None or f in wanted:
                     out.setdefault(f, []).append(h)
         return out
 

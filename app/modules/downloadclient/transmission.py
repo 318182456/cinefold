@@ -241,23 +241,29 @@ class TransmissionClient:
             logger.warning(f"读取 Transmission 种子文件清单失败: {exc}")
         return paths
 
-    def find_torrents_by_path(self, paths: Sequence[str]) -> dict[str, list[str]]:
+    def find_torrents_by_path(
+        self, paths: Sequence[str] | None
+    ) -> dict[str, list[str]]:
         """按文件路径反查种子 hash。语义同 qBittorrent 版。
 
         Transmission 也没有按路径查种子的 RPC，同样是全量拉取建索引。
         只取 hashString 与文件清单两个字段，减少 RPC 负载。
+
+        paths 传 None 同样表示不过滤、返回全部文件的映射。
         """
-        if not paths:
+        want_all = paths is None
+        if not want_all and not paths:
             return {}
         if not self._ensure_client():
             return {}
 
         wanted: dict[str, list[str]] = {}
-        for raw in paths:
-            if raw:
-                wanted.setdefault(str(PurePath(raw)), []).append(raw)
-        if not wanted:
-            return {}
+        if not want_all:
+            for raw in paths:
+                if raw:
+                    wanted.setdefault(str(PurePath(raw)), []).append(raw)
+            if not wanted:
+                return {}
 
         out: dict[str, list[str]] = {}
         try:
@@ -284,9 +290,8 @@ class TransmissionClient:
 
             for f in files:
                 key = str(PurePath(root) / f.name)
-                if key not in wanted:
-                    continue
-                for original in wanted[key]:
+                # 全量模式下每个文件都要，键就用它自己的规范化路径
+                for original in ([key] if want_all else wanted.get(key, [])):
                     bucket = out.setdefault(original, [])
                     if t.hashString not in bucket:
                         bucket.append(t.hashString)
@@ -297,8 +302,9 @@ class TransmissionClient:
             # 只报关系总数会被误读成种子数，所以两个都打出来
             pairs = sum(len(v) for v in out.values())
             uniq = len({h for hashes in out.values() for h in hashes})
+            scope = "全量" if want_all else "按路径"
             logger.info(
-                f"Transmission 按路径反查：{len(out)} 个文件命中 {uniq} 个种子"
+                f"Transmission {scope}反查：{len(out)} 个文件命中 {uniq} 个种子"
                 f"（共 {pairs} 条对应关系）"
             )
         return out

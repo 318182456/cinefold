@@ -29,7 +29,7 @@ from loguru import logger
 from sqlalchemy import select
 
 from app.core.config import get_settings
-from app.database.models import Code, CodeStatus, History, MediaLink
+from app.database.models import Code, CodeStatus, History, MediaLink, PendingDelete
 from app.database.session import session_scope
 from app.utils import get_true_code
 
@@ -285,6 +285,64 @@ def _lookup_links(link_path: str = "", code: str = "") -> list[MediaLink]:
                 select(MediaLink).where(MediaLink.code == code)
             ).all())
     return []
+
+
+def _norm_path(path: str) -> str:
+    """路径归一化，用于比对。与 watchdir._norm_path 同一口径。
+
+    登记时的写法与 Emby 报来的写法可能在正反斜杠、盘符大小写上不一致，
+    直接比字符串会把匹配得上的判成匹配不上。
+    """
+    return str(Path(path)).replace("\\", "/").casefold()
+
+
+def lookup_links_under_dir(dir_path: str) -> list[str]:
+    """反查某个目录下登记过的全部影片链接路径。
+
+    用途是区分 Emby 两种「路径指向目录」的删除回调：
+
+      1. 一部影片就是一个目录（DVD 目录结构、合集里每部片各占一个子目录）。
+         Emby 把整个目录当 Item 删掉，路径合法、内容真实，联动必须照走，
+         否则种子里对应的文件永远不会被标记为不需要，下载器还会把它下回来。
+      2. 影片删完后空掉的演员 / 系列 / 年份目录，Emby 会各补一条回调。
+         这类目录在库里从来没有关联记录。
+
+    磁盘上两者已无法区分 —— 回调到达时 Emby 都删完了，要么不存在要么是空的。
+    但库里能区分：第 1 种查得到子路径记录，第 2 种查不到。
+
+    返回空列表即代表「第 2 种」，调用方据此静默忽略。
+    """
+    if not dir_path:
+        return []
+
+    # 前缀比对必须两边同口径：库里存的是登记那一刻的写法，Emby 报来的是
+    # 它自己的写法，正反斜杠与盘符大小写都可能不同（与 watchdir._norm_path
+    # 同一问题）。只归一化查询侧、拿去跟原样的 link_path 做 SQL like，
+    # Windows 上登记的记录会一条都匹配不上。
+    #
+    # 所以 like 只用来粗筛：目录名本身不含分隔符，大小写之外两边写法一致，
+    # 用它把候选集缩到这个目录相关的若干条。真正的前缀判定在 Python 侧对
+    # 归一化后的两边做。
+    prefix = _norm_path(dir_path).rstrip("/") + "/"
+
+    # 目录名里的 like 通配符要转义，否则片名里的 _ 会变成「任意单字符」
+    name = Path(dir_path.replace("\\", "/").rstrip("/")).name
+    escaped = name.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+    with session_scope() as session:
+        rows = list(session.scalars(
+            select(MediaLink).where(
+                MediaLink.link_path.like(f"%{escaped}%", escape="\\")
+            )
+        ).all())
+
+    # 结尾补分隔符，避免 ".../Lesson 1" 误命中 ".../Lesson 10/xxx.mkv"；
+    # 只要影片本体，目录下的 nfo / 图片有它们各自的清理路径，不从这里进
+    return [
+        row.link_path for row in rows
+        if _norm_path(row.link_path).startswith(prefix)
+        and Path(row.link_path).suffix.lower() in VIDEO_SUFFIXES
+    ]
 
 
 def _torrent_hashes(code: str) -> list[str]:
@@ -1164,12 +1222,25 @@ def handle_media_deleted(
     _cleanup_sidecars(link_paths, result)
     _prune_empty_dirs(link_paths, result)
 
-    # 5) 清关联记录与下载历史
+    # 5) 清关联记录、扣留观察与下载历史
     with session_scope() as session:
         for path in link_paths:
             row = session.get(MediaLink, path)
             if row is not None:
                 session.delete(row)
+            # 扣留观察一并撤销。宽限期的用处是分辨「移动/改名」和「真删除」——
+            # 文件消失后等一段时间，看它会不会以同 inode 在别处出现。删除既然
+            # 已经执行完，这个悬念就没有了，留着扣留有两个害处：页面上会显示
+            # 一条「正在观察、即将删除」但实际永远不删，且要等下一轮对账的
+            # _prune_holds 扫到「关联记录没了」才被动清掉。
+            #
+            # watchdir 自己走完删除后都会 _clear_hold，只有 webhook 这条入口
+            # 没清 —— 它在本模块，而 watchdir 反过来 import 本模块，直接调
+            # 那边的函数会成循环导入，所以按模型自己删。
+            hold = session.get(PendingDelete, path)
+            if hold is not None:
+                session.delete(hold)
+                logger.info(f"[{result.code}] 删除已执行，撤销扣留观察: {path}")
         # 历史记录一并清掉，否则订阅任务会认为该番号已下载而跳过。
         # 只清真删掉的种子 —— 合集种子还在做种，它的 History 行得留着，
         # 那是「这个 hash 存在于下载器」的凭据，删了会让后续对账反复补查

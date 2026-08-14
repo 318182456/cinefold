@@ -435,29 +435,39 @@ class QBitTorrentClient:
             "state": t.state,
         }
 
-    def find_torrents_by_path(self, paths: Sequence[str]) -> dict[str, list[str]]:
+    def find_torrents_by_path(
+        self, paths: Sequence[str] | None
+    ) -> dict[str, list[str]]:
         """按文件路径反查种子 hash。返回 {路径: [hash, ...]}。
 
         做法是把 qb 里所有种子的文件清单拉一遍，建「绝对路径 → hash」索引，
         再拿待查路径去命中。一次全量拉取换 N 次精确匹配 —— qb 没有
         「按路径查种子」的 API，只能这样。
 
+        paths 传 None 表示不过滤，返回下载器里全部文件的映射。全量拉取
+        是这个方法的固有成本，与传入多少路径无关，所以「先取全部文件、
+        再拿它们反查一遍」等于白拉两趟 —— 需要完整映射的调用方传 None
+        即可（见 all_torrent_files_with_hashes）。空列表仍是「没有要查的」，
+        与 None 语义不同，照旧直接返回空表。
+
         路径比对前统一成 PurePath 再转字符串：qb 在 Windows 上返回的分隔符
         可能与传入路径不一致，直接比字符串会漏。大小写不做归一化 ——
         Linux 上路径大小写敏感，抹平会导致误匹配到别的文件。
         """
-        if not paths:
+        want_all = paths is None
+        if not want_all and not paths:
             return {}
         if not self._ensure_client():
             return {}
 
         # 待查路径归一化，同时保留原始形式用于回填结果
         wanted: dict[str, list[str]] = {}
-        for raw in paths:
-            if raw:
-                wanted.setdefault(str(PurePath(raw)), []).append(raw)
-        if not wanted:
-            return {}
+        if not want_all:
+            for raw in paths:
+                if raw:
+                    wanted.setdefault(str(PurePath(raw)), []).append(raw)
+            if not wanted:
+                return {}
 
         out: dict[str, list[str]] = {}
         try:
@@ -482,9 +492,8 @@ class QBitTorrentClient:
 
             for f in files:
                 key = str(PurePath(root) / f.name)
-                if key not in wanted:
-                    continue
-                for original in wanted[key]:
+                # 全量模式下每个文件都要，键就用它自己的规范化路径
+                for original in ([key] if want_all else wanted.get(key, [])):
                     bucket = out.setdefault(original, [])
                     if t.hash not in bucket:
                         bucket.append(t.hash)
@@ -494,8 +503,9 @@ class QBitTorrentClient:
             # 对应关系数会超过种子数，两个都打出来
             pairs = sum(len(v) for v in out.values())
             uniq = len({h for hashes in out.values() for h in hashes})
+            scope = "全量" if want_all else "按路径"
             logger.info(
-                f"qBittorrent 按路径反查：{len(out)} 个文件命中 {uniq} 个种子"
+                f"qBittorrent {scope}反查：{len(out)} 个文件命中 {uniq} 个种子"
                 f"（共 {pairs} 条对应关系）"
             )
         return out
