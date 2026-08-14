@@ -34,6 +34,11 @@ class SourceCreateRequest(BaseModel):
     bypass_first: bool = False
 
 
+class ReorderRequest(BaseModel):
+    """按 key 的先后顺序重排优先级。"""
+    keys: list[str]
+
+
 @router.get("/datasources")
 def list_datasources(current_user: str = Depends(get_current_user)):
     """数据源列表。带上是否已接入解析，未接入的只能做连通性测试。
@@ -161,6 +166,51 @@ def restore_datasource(key: str, current_user: str = Depends(get_current_user)):
     SiteClient.reset_throttle(key)
 
     return ResponseEntity.ok(message="已恢复")
+
+
+# 必须声明在 /datasources/{key} 之前：FastAPI 按声明顺序匹配，
+# 反过来的话 "reorder" 会被当成 key 落到 update_datasource 上，直接 404
+@router.put("/datasources/reorder")
+def reorder_datasources(
+    body: ReorderRequest, current_user: str = Depends(get_current_user)
+):
+    """按传入的 key 顺序重排优先级。
+
+    抓取时多个源并发跑、取最先返回的结果，排在前面的源先拿到并发额度
+    （见 ladysite.MAX_PARALLEL_SITES），所以顺序确实影响用哪个源的数据。
+
+    只重排传进来的这些 key，没传的保持原样 —— 页面按分组展示，
+    一次只重排其中一组。
+    """
+    keys, seen = [], set()
+    for key in body.keys:
+        key = (key or "").strip()
+        # 重复 key 会让后面的覆盖前面的优先级，顺序变得不可预测
+        if key and key not in seen:
+            seen.add(key)
+            keys.append(key)
+    if not keys:
+        return ResponseEntity.fail("顺序不能为空", code=400)
+
+    with session_scope() as session:
+        rows = {
+            row.key: row for row in session.scalars(
+                select(DataSource).where(
+                    DataSource.key.in_(keys), DataSource.deleted.is_(False)
+                )
+            ).all()
+        }
+        unknown = [k for k in keys if k not in rows]
+        if unknown:
+            return ResponseEntity.fail(f"未知数据源 {', '.join(unknown)}", code=404)
+
+        # 以这一组现有的最小优先级为起点，保持它相对其他组的位置不变；
+        # 从 0 开始会把整组顶到所有源前面去
+        base = min(rows[k].priority for k in keys)
+        for offset, key in enumerate(keys):
+            rows[key].priority = base + offset
+
+    return ResponseEntity.ok(message="顺序已保存")
 
 
 @router.put("/datasources/{key}")

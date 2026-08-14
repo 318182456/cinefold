@@ -171,7 +171,9 @@ class SiteClient:
         if cookie:
             base["Cookie"] = cookie
         base.update(extra or {})
-        return base
+        # 显式传空值表示"别发这个头"。theporndb 的 cookie 栏存的是 API Token，
+        # 原样当 Cookie 发出去会让接口把请求当异常流量
+        return {k: v for k, v in base.items() if v}
 
     def _throttle(self) -> None:
         state = self._state()

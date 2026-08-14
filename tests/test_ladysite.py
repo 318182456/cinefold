@@ -721,3 +721,978 @@ class TestAggregator:
     def test_parse_star(self, text, expected):
         from app.modules.ladysite.base import parse_star
         assert parse_star(text) == expected
+
+
+# ----------------------------------------------------------------------
+# avmoo / avsox —— 与 javbus 同模板，复用 Bus 的解析
+# ----------------------------------------------------------------------
+AVMOO_SEARCH = """
+<html><body>
+  <div class="item"><a href="/cn/movie/aaaa">
+    <div class="photo-info"><span>别的片<br>
+      <date>SSIS-0011</date><date>2021-02-20</date></span></div></a></div>
+  <div class="item"><a href="/cn/movie/bbbb">
+    <div class="photo-info"><span>目标片<br>
+      <date>SSIS-001</date><date>2021-02-18</date></span></div></a></div>
+</body></html>
+"""
+
+AVMOO_DETAIL = """
+<html><body>
+<h3>SSIS-001 テストタイトル</h3>
+<div class="bigImage"><img src="/imgs/cover/ssis001.jpg"></div>
+<div class="info">
+  <p><span class="header">識別碼:</span> SSIS-001</p>
+  <p><span class="header">發行日期:</span> 2021-02-18</p>
+  <p><span class="header">長度:</span> 147分鐘</p>
+  <p><span class="header">製作商:</span> エスワン</p>
+</div>
+<span class="genre"><a href="/genre/1">ハイビジョン</a></span>
+<div class="star-name"><a href="/star/aaa">葵つかさ</a></div>
+</body></html>
+"""
+
+
+class TestAvmooParse:
+    def test_search_matches_exact_code_only(self):
+        """SSIS-0011 不能被当成 SSIS-001 的结果。"""
+        from app.modules.ladysite.avmoo import html_to_detail_url
+
+        assert html_to_detail_url(AVMOO_SEARCH, "SSIS-001") == "/cn/movie/bbbb"
+        assert html_to_detail_url(AVMOO_SEARCH, "SSIS-0011") == "/cn/movie/aaaa"
+
+    def test_search_no_match_returns_empty(self):
+        from app.modules.ladysite.avmoo import html_to_detail_url
+
+        assert html_to_detail_url(AVMOO_SEARCH, "ZZZZ-999") == ""
+
+    def test_detail_reuses_bus_parser(self):
+        """模板与 javbus 一致，字段应照样解析出来。"""
+        from app.modules.ladysite.avmoo import Avmoo
+
+        info = Avmoo(host="https://avmoo.website").html_to_code(AVMOO_DETAIL, "SSIS-001")
+        assert info is not None
+        assert info.code == "SSIS-001"
+        assert info.title == "テストタイトル"
+        assert info.release_date == "2021-02-18"
+        assert info.producer == "エスワン"
+        assert info.casts == "葵つかさ"
+        assert info.banner.startswith("https://avmoo.website/")
+
+    def test_list_page_dedupes(self):
+        from app.modules.ladysite.avmoo import html_to_codes
+
+        assert html_to_codes(AVMOO_SEARCH) == ["SSIS-0011", "SSIS-001"]
+
+    def test_avsox_shares_implementation(self):
+        from app.modules.ladysite.avmoo import Avsox
+
+        assert Avsox(host="https://avsox.click").name == "avsox"
+
+    def test_mismatched_detail_is_discarded(self, monkeypatch):
+        """搜索命中但详情页是别的番号时必须丢弃，不能写错数据。"""
+        from app.modules.ladysite.avmoo import Avmoo
+
+        site = Avmoo(host="https://avmoo.website")
+        monkeypatch.setattr(site, "search_detail_url", lambda code: "/cn/movie/bbbb")
+        monkeypatch.setattr(site.client, "get", lambda *a, **kw: AVMOO_DETAIL)
+        # 详情页里是 SSIS-001，查 SSIS-002 应被拒
+        assert site.crawler_original("SSIS-002") is None
+        assert site.crawler_original("SSIS-001") is not None
+
+
+# ----------------------------------------------------------------------
+# DMM
+# ----------------------------------------------------------------------
+DMM_DETAIL = """
+<html><head>
+<meta property="og:image" content="https://pics.dmm.co.jp/digital/video/ssis00001/ssis00001pl.jpg">
+</head><body>
+<h1>テスト作品タイトル</h1>
+<table class="mg-b20"><tr>
+  <td>商品発売日：</td><td>2021/02/19</td></tr>
+  <tr><td>収録時間：</td><td>147分</td></tr>
+  <tr><td>出演者：</td><td><a href="/x/1">葵つかさ</a><a href="/x/2">乙白さやか</a></td></tr>
+  <tr><td>メーカー：</td><td><a href="/m/1">エスワン ナンバーワンスタイル</a></td></tr>
+  <tr><td>レーベル：</td><td><a href="/l/1">S1 NO.1 STYLE</a></td></tr>
+  <tr><td>シリーズ：</td><td>----</td></tr>
+  <tr><td>ジャンル：</td><td><a href="/g/1">美少女</a><a href="/g/2">単体作品</a></td></tr>
+  <tr><td>品番：</td><td>ssis00001</td></tr>
+</table>
+<div id="sample-image-block">
+  <img src="https://pics.dmm.co.jp/digital/video/ssis00001/ssis00001-1.jpg">
+  <img src="https://pics.dmm.co.jp/digital/video/ssis00001/ssis00001-2.jpg">
+</div>
+</body></html>
+"""
+
+DMM_AGE_CHECK = """
+<html><body><a href="/age_check/=/declared=yes/">はい</a>
+<p>年齢確認</p></body></html>
+"""
+
+DMM_SEARCH = """
+<html><body>
+<a href="/digital/videoa/-/detail/=/cid=ssis00002/">别的片</a>
+<a href="/digital/videoa/-/detail/=/cid=h_1234ssis00001/">带前缀的同作品</a>
+<a href="/digital/videoa/-/detail/=/cid=ssis00001/">目标片</a>
+</body></html>
+"""
+
+
+class TestDmmParse:
+    def test_detail_fields(self):
+        from app.modules.ladysite.dmm import html_to_code
+
+        info = html_to_code(DMM_DETAIL, "SSIS-001")
+        assert info is not None
+        assert info.title == "テスト作品タイトル"
+        assert info.release_date == "2021-02-19"
+        assert info.duration == "147分"
+        assert info.producer == "エスワン ナンバーワンスタイル"
+        assert info.publisher == "S1 NO.1 STYLE"
+        assert info.casts == "葵つかさ,乙白さやか"
+        assert "美少女" in info.genres
+
+    def test_placeholder_dashes_are_skipped(self):
+        """DMM 用「----」表示"无"，不能写成字段值。"""
+        from app.modules.ladysite.dmm import html_to_code
+
+        info = html_to_code(DMM_DETAIL, "SSIS-001")
+        assert info.series == ""
+
+    def test_stills_upgraded_to_large(self):
+        """剧照缩略图 -1.jpg 要换成大图 jp-1.jpg。"""
+        from app.modules.ladysite.dmm import html_to_code
+
+        info = html_to_code(DMM_DETAIL, "SSIS-001")
+        assert "ssis00001jp-1.jpg" in info.still_photo
+        assert info.still_photo.count(",") == 1
+
+    def test_age_check_page_returns_none(self):
+        """年龄确认页是 200，不能当详情页解析。"""
+        from app.modules.ladysite.dmm import html_to_code
+
+        assert html_to_code(DMM_AGE_CHECK, "SSIS-001") is None
+
+    def test_age_cookie_is_added_automatically(self):
+        """缺 age_check_done 整站抓不到，必须由代码补上。"""
+        from app.modules.ladysite.dmm import Dmm
+
+        assert "age_check_done=1" in Dmm(host="https://www.dmm.co.jp").client.cookie
+
+    def test_age_cookie_preserves_user_cookie(self):
+        from app.modules.ladysite.dmm import Dmm
+
+        site = Dmm(host="https://www.dmm.co.jp", cookie="foo=bar")
+        assert "foo=bar" in site.client.cookie
+        assert "age_check_done=1" in site.client.cookie
+
+    @pytest.mark.parametrize("code,expected", [
+        ("SSIS-001", "ssis00001"),
+        ("MIDE-777", "mide00777"),
+        ("NODASH", ""),
+    ])
+    def test_to_cid(self, code, expected):
+        from app.modules.ladysite.dmm import _to_cid
+        assert _to_cid(code) == expected
+
+    def test_search_prefers_exact_cid(self):
+        """精确 cid 优先于带 h_ 前缀的同作品。"""
+        from app.modules.ladysite.dmm import html_to_detail_url
+
+        url = html_to_detail_url(DMM_SEARCH, "SSIS-001")
+        assert url == "/digital/videoa/-/detail/=/cid=ssis00001/"
+
+    def test_looks_like_detail_rejects_age_page(self):
+        from app.modules.ladysite.dmm import _looks_like_detail
+
+        assert _looks_like_detail(DMM_DETAIL) is True
+        assert _looks_like_detail(DMM_AGE_CHECK) is False
+        assert _looks_like_detail("") is False
+
+
+# ----------------------------------------------------------------------
+# MGStage
+# ----------------------------------------------------------------------
+MGSTAGE_DETAIL = """
+<html><head>
+<meta property="og:image" content="https://image.mgstage.com/images/siro/4321/pb_e_siro-4321.jpg">
+</head><body>
+<h1 class="tag">SIRO-4321 【初撮り】ネットでAV応募</h1>
+<table>
+  <tr><th>出演：</th><td><a href="/a/1">しほ</a></td></tr>
+  <tr><th>メーカー：</th><td>SIRO</td></tr>
+  <tr><th>レーベル：</th><td>シロウトTV</td></tr>
+  <tr><th>シリーズ：</th><td>----</td></tr>
+  <tr><th>配信開始日：</th><td>2021/02/19</td></tr>
+  <tr><th>収録時間：</th><td>60min</td></tr>
+  <tr><th>ジャンル：</th><td><a href="/g/1">素人</a><a href="/g/2">ハメ撮り</a></td></tr>
+</table>
+</body></html>
+"""
+
+
+class TestMgstageParse:
+    def test_detail_fields(self):
+        from app.modules.ladysite.mgstage import html_to_code
+
+        info = html_to_code(MGSTAGE_DETAIL, "SIRO-4321")
+        assert info is not None
+        assert info.code == "SIRO-4321"
+        assert info.release_date == "2021-02-19"
+        assert info.duration == "60min"
+        assert info.producer == "SIRO"
+        assert info.publisher == "シロウトTV"
+        assert info.casts == "しほ"
+        assert "素人" in info.genres
+
+    def test_title_strips_leading_code(self):
+        from app.modules.ladysite.mgstage import html_to_code
+
+        info = html_to_code(MGSTAGE_DETAIL, "SIRO-4321")
+        assert info.title == "【初撮り】ネットでAV応募"
+
+    def test_placeholder_dashes_are_skipped(self):
+        from app.modules.ladysite.mgstage import html_to_code
+
+        assert html_to_code(MGSTAGE_DETAIL, "SIRO-4321").series == ""
+
+    def test_missing_date_returns_none(self):
+        from app.modules.ladysite.mgstage import html_to_code
+
+        assert html_to_code("<html><body><h1>エラー</h1></body></html>", "X-1") is None
+
+    def test_age_cookie_is_added(self):
+        from app.modules.ladysite.mgstage import Mgstage
+
+        assert "adc=1" in Mgstage(host="https://www.mgstage.com").client.cookie
+
+
+# ----------------------------------------------------------------------
+# FC2
+# ----------------------------------------------------------------------
+FC2_DETAIL = """
+<html><body>
+<div class="items_article_headerInfo">
+  <h3>【個人撮影】テスト作品 FC2-PPV</h3>
+  <a href="/users/seller123/">売主テスト</a>
+</div>
+<div class="items_article_Releasedate"><p>販売日 : 2021/02/19</p></div>
+<div class="items_article_TagArea"><a href="/tag/1">素人</a><a href="/tag/2">個人撮影</a></div>
+<meta property="og:image" content="https://contents-thumbnail.fc2.com/1234567.jpg">
+</body></html>
+"""
+
+FC2HUB_DETAIL = """
+<html><body>
+<h1>FC2-PPV-1234567 テスト作品</h1>
+<div class="video-info">
+  <a href="/actress/1">演員テスト</a>
+  <a href="/tag/1">素人</a>
+  <p>発売日: 2021-02-19</p>
+</div>
+<meta property="og:image" content="https://javten.com/img/1234567.jpg">
+</body></html>
+"""
+
+
+class TestFc2Parse:
+    @pytest.mark.parametrize("code,expected", [
+        ("FC2-PPV-1234567", "1234567"),
+        ("FC2-1234567", "1234567"),
+        # 普通番号的数字段不足 5 位，取不出 article id
+        ("SSIS-001", ""),
+        ("", ""),
+    ])
+    def test_article_id(self, code, expected):
+        from app.modules.ladysite.fc2 import _article_id
+        assert _article_id(code) == expected
+
+    def test_detail_fields(self):
+        from app.modules.ladysite.fc2 import html_to_code
+
+        info = html_to_code(FC2_DETAIL, "FC2-PPV-1234567")
+        assert info is not None
+        assert info.code == "FC2-PPV-1234567"
+        assert info.release_date == "2021-02-19"
+        assert "素人" in info.genres
+        assert info.banner.endswith("1234567.jpg")
+
+    def test_title_strips_promo_suffix(self):
+        from app.modules.ladysite.fc2 import html_to_code
+
+        info = html_to_code(FC2_DETAIL, "FC2-PPV-1234567")
+        assert info.title == "【個人撮影】テスト作品"
+
+    def test_missing_date_returns_none(self):
+        """作品下架时是 200 提示页，没有販売日。"""
+        from app.modules.ladysite.fc2 import html_to_code
+
+        assert html_to_code("<html><body><h3>削除されました</h3></body></html>", "FC2-PPV-1") is None
+
+    def test_non_fc2_code_skipped(self):
+        """官方站只收自家投稿，普通番号不该发请求。"""
+        from app.modules.ladysite.fc2 import Fc2
+
+        site = Fc2(host="https://adult.contents.fc2.com")
+        site.client.get = lambda *a, **kw: pytest.fail("不应发起请求")
+        assert site.crawler_original("SSIS-001") is None
+
+    def test_hub_detail_fields(self):
+        from app.modules.ladysite.fc2 import hub_html_to_code
+
+        info = hub_html_to_code(FC2HUB_DETAIL, "FC2-PPV-1234567")
+        assert info is not None
+        assert info.release_date == "2021-02-19"
+        assert info.casts == "演員テスト"
+        assert info.title == "テスト作品"
+
+    @pytest.mark.parametrize("raw,expected", [
+        ("販売日 : 2021/02/19", "2021-02-19"),
+        ("2021年2月19日", "2021-02-19"),
+        ("no date here", ""),
+    ])
+    def test_normalize_date(self, raw, expected):
+        from app.modules.ladysite.fc2 import _normalize_date
+        assert _normalize_date(raw) == expected
+
+
+# ----------------------------------------------------------------------
+# Airav
+# ----------------------------------------------------------------------
+AIRAV_JSON = """
+{"barcode":"SSIS-001","name":"女友不在的三天",
+ "publish_date":"2021-02-18T00:00:00",
+ "actors":[{"name":"葵司"},{"name":"乙白沙也加"}],
+ "tags":[{"name":"中文字幕"},{"name":"美乳"}],
+ "factories":[{"name":"S1"}],
+ "img_url":"https://airav.io/img/ssis001.jpg"}
+"""
+
+AIRAV_JSON_EMPTY = '{"count":0}'
+
+AIRAV_HTML = """
+<html><head>
+<meta property="og:image" content="https://airav.io/img/ssis001.jpg">
+</head><body>
+<h1>SSIS-001 女友不在的三天</h1>
+<ul class="video-info">
+  <li><span>發行日期</span>2021-02-18</li>
+  <li><span>播放時間</span>147分鐘</li>
+  <li><span>片商</span>S1</li>
+  <li><span>女優</span><a href="/a/1">葵司</a><a href="/a/2">乙白沙也加</a></li>
+  <li><span>類型</span><a href="/t/1">中文字幕</a></li>
+</ul>
+</body></html>
+"""
+
+
+class TestAiravParse:
+    def test_json_fields(self):
+        from app.modules.ladysite.airav import json_to_code
+
+        info = json_to_code(AIRAV_JSON, "SSIS-001")
+        assert info is not None
+        assert info.code == "SSIS-001"
+        assert info.title == "女友不在的三天"
+        assert info.release_date == "2021-02-18"
+        assert info.casts == "葵司,乙白沙也加"
+        assert "中文字幕" in info.genres
+        assert info.producer == "S1"
+
+    def test_json_empty_returns_none(self):
+        from app.modules.ladysite.airav import json_to_code
+
+        assert json_to_code(AIRAV_JSON_EMPTY, "NOSUCH-999") is None
+
+    def test_html_fallback_when_api_returns_html(self):
+        """接口路径没了会返回 HTML，此时应走 HTML 分支而非报错。"""
+        from app.modules.ladysite.airav import json_to_code
+
+        assert json_to_code(AIRAV_HTML, "SSIS-001") is None
+
+    def test_html_fields(self):
+        from app.modules.ladysite.airav import html_to_code
+
+        info = html_to_code(AIRAV_HTML, "SSIS-001")
+        assert info is not None
+        assert info.release_date == "2021-02-18"
+        assert info.title == "女友不在的三天"
+        assert info.casts == "葵司,乙白沙也加"
+
+    @pytest.mark.parametrize("host,expected", [
+        ("https://airav.io/cn", "https://airav.io"),
+        ("https://airav.io", "https://airav.io"),
+    ])
+    def test_root_strips_language_path(self, host, expected):
+        """内置地址带 /cn，接口在站点根上，拼接前要剥掉。"""
+        from app.modules.ladysite.airav import _root
+        assert _root(host) == expected
+
+
+# ----------------------------------------------------------------------
+# 7mmTV
+# ----------------------------------------------------------------------
+MMTV_DETAIL = """
+<html><head>
+<meta property="og:image" content="https://7mmtv.sx/img/ssis001.jpg">
+</head><body>
+<h1>SSIS-001 測試標題</h1>
+<ul class="video-info">
+  <li><strong>發行日期:</strong>2021-02-18</li>
+  <li><strong>播放時長:</strong>147分</li>
+  <li><strong>製作商:</strong>S1</li>
+  <li><strong>演員:</strong><a href="/a/1">葵司</a></li>
+  <li><strong>類型:</strong><a href="/t/1">中文字幕</a></li>
+</ul>
+</body></html>
+"""
+
+MMTV_SEARCH = """
+<html><body>
+<a href="/zh/uncensored_content/ssis-001.html" title="SSIS-001 測試標題">目标</a>
+<a href="/zh/about">无关</a>
+</body></html>
+"""
+
+
+class TestMmtvParse:
+    def test_detail_fields(self):
+        from app.modules.ladysite.mmtv import html_to_code
+
+        info = html_to_code(MMTV_DETAIL, "SSIS-001")
+        assert info is not None
+        assert info.release_date == "2021-02-18"
+        assert info.producer == "S1"
+        assert info.casts == "葵司"
+        assert info.title == "測試標題"
+
+    def test_search_finds_detail_url(self):
+        from app.modules.ladysite.mmtv import html_to_detail_url
+
+        assert html_to_detail_url(MMTV_SEARCH, "SSIS-001").endswith("ssis-001.html")
+
+    def test_search_no_match_returns_empty(self):
+        from app.modules.ladysite.mmtv import html_to_detail_url
+
+        assert html_to_detail_url(MMTV_SEARCH, "ZZZZ-999") == ""
+
+    def test_missing_date_returns_none(self):
+        from app.modules.ladysite.mmtv import html_to_code
+
+        assert html_to_code("<html><body><h1>X</h1></body></html>", "X-1") is None
+
+
+# ----------------------------------------------------------------------
+# Caribbeancom —— 日期型番号
+# ----------------------------------------------------------------------
+CARIB_DETAIL = """
+<html><head>
+<meta property="og:image" content="https://www.caribbeancom.com/moviepages/032416-267/images/l_l.jpg">
+</head><body>
+<h1 class="heading">テスト無修正作品</h1>
+<div class="movie-info">
+  <dl><dt>出演</dt><dd><a href="/a/1">女優D</a></dd></dl>
+  <dl><dt>配信日</dt><dd>2016/03/24</dd></dl>
+  <dl><dt>再生時間</dt><dd>60:12</dd></dl>
+  <dl><dt>シリーズ</dt><dd>テストシリーズ</dd></dl>
+  <dl><dt>タグ</dt><dd><a href="/t/1">単体作品</a><a href="/t/2">無修正</a></dd></dl>
+</div>
+</body></html>
+"""
+
+
+class TestCaribParse:
+    @pytest.mark.parametrize("code,expected", [
+        ("032416_267", "032416-267"),
+        ("032416-267", "032416-267"),
+        ("SSIS-001", ""),      # 普通番号不属于本站
+        ("", ""),
+    ])
+    def test_to_path_code(self, code, expected):
+        """get_true_code 统一成下划线，但站点路径用横杠。"""
+        from app.modules.ladysite.carib import _to_path_code
+        assert _to_path_code(code) == expected
+
+    def test_detail_fields(self):
+        from app.modules.ladysite.carib import html_to_code
+
+        info = html_to_code(CARIB_DETAIL, "032416_267")
+        assert info is not None
+        assert info.code == "032416_267"
+        assert info.title == "テスト無修正作品"
+        assert info.release_date == "2016-03-24"
+        assert info.duration == "60:12"
+        assert info.casts == "女優D"
+        assert "無修正" in info.genres
+
+    def test_normal_code_skipped(self):
+        """本站只收日期型番号，普通番号不该发请求。"""
+        from app.modules.ladysite.carib import Carib
+
+        site = Carib(host="https://www.caribbeancom.com")
+        site.client.get = lambda *a, **kw: pytest.fail("不应发起请求")
+        assert site.crawler_original("SSIS-001") is None
+
+    def test_missing_date_returns_none(self):
+        from app.modules.ladysite.carib import html_to_code
+
+        assert html_to_code("<html><body><h1>X</h1></body></html>", "032416_267") is None
+
+
+# ----------------------------------------------------------------------
+# ThePornDB —— JSON API
+# ----------------------------------------------------------------------
+TPDB_JSON = """
+{"data":{"external_id":"SSIS-001","title":"Test Title","date":"2021-02-18",
+ "duration":8820,
+ "performers":[{"name":"Tsukasa Aoi"}],
+ "tags":[{"name":"Featured"}],
+ "site":{"name":"S1 NO.1 STYLE","network":{"name":"S1"}},
+ "posters":[{"full":"https://tpdb/poster.jpg"}],
+ "background":{"full":"https://tpdb/bg.jpg"}}}
+"""
+
+
+class TestThePornDbParse:
+    def test_json_fields(self):
+        from app.modules.ladysite.theporndb import json_to_code
+
+        info = json_to_code(TPDB_JSON, "SSIS-001")
+        assert info is not None
+        assert info.code == "SSIS-001"
+        assert info.title == "Test Title"
+        assert info.release_date == "2021-02-18"
+        assert info.casts == "Tsukasa Aoi"
+        assert info.producer == "S1 NO.1 STYLE"
+        assert info.poster == "https://tpdb/poster.jpg"
+        assert info.banner == "https://tpdb/bg.jpg"
+
+    def test_duration_seconds_to_minutes(self):
+        """接口给的是秒，要换成分钟。"""
+        from app.modules.ladysite.theporndb import json_to_code
+
+        assert json_to_code(TPDB_JSON, "SSIS-001").duration == "147分钟"
+
+    def test_empty_data_returns_none(self):
+        from app.modules.ladysite.theporndb import json_to_code
+
+        assert json_to_code('{"data":null}', "X-1") is None
+        assert json_to_code('{"data":[]}', "X-1") is None
+
+    def test_malformed_json_returns_none(self):
+        from app.modules.ladysite.theporndb import json_to_code
+
+        assert json_to_code("<html>not json</html>", "X-1") is None
+
+    @pytest.mark.parametrize("raw,expected", [
+        ("abc123", "abc123"),
+        ("Bearer abc123", "abc123"),
+        ("Authorization: Bearer abc123", "abc123"),
+        ("", ""),
+    ])
+    def test_token_accepts_both_forms(self, raw, expected):
+        """Token 填裸值或整行 Authorization 都要认。"""
+        from app.modules.ladysite.theporndb import ThePornDb
+
+        site = ThePornDb(host="https://api.theporndb.net", cookie=raw or "x")
+        site.client.cookie = raw
+        assert site._token() == expected
+
+    def test_no_token_skips_request(self):
+        """没配 Token 接口一律 401，不该白发请求。"""
+        from app.modules.ladysite.theporndb import ThePornDb
+
+        site = ThePornDb(host="https://api.theporndb.net")
+        site.client.cookie = ""
+        site.client.get = lambda *a, **kw: pytest.fail("不应发起请求")
+        assert site.crawler_original("SSIS-001") is None
+
+
+# ----------------------------------------------------------------------
+# 国产站 madou / madouqu
+# ----------------------------------------------------------------------
+MADOU_DETAIL = """
+<html><head>
+<meta property="og:image" content="https://madou.club/img/mdx0123.jpg">
+</head><body>
+<article>
+<h1 class="entry-title">MDX-0123 测试国产作品</h1>
+<div class="entry-meta"><time datetime="2024-03-15">2024-03-15</time></div>
+<div class="tags">
+  <a rel="tag" href="/actor/1">女优E</a>
+  <a rel="tag" href="/tag/2">剧情</a>
+</div>
+</article>
+</body></html>
+"""
+
+MADOU_SEARCH = """
+<html><body>
+<article><h2><a href="/mdx-0123-test/" title="MDX-0123 测试国产作品">目标</a></h2></article>
+<article><h2><a href="/other/" title="MDX-0456 别的片">别的</a></h2></article>
+</body></html>
+"""
+
+MADOU_NOT_FOUND = """
+<html><body><article><h1 class="entry-title">没有找到内容</h1></article></body></html>
+"""
+
+
+class TestMadouParse:
+    def test_detail_fields(self):
+        from app.modules.ladysite.madou import html_to_code
+
+        info = html_to_code(MADOU_DETAIL, "MDX-0123")
+        assert info is not None
+        assert info.code == "MDX-0123"
+        assert info.title == "测试国产作品"
+        assert info.release_date == "2024-03-15"
+        assert info.casts == "女优E"
+        assert "剧情" in info.genres
+
+    def test_cast_and_tag_links_are_separated(self):
+        """演员与标签都是 rel=tag，靠 URL 段区分，不能混。"""
+        from app.modules.ladysite.madou import html_to_code
+
+        info = html_to_code(MADOU_DETAIL, "MDX-0123")
+        assert "剧情" not in info.casts
+        assert "女优E" not in info.genres
+
+    def test_search_matches_flattened_code(self):
+        """国产站番号写法混乱（MDX-0123/MDX0123），归一化后比对。"""
+        from app.modules.ladysite.madou import html_to_detail_url
+
+        assert html_to_detail_url(MADOU_SEARCH, "MDX-0123") == "/mdx-0123-test/"
+        assert html_to_detail_url(MADOU_SEARCH, "MDX0123") == "/mdx-0123-test/"
+
+    def test_not_found_page_returns_none(self):
+        """搜不到时 WordPress 返回提示页，h1 是提示语不是片名。"""
+        from app.modules.ladysite.madou import html_to_code
+
+        assert html_to_code(MADOU_NOT_FOUND, "MDX-0123") is None
+
+    def test_madouqu_shares_implementation(self):
+        from app.modules.ladysite.madou import Madouqu
+
+        site = Madouqu(host="https://madouqu.com")
+        assert site.name == "madouqu"
+
+
+# ----------------------------------------------------------------------
+# XChina
+# ----------------------------------------------------------------------
+XCHINA_DETAIL = """
+<html><head>
+<meta property="og:image" content="https://xchina.co/img/cover.jpg">
+</head><body>
+<h1>MDX-0123 测试作品</h1>
+<div class="items">
+  <div class="item"><span class="label">番号</span><span class="value">MDX-0123</span></div>
+  <div class="item"><span class="label">发行日期</span><span class="value">2024-03-15</span></div>
+  <div class="item"><span class="label">时长</span><span class="value">45分钟</span></div>
+  <div class="item"><span class="label">演员</span><span class="value"><a href="/a/1">女优E</a></span></div>
+  <div class="item"><span class="label">标签</span><span class="value"><a href="/t/1">剧情</a></span></div>
+</div>
+</body></html>
+"""
+
+XCHINA_SEARCH = """
+<html><body>
+<a href="/video/id-abc123.html" title="MDX-0123 测试作品">目标</a>
+<a href="/about">无关</a>
+</body></html>
+"""
+
+
+class TestXchinaParse:
+    def test_detail_fields(self):
+        from app.modules.ladysite.xchina import html_to_code
+
+        info = html_to_code(XCHINA_DETAIL, "MDX-0123")
+        assert info is not None
+        assert info.code == "MDX-0123"
+        assert info.title == "测试作品"
+        assert info.release_date == "2024-03-15"
+        assert info.duration == "45分钟"
+        assert info.casts == "女优E"
+        assert "剧情" in info.genres
+
+    def test_search_finds_detail_url(self):
+        from app.modules.ladysite.xchina import html_to_detail_url
+
+        assert html_to_detail_url(XCHINA_SEARCH, "MDX-0123") == "/video/id-abc123.html"
+
+    def test_search_no_match_returns_empty(self):
+        from app.modules.ladysite.xchina import html_to_detail_url
+
+        assert html_to_detail_url(XCHINA_SEARCH, "ZZZZ-999") == ""
+
+    def test_missing_date_returns_none(self):
+        from app.modules.ladysite.xchina import html_to_code
+
+        assert html_to_code("<html><body><h1>X</h1></body></html>", "X-1") is None
+
+
+# ----------------------------------------------------------------------
+# Hbox
+# ----------------------------------------------------------------------
+HBOX_DETAIL = """
+<html><head>
+<meta property="og:image" content="https://hbox.jp/img/ssis001.jpg">
+</head><body>
+<h1>SSIS-001 テストタイトル</h1>
+<dl>
+  <dt>出演</dt><dd><a href="/a/1">葵つかさ</a></dd>
+  <dt>発売日</dt><dd>2021/02/19</dd>
+  <dt>収録時間</dt><dd>147分</dd>
+  <dt>メーカー</dt><dd>エスワン</dd>
+  <dt>シリーズ</dt><dd>----</dd>
+  <dt>ジャンル</dt><dd><a href="/g/1">単体作品</a></dd>
+</dl>
+</body></html>
+"""
+
+
+class TestHboxParse:
+    def test_detail_fields(self):
+        from app.modules.ladysite.hbox import html_to_code
+
+        info = html_to_code(HBOX_DETAIL, "SSIS-001")
+        assert info is not None
+        assert info.code == "SSIS-001"
+        assert info.title == "テストタイトル"
+        assert info.release_date == "2021-02-19"
+        assert info.duration == "147分"
+        assert info.producer == "エスワン"
+        assert info.casts == "葵つかさ"
+
+    def test_placeholder_dashes_are_skipped(self):
+        from app.modules.ladysite.hbox import html_to_code
+
+        assert html_to_code(HBOX_DETAIL, "SSIS-001").series == ""
+
+    def test_missing_date_returns_none(self):
+        from app.modules.ladysite.hbox import html_to_code
+
+        assert html_to_code("<html><body><h1>X</h1></body></html>", "X-1") is None
+
+
+# ----------------------------------------------------------------------
+# 番号形态路由
+# ----------------------------------------------------------------------
+class TestCodeRouting:
+    def test_all_builtin_sources_have_parsers(self):
+        """内置源全部接入解析，不再有只能测连通性的源。"""
+        from app.modules.ladysite.sources import SOURCES
+
+        assert [s["key"] for s in SOURCES if not s["parser"]] == []
+
+    def test_every_parser_is_constructible(self):
+        """SOURCES 里登记的 parser 都要能在工厂里建出实例。"""
+        from app.modules.ladysite import _SITE_CLASSES, _get_site
+        from app.modules.ladysite.sources import SOURCES
+
+        for source in SOURCES:
+            key = source["key"]
+            assert key in _SITE_CLASSES, f"{key} 未登记到 _SITE_CLASSES"
+            assert _get_site(key) is not None, f"{key} 构造失败"
+
+    def test_fc2_code_only_asks_fc2_sites(self):
+        """FC2 番号在日系源上查不到，不该白开线程。"""
+        from app.modules.ladysite import _sites_for_code
+
+        sites = _sites_for_code("FC2-PPV-1234567")
+        assert set(sites) <= {"fc2", "fc2hub", "theporndb"}
+        assert "javbus" not in sites
+
+    def test_date_code_only_asks_uncensored_sites(self):
+        from app.modules.ladysite import _sites_for_code
+
+        sites = _sites_for_code("032416_267")
+        assert "carib" in sites
+        assert "javbus" not in sites
+
+    def test_normal_code_skips_special_sites(self):
+        """普通番号不该去问只收 FC2 或日期型番号的源。"""
+        from app.modules.ladysite import _sites_for_code
+
+        sites = _sites_for_code("SSIS-001")
+        assert "javbus" in sites
+        for key in ("fc2", "fc2hub", "carib"):
+            assert key not in sites
+
+    def test_amateur_code_adds_mgstage(self):
+        from app.modules.ladysite import _sites_for_code
+
+        assert "mgstage" in _sites_for_code("SIRO-4321")
+        assert "mgstage" in _sites_for_code("259LUXU-1234")
+
+    def test_domestic_code_adds_madou(self):
+        from app.modules.ladysite import _sites_for_code
+
+        sites = _sites_for_code("MDX-0123")
+        assert "madou" in sites and "madouqu" in sites
+
+    def test_theporndb_skipped_without_token(self):
+        """没配 Token 时接口必然 401，不该占一个并发位。"""
+        from app.modules.ladysite import _sites_for_code
+
+        assert "theporndb" not in _sites_for_code("SSIS-001")
+
+    def test_unknown_code_falls_back_to_general(self):
+        """认不出的番号退回通用清单，不能一个源都不问。"""
+        from app.modules.ladysite import _sites_for_code
+
+        assert len(_sites_for_code("!!!")) > 0
+
+
+# ----------------------------------------------------------------------
+# 抓取顺序按数据源页面上排的优先级走
+# ----------------------------------------------------------------------
+class TestSourceOrdering:
+    @pytest.fixture
+    def synced(self):
+        """把内置源登记进库，用完清掉，避免影响别的用例。"""
+        from sqlalchemy import delete
+
+        from app.database.models import DataSource
+        from app.database.session import session_scope
+        from app.modules.ladysite.sources import sync_builtin_sources
+
+        with session_scope() as session:
+            session.execute(delete(DataSource))
+        sync_builtin_sources()
+        yield
+        with session_scope() as session:
+            session.execute(delete(DataSource))
+
+    def test_order_follows_priority(self, synced):
+        """页面上把某个源排到最前，抓取就该先问它。"""
+        from sqlalchemy import select
+
+        from app.database.models import DataSource
+        from app.database.session import session_scope
+        from app.modules.ladysite import _enabled_sites
+
+        assert _enabled_sites()[0] == "javbus"
+
+        # 把 missav 的优先级压到最小
+        with session_scope() as session:
+            row = session.scalar(select(DataSource).where(DataSource.key == "missav"))
+            row.priority = -1
+
+        assert _enabled_sites()[0] == "missav"
+
+    def test_disabled_source_excluded(self, synced):
+        from sqlalchemy import select
+
+        from app.database.models import DataSource
+        from app.database.session import session_scope
+        from app.modules.ladysite import _enabled_sites
+
+        with session_scope() as session:
+            row = session.scalar(select(DataSource).where(DataSource.key == "javbus"))
+            row.enabled = False
+
+        assert "javbus" not in _enabled_sites()
+
+    def test_all_disabled_falls_back(self, synced):
+        """全停时退回内置顺序，免得配置失手把抓取彻底关死。"""
+        from sqlalchemy import update
+
+        from app.database.models import DataSource
+        from app.database.session import session_scope
+        from app.modules.ladysite import DETAIL_SITES, _enabled_sites
+
+        with session_scope() as session:
+            session.execute(update(DataSource).values(enabled=False))
+
+        assert _enabled_sites() == DETAIL_SITES
+
+
+class TestReorderEndpoint:
+    @pytest.fixture
+    def synced(self):
+        from sqlalchemy import delete
+
+        from app.database.models import DataSource
+        from app.database.session import session_scope
+        from app.modules.ladysite.sources import sync_builtin_sources
+
+        with session_scope() as session:
+            session.execute(delete(DataSource))
+        sync_builtin_sources()
+        yield
+        with session_scope() as session:
+            session.execute(delete(DataSource))
+
+    def _priorities(self, keys):
+        from sqlalchemy import select
+
+        from app.database.models import DataSource
+        from app.database.session import session_scope
+
+        with session_scope() as session:
+            rows = session.scalars(
+                select(DataSource).where(DataSource.key.in_(keys))
+            ).all()
+            return {row.key: row.priority for row in rows}
+
+    def test_reorder_applies_given_order(self, synced):
+        from app.api.endpoints.datasource import ReorderRequest, reorder_datasources
+
+        keys = ["missav", "javbus", "javdb"]
+        reorder_datasources(ReorderRequest(keys=keys), current_user="t")
+
+        got = self._priorities(keys)
+        assert got["missav"] < got["javbus"] < got["javdb"]
+
+    def test_reorder_keeps_group_position(self, synced):
+        """起点沿用这一组现有的最小优先级，不能把整组顶到最前面。"""
+        from app.api.endpoints.datasource import ReorderRequest, reorder_datasources
+
+        before = self._priorities(["javdb", "missav"])
+        base = min(before.values())
+
+        reorder_datasources(
+            ReorderRequest(keys=["missav", "javdb"]), current_user="t"
+        )
+        after = self._priorities(["javdb", "missav"])
+        assert min(after.values()) == base
+
+    def test_reorder_rejects_unknown_key(self, synced):
+        from app.api.endpoints.datasource import ReorderRequest, reorder_datasources
+
+        result = reorder_datasources(
+            ReorderRequest(keys=["javbus", "nosuchsource"]), current_user="t"
+        )
+        assert result["code"] == 404
+
+    def test_reorder_rejects_empty(self, synced):
+        from app.api.endpoints.datasource import ReorderRequest, reorder_datasources
+
+        result = reorder_datasources(ReorderRequest(keys=["", "  "]), current_user="t")
+        assert result["code"] == 400
+
+    def test_reorder_dedupes_keys(self, synced):
+        """重复 key 会让优先级互相覆盖，顺序变得不可预测。"""
+        from app.api.endpoints.datasource import ReorderRequest, reorder_datasources
+
+        reorder_datasources(
+            ReorderRequest(keys=["missav", "javbus", "missav"]), current_user="t"
+        )
+        got = self._priorities(["missav", "javbus"])
+        assert got["missav"] < got["javbus"]
+
+    def test_reorder_route_not_shadowed(self):
+        """/datasources/reorder 必须声明在 /datasources/{key} 之前，
+        否则 reorder 会被当成 key 落到 update_datasource 上。"""
+        from app.api.endpoints.datasource import router
+
+        paths = [
+            route.path for route in router.routes
+            if "PUT" in getattr(route, "methods", set())
+        ]
+        assert paths.index("/datasources/reorder") < paths.index("/datasources/{key}")

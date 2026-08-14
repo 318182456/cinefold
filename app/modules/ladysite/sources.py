@@ -5,6 +5,14 @@
 `bypass_first` 标了 True 的站直连必定吃 403（Cloudflare 挑战页），
 必须配 BYPASS_URL 才能抓；没配的话这些源开着也拿不到数据。
 `parser` 指向已实现的解析器，为空表示尚未接入解析，只能做连通性测试。
+
+各源的覆盖分工（抓取按 DETAIL_SITES 的顺序取最快返回的结果）：
+- 有码主力：javbus、javdb、jav321、avbase、avmoo
+- 无码/素人：avsox、carib（日期型番号）、mgstage
+- 官方一手数据：dmm、mgstage
+- 中文标题：missav、airav、7mmtv、xchina
+- FC2 专属：fc2、fc2hub —— 其余源对 FC2-PPV 基本无覆盖
+- 国产：madou、madouqu
 """
 from __future__ import annotations
 
@@ -22,42 +30,43 @@ SOURCES: tuple[dict, ...] = (
     {"key": "javlibrary", "name": "JavLibrary", "host": "https://www.javlibrary.com/cn",
      "parser": "library", "bypass_first": True},
     {"key": "airav", "name": "Airav", "host": "https://airav.io/cn",
-     "parser": "", "bypass_first": True},
+     "parser": "airav", "bypass_first": True, "interval": 2.0},
     {"key": "avbase", "name": "Avbase", "host": "https://www.avbase.net",
      "parser": "avbase", "bypass_first": True, "interval": 2.0},
     {"key": "avmoo", "name": "Avmoo", "host": "https://avmoo.website",
-     "parser": "", "bypass_first": False},
+     "parser": "avmoo", "bypass_first": False, "interval": 2.0},
     {"key": "avsox", "name": "Avsox", "host": "https://avsox.click",
-     "parser": "", "bypass_first": False},
+     "parser": "avsox", "bypass_first": False, "interval": 2.0},
     {"key": "carib", "name": "Caribbeancom", "host": "https://www.caribbeancom.com",
-     "parser": "", "bypass_first": False},
+     "parser": "carib", "bypass_first": False, "interval": 2.0},
     {"key": "dmm", "name": "DMM", "host": "https://www.dmm.co.jp",
-     "parser": "", "bypass_first": False},
+     "parser": "dmm", "bypass_first": False, "interval": 2.0},
     {"key": "fc2", "name": "FC2", "host": "https://adult.contents.fc2.com",
-     "parser": "", "bypass_first": False},
+     "parser": "fc2", "bypass_first": False, "interval": 2.0},
     {"key": "fc2hub", "name": "FC2 Hub", "host": "https://javten.com",
-     "parser": "", "bypass_first": True},
+     "parser": "fc2hub", "bypass_first": True, "interval": 2.0},
     # 有解析器但数据会串号，默认停用；详见 freejavbt.py 的说明
     {"key": "freejavbt", "name": "FreeJavBT", "host": "https://freejavbt.com",
      "parser": "freejavbt", "bypass_first": False, "interval": 2.0, "enabled": False},
     {"key": "hbox", "name": "Hbox", "host": "https://hbox.jp",
-     "parser": "", "bypass_first": False},
+     "parser": "hbox", "bypass_first": False, "interval": 2.0},
     {"key": "jav321", "name": "Jav321", "host": "https://www.jav321.com",
      "parser": "jav321", "bypass_first": False, "interval": 1.5},
     {"key": "madou", "name": "Madou", "host": "https://madou.club",
-     "parser": "", "bypass_first": False},
+     "parser": "madou", "bypass_first": False, "interval": 2.0},
     {"key": "madouqu", "name": "Madouqu", "host": "https://madouqu.com",
-     "parser": "", "bypass_first": True},
+     "parser": "madouqu", "bypass_first": True, "interval": 2.0},
     {"key": "mgstage", "name": "MGStage", "host": "https://www.mgstage.com",
-     "parser": "", "bypass_first": True},
+     "parser": "mgstage", "bypass_first": True, "interval": 2.0},
     {"key": "missav", "name": "MissAV", "host": "https://missav123.com",
      "parser": "missav", "bypass_first": True, "interval": 2.0},
     {"key": "7mmtv", "name": "7mmTV", "host": "https://7mmtv.sx/zh",
-     "parser": "", "bypass_first": True},
+     "parser": "7mmtv", "bypass_first": True, "interval": 2.0},
+    # 需要 API Token 才能用（填在 Cookie 栏），没配等于抓不到，默认停用
     {"key": "theporndb", "name": "ThePornDB", "host": "https://api.theporndb.net",
-     "parser": "", "bypass_first": False},
+     "parser": "theporndb", "bypass_first": False, "interval": 1.5, "enabled": False},
     {"key": "xchina", "name": "XChina", "host": "https://xchina.co",
-     "parser": "", "bypass_first": False},
+     "parser": "xchina", "bypass_first": False, "interval": 2.0},
 )
 
 SOURCE_MAP: dict[str, dict] = {item["key"]: item for item in SOURCES}

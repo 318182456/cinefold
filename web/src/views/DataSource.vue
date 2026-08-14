@@ -2,7 +2,7 @@
 import { computed, onMounted, ref } from 'vue'
 import {
   checkAllDataSources, checkDataSource, createDataSource, deleteDataSource,
-  listDataSources, restoreDataSource, updateDataSource,
+  listDataSources, reorderDataSources, restoreDataSource, updateDataSource,
 } from '@/api'
 import { useToast } from '@/composables/useToast'
 import LoadingBlock from '@/components/LoadingBlock.vue'
@@ -29,8 +29,12 @@ const STATUS = {
   '': { dot: 'bg-gray-600', text: '未测试' },
 }
 
-// 没有解析器的源只能测连通，不参与抓取，得让用户看清楚
-const usable = computed(() => items.value.filter((i) => i.has_parser))
+// 没有解析器的源只能测连通，不参与抓取，得让用户看清楚。
+// 按 priority 排：这一组的次序就是抓取顺序，页面上要能看出来
+const byPriority = (a, b) => a.priority - b.priority || a.key.localeCompare(b.key)
+const usable = computed(
+  () => items.value.filter((i) => i.has_parser).sort(byPriority),
+)
 const registered = computed(() => items.value.filter((i) => !i.has_parser))
 
 async function load() {
@@ -143,6 +147,40 @@ async function checkAll() {
   }
 }
 
+// 抓取时多个源并发跑、取最先返回的结果，排在前面的源先拿到并发额度，
+// 所以顺序影响最终用哪个源的数据。这里只排「已接入抓取」那一组 ——
+// 未接入解析的源不参与抓取，给它们排序没有意义
+const reordering = ref(false)
+
+async function move(item, offset) {
+  const list = usable.value
+  const from = list.findIndex((i) => i.key === item.key)
+  const to = from + offset
+  if (from < 0 || to < 0 || to >= list.length) return
+
+  const keys = list.map((i) => i.key)
+  keys.splice(to, 0, ...keys.splice(from, 1))
+
+  // 先在本地改 priority，usable 是按它排序的计算属性，页面立刻响应；
+  // 失败时 load() 拉回真实顺序。起点沿用这一组现有的最小值，
+  // 与后端一致，避免把整组顶到其他源前面
+  const base = Math.min(...list.map((i) => i.priority))
+  keys.forEach((key, index) => {
+    const target = items.value.find((i) => i.key === key)
+    if (target) target.priority = base + index
+  })
+
+  reordering.value = true
+  try {
+    await reorderDataSources(keys)
+  } catch (err) {
+    toast.error(err.message)
+    await load()
+  } finally {
+    reordering.value = false
+  }
+}
+
 const editingItem = computed(
   () => items.value.find((i) => i.key === editing.value) || null,
 )
@@ -207,15 +245,24 @@ onMounted(load)
     <template v-else>
       <!-- 已接入抓取的源 -->
       <div class="space-y-2">
-        <p class="text-xs text-gray-500">已接入抓取</p>
+        <p class="text-xs text-gray-500">
+          已接入抓取
+          <span class="text-gray-600">· 用 ↑ ↓ 调整顺序，靠前的源优先出结果</span>
+        </p>
         <div class="grid gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
           <div
-            v-for="item in usable"
+            v-for="(item, index) in usable"
             :key="item.key"
             class="card cursor-pointer space-y-2 transition-colors hover:border-gray-700"
             @click="open(item)"
           >
             <div class="flex items-center gap-2">
+              <span
+                class="shrink-0 text-[11px] tabular-nums text-gray-600"
+                :title="`抓取顺序第 ${index + 1} 位`"
+              >
+                {{ index + 1 }}
+              </span>
               <span class="h-2 w-2 shrink-0 rounded-full" :class="STATUS[item.status].dot" />
               <span class="truncate text-sm font-medium text-gray-200">{{ item.name }}</span>
               <span
@@ -254,8 +301,26 @@ onMounted(load)
               <span v-if="item.has_cookie" class="badge bg-gray-800 text-gray-400">
                 已配 Cookie
               </span>
+              <div class="ml-auto flex shrink-0 items-center">
+                <button
+                  class="btn-ghost px-1.5 py-0.5 text-[11px] disabled:opacity-30"
+                  title="上移（提高抓取优先级）"
+                  :disabled="index === 0 || reordering"
+                  @click.stop="move(item, -1)"
+                >
+                  ↑
+                </button>
+                <button
+                  class="btn-ghost px-1.5 py-0.5 text-[11px] disabled:opacity-30"
+                  title="下移（降低抓取优先级）"
+                  :disabled="index === usable.length - 1 || reordering"
+                  @click.stop="move(item, 1)"
+                >
+                  ↓
+                </button>
+              </div>
               <button
-                class="btn-ghost ml-auto px-2 py-0.5 text-[11px]"
+                class="btn-ghost px-2 py-0.5 text-[11px]"
                 :disabled="checking === item.key"
                 @click.stop="check(item)"
               >
@@ -278,10 +343,10 @@ onMounted(load)
         </div>
       </div>
 
-      <!-- 仅登记，尚无解析器 -->
+      <!-- 仅登记，无解析器。内置源已全部接入解析，落到这里的基本是自定义源 -->
       <div v-if="registered.length" class="space-y-2 border-t border-gray-800 pt-4">
         <p class="text-xs text-gray-500">
-          尚未接入解析（可测连通性，但不参与抓取）
+          无解析器（可测连通性，但不参与抓取，因此不排序）
         </p>
         <div class="grid gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
           <div
