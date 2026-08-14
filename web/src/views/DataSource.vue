@@ -151,16 +151,13 @@ async function checkAll() {
 // 所以顺序影响最终用哪个源的数据。这里只排「已接入抓取」那一组 ——
 // 未接入解析的源不参与抓取，给它们排序没有意义
 const reordering = ref(false)
+// 正在拖的源，以及当前悬停到哪个源上（用来画插入位置的提示线）
+const dragKey = ref('')
+const dropKey = ref('')
 
-async function move(item, offset) {
+/** 把 keys 的顺序写进本地 priority 并同步到后端。 */
+async function applyOrder(keys) {
   const list = usable.value
-  const from = list.findIndex((i) => i.key === item.key)
-  const to = from + offset
-  if (from < 0 || to < 0 || to >= list.length) return
-
-  const keys = list.map((i) => i.key)
-  keys.splice(to, 0, ...keys.splice(from, 1))
-
   // 先在本地改 priority，usable 是按它排序的计算属性，页面立刻响应；
   // 失败时 load() 拉回真实顺序。起点沿用这一组现有的最小值，
   // 与后端一致，避免把整组顶到其他源前面
@@ -179,6 +176,63 @@ async function move(item, offset) {
   } finally {
     reordering.value = false
   }
+}
+
+function onDragStart(item, event) {
+  // 上一次重排还在保存时不接受新的拖动：两次请求的顺序无法保证，
+  // 后到的那个会把先到的覆盖掉
+  if (reordering.value) {
+    event.preventDefault()
+    return
+  }
+  dragKey.value = item.key
+  // 不设 dataTransfer 的话 Firefox 不会启动拖拽
+  event.dataTransfer.effectAllowed = 'move'
+  event.dataTransfer.setData('text/plain', item.key)
+}
+
+function onDragOver(item, event) {
+  if (!dragKey.value || item.key === dragKey.value) return
+  // 阻止默认行为才会触发 drop
+  event.preventDefault()
+  event.dataTransfer.dropEffect = 'move'
+  dropKey.value = item.key
+}
+
+function onDragLeave(item, event) {
+  // dragleave 在指针移到卡片内部的子元素上时也会触发，直接清会让提示线闪。
+  // relatedTarget 是即将进入的元素，仍在卡内就不算离开
+  if (event.currentTarget.contains(event.relatedTarget)) return
+  if (dropKey.value === item.key) dropKey.value = ''
+}
+
+function onDragEnd() {
+  dragKey.value = ''
+  dropKey.value = ''
+}
+
+async function onDrop(target) {
+  const from = usable.value.findIndex((i) => i.key === dragKey.value)
+  const to = usable.value.findIndex((i) => i.key === target.key)
+  onDragEnd()
+  if (from < 0 || to < 0 || from === to) return
+
+  const keys = usable.value.map((i) => i.key)
+  keys.splice(to, 0, ...keys.splice(from, 1))
+  await applyOrder(keys)
+}
+
+/** 键盘挪动。拖拽对键盘与读屏用户不可达，保留一条等价路径。 */
+async function move(item, offset) {
+  if (reordering.value) return
+  const list = usable.value
+  const from = list.findIndex((i) => i.key === item.key)
+  const to = from + offset
+  if (from < 0 || to < 0 || to >= list.length) return
+
+  const keys = list.map((i) => i.key)
+  keys.splice(to, 0, ...keys.splice(from, 1))
+  await applyOrder(keys)
 }
 
 const editingItem = computed(
@@ -247,22 +301,38 @@ onMounted(load)
       <div class="space-y-2">
         <p class="text-xs text-gray-500">
           已接入抓取
-          <span class="text-gray-600">· 用 ↑ ↓ 调整顺序，靠前的源优先出结果</span>
+          <span class="text-gray-600">
+            · 拖左侧手柄调整顺序（也可选中后按 ↑ ↓），靠前的源优先出结果
+          </span>
         </p>
         <div class="grid gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
           <div
             v-for="(item, index) in usable"
             :key="item.key"
             class="card cursor-pointer space-y-2 transition-colors hover:border-gray-700"
+            :class="[
+              dragKey === item.key ? 'opacity-40' : '',
+              dropKey === item.key ? 'border-brand' : '',
+            ]"
             @click="open(item)"
+            @dragover="onDragOver(item, $event)"
+            @dragleave="onDragLeave(item, $event)"
+            @drop.prevent="onDrop(item)"
           >
             <div class="flex items-center gap-2">
-              <span
-                class="shrink-0 text-[11px] tabular-nums text-gray-600"
-                :title="`抓取顺序第 ${index + 1} 位`"
+              <!-- 手柄单独可拖：整卡可拖会吃掉点击（卡片点开设置）与文本选择 -->
+              <button
+                class="-ml-1 shrink-0 cursor-grab px-1 text-[11px] tabular-nums text-gray-600 hover:text-gray-300 active:cursor-grabbing"
+                draggable="true"
+                :title="`抓取顺序第 ${index + 1} 位，拖动可调整；也可用 ↑ ↓ 键`"
+                @click.stop
+                @dragstart="onDragStart(item, $event)"
+                @dragend="onDragEnd"
+                @keydown.up.prevent="move(item, -1)"
+                @keydown.down.prevent="move(item, 1)"
               >
-                {{ index + 1 }}
-              </span>
+                <span class="mr-0.5 tracking-tighter text-gray-700">⠿</span>{{ index + 1 }}
+              </button>
               <span class="h-2 w-2 shrink-0 rounded-full" :class="STATUS[item.status].dot" />
               <span class="truncate text-sm font-medium text-gray-200">{{ item.name }}</span>
               <span
@@ -301,26 +371,8 @@ onMounted(load)
               <span v-if="item.has_cookie" class="badge bg-gray-800 text-gray-400">
                 已配 Cookie
               </span>
-              <div class="ml-auto flex shrink-0 items-center">
-                <button
-                  class="btn-ghost px-1.5 py-0.5 text-[11px] disabled:opacity-30"
-                  title="上移（提高抓取优先级）"
-                  :disabled="index === 0 || reordering"
-                  @click.stop="move(item, -1)"
-                >
-                  ↑
-                </button>
-                <button
-                  class="btn-ghost px-1.5 py-0.5 text-[11px] disabled:opacity-30"
-                  title="下移（降低抓取优先级）"
-                  :disabled="index === usable.length - 1 || reordering"
-                  @click.stop="move(item, 1)"
-                >
-                  ↓
-                </button>
-              </div>
               <button
-                class="btn-ghost px-2 py-0.5 text-[11px]"
+                class="btn-ghost ml-auto px-2 py-0.5 text-[11px]"
                 :disabled="checking === item.key"
                 @click.stop="check(item)"
               >
