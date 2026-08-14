@@ -329,23 +329,17 @@ def recover_records(dry_run: bool = True) -> dict:
             ).all() if p
         }
 
-    from app.services.medialink import VIDEO_SUFFIXES
+    from app.services.medialink import is_adoptable_video
 
     pending: list[Path] = []
     try:
         for path in root.rglob("*"):
             try:
-                suffix = path.suffix.lower()
-                if suffix not in VIDEO_SUFFIXES or not path.is_file():
+                # .strm 与预告片永远配不上源文件，会在一览里刷一堆无用条目。
+                # 判据抽到 medialink 里与纳管、页面统计共用
+                if not is_adoptable_video(path) or not path.is_file():
                     continue
             except OSError:
-                continue
-            # .strm 只是一行 URL 的文本文件，指向站外资源，本来就没有源文件
-            # 与种子。给它建关联毫无意义，还会在一览里刷一堆永远配不上的条目
-            if suffix == ".strm":
-                continue
-            # 预告片同理：刮削工具生成的附属内容，不是下载来的正片
-            if "trailer" in path.stem.lower():
                 continue
             if _norm(str(path)) not in registered:
                 pending.append(path)

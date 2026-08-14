@@ -512,13 +512,15 @@ def _count_scrape_files(scrape_dir: str) -> tuple[int, int]:
     不为了一个统计数字让整个列表接口失败。
     """
     from app.database.models import MediaLink
-    from app.services.medialink import VIDEO_SUFFIXES
+    from app.services.medialink import is_adoptable_video
 
     root = Path(scrape_dir)
     try:
+        # 判据与纳管候选扫描共用（is_adoptable_video）：这个数字就是「点纳入
+        # 管理会处理多少个」的预告，两边口径不一样会让用户以为漏了一批
         found = {
             str(p) for p in root.rglob("*")
-            if p.suffix.lower() in VIDEO_SUFFIXES and p.is_file()
+            if is_adoptable_video(p) and p.is_file()
         }
     except OSError as exc:
         logger.warning(f"统计刮削输出目录文件数失败: {exc}")

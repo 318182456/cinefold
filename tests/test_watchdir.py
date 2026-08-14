@@ -1345,6 +1345,51 @@ def test_adopt_scrape_dir_ignores_strm_and_trailers(
     assert ".strm" not in listed
 
 
+def test_scrape_dir_count_matches_adopt_candidates(
+    tmp_path, configure, fake_downloader, client
+):
+    """页面上的「N 个未登记」必须与纳管候选数一致。
+
+    两者曾用不同判据：统计只按扩展名筛，纳管另外排除了 .strm 与预告片，
+    于是页面说 256 个未登记、点进去纳管却只处理一部分，用户无从判断
+    哪个数字是真的。
+    """
+    dl = tmp_path / "downloads"
+    dl.mkdir()
+    source = dl / "ABC-123.mp4"
+    source.write_bytes(b"V" * 64)
+
+    scrape = tmp_path / "lib" / "AV"
+    scrape.mkdir(parents=True)
+    os.link(source, scrape / "ABC-123.mp4")
+    (scrape / "DEF-456.mp4").write_bytes(b"X")          # 未登记的真影片
+    (scrape / "SDMU-963-Trailer.strm").write_text("u")   # 两个都该被排除
+    (scrape / "START-257-Trailer.mp4").write_bytes(b"T")
+
+    fake_downloader.torrents["H1"] = [str(source)]
+    configure(
+        medialink_library_path=str(tmp_path / "lib"),
+        medialink_scrape_dir=str(scrape),
+    )
+    # ABC-123 已经登记过，剩 DEF-456 一个未登记
+    with session_scope() as session:
+        session.add(MediaLink(
+            link_path=str(scrape / "ABC-123.mp4"),
+            code="ABC-123", source_path=str(source),
+        ))
+
+    listed = client.get("/api/v1/watchdirs").json()["data"]
+    card = next(i for i in listed["items"] if i["id"] == 0)
+    shown = max(0, card["file_count"] - card["registered_count"])
+
+    preview = watchdir.adopt_scrape_dir(dry_run=True)
+
+    # 目录里 4 个视频文件，但只有 2 个算「影片」，其中 1 个已登记
+    assert card["file_count"] == 2
+    assert shown == 1
+    assert preview["total"] == shown
+
+
 def test_adopt_scrape_dir_accounts_for_every_candidate(
     tmp_path, configure, fake_downloader
 ):

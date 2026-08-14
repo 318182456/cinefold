@@ -39,6 +39,31 @@ VIDEO_SUFFIXES = {
     ".flv", ".rmvb", ".iso", ".mpg", ".mpeg", ".m4v", ".strm",
 }
 
+def is_adoptable_video(path: Path) -> bool:
+    """这个文件值得纳入删除联动的管辖范围吗。
+
+    「未登记影片」的统计、纳管候选扫描、孤儿一览的未登记扫描三处必须用
+    同一条判据 —— 否则页面上说有 256 个未登记，点进去纳管却只列出 100 个，
+    用户无从判断哪个数字是真的。
+
+    排除两类看着像影片、实则永远配不上源文件的：
+
+      .strm     只有一行 URL 的文本文件，指向站外资源，压根没有源文件与种子
+      预告片    刮削工具生成的附属内容，不是下载来的正片
+
+    调用方仍要自己判断 is_file()：那一步会抛 OSError，各处的兜底方式不同
+    （有的记进 skipped，有的静默跳过），不适合塞进这里。
+    """
+    suffix = path.suffix.lower()
+    if suffix not in VIDEO_SUFFIXES:
+        return False
+    if suffix == ".strm":
+        return False
+    if "trailer" in path.stem.lower():
+        return False
+    return True
+
+
 # 刮削产物：Emby/Jellyfin 认得的元数据、图片、字幕。
 # 只按扩展名判定还不够 —— 删除范围另外靠"与影片同名前缀"约束（见 _sidecar_files）
 SIDECAR_SUFFIXES = {

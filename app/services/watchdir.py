@@ -42,7 +42,7 @@ from app.database.session import (
 )
 from app.services import watchdir_progress as progress
 from app.services.medialink import (
-    VIDEO_SUFFIXES, handle_media_deleted, mark_completed,
+    VIDEO_SUFFIXES, handle_media_deleted, is_adoptable_video, mark_completed,
 )
 
 # 文件刚出现时可能还在写入（下载中、拷贝中）。连续两次 stat 大小不变才认为
@@ -1666,18 +1666,12 @@ def adopt_scrape_dir(
     try:
         for path in root.rglob("*"):
             try:
-                suffix = path.suffix.lower()
-                if suffix not in VIDEO_SUFFIXES or not path.is_file():
+                # is_adoptable_video 排除 .strm 与预告片：两者永远配不上源文件，
+                # 收进来只会把真正值得纳管的条目淹掉。判据与页面上那个
+                # 「N 个未登记」共用，两边数字才对得上
+                if not is_adoptable_video(path) or not path.is_file():
                     continue
             except OSError:
-                continue
-            # .strm 只是一行 URL 的文本文件，指向站外资源，本来就没有源文件
-            # 与种子；预告片是刮削工具生成的附属内容，不是下载来的正片。
-            # 两者都永远配不上源文件，收进来只会把真正值得纳管的条目淹掉
-            # （与 orphan._scan_unregistered 同一口径）
-            if suffix == ".strm":
-                continue
-            if "trailer" in path.stem.lower():
                 continue
             if _norm_path(str(path)) in registered:
                 continue
