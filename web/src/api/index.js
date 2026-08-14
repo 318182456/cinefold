@@ -153,9 +153,13 @@ export const getWatchDirProgress = (watchId = 0) =>
 export const backfillWatchDirTorrents = (watchId = 0) =>
   http.post('/watchdirs/backfill', null, { params: { watch_id: watchId } })
 // 把刮削输出目录里已存在但没登记的影片纳入管理。
-// dry_run 默认为真 —— 登记结果是反向删除的依据，先让用户核对配对
-export const adoptScrapeDir = (dryRun = true) =>
-  http.post('/watchdirs/adopt-scrape', null, { params: { dry_run: dryRun } })
+// dry_run 默认为真 —— 登记结果是反向删除的依据，先让用户核对配对。
+// fallbackPassthrough 为真时，配不到源文件的那批登记成直通模式（自己就是
+// 源文件），让 Emby 删掉它们时至少能删掉文件本身，代价是没有种子线索
+export const adoptScrapeDir = (dryRun = true, fallbackPassthrough = false) =>
+  http.post('/watchdirs/adopt-scrape', null, {
+    params: { dry_run: dryRun, fallback_passthrough: fallbackPassthrough },
+  })
 // 扣留中的删除：文件已消失但还在宽限期内观察
 export const listWatchDirHolds = (watchId = 0) =>
   http.get('/watchdirs/holds', { params: { watch_id: watchId } })

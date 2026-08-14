@@ -40,6 +40,15 @@ const confirmingRule = ref(null)
 const adoptOpen = ref(false)
 const adoptResult = ref(null)
 const adopting = ref(false)
+// 配不到源文件的是否降级为直通登记。默认关 —— 直通是单向降级，
+// 登记完就放弃了种子线索，得用户显式勾选
+const adoptFallback = ref(false)
+// 这一次确认会登记多少条。按 inode 配上的与降级直通的都算 ——
+// 只看 adopted 的话，可纳管为 0 但勾了降级时按钮会一直灰着
+const adoptTotal = computed(() =>
+  (adoptResult.value?.adopted || []).length
+  + (adoptResult.value?.passthrough || []).length,
+)
 
 // 同步进度。真同步走后台线程，靠轮询这个接口看它跑到哪了 ——
 // 每个新文件都要等写入稳定（最多 6 秒），没有进度就完全是黑盒
@@ -342,11 +351,18 @@ async function backfill() {
 // 刮削输出目录的既存文件纳管。先演练看配对结果，再执行 ——
 // 登记的是反向删除的依据，配错等于把删除权指向错误的源文件
 async function previewAdopt() {
+  adoptFallback.value = false
   adoptResult.value = null
   adoptOpen.value = true
+  await refreshAdoptPreview()
+}
+
+// 勾选/取消「降级直通」都要重算一遍：配不到源文件的那批会在
+// unmatched 与 passthrough 之间挪位置，不重算列表就与开关不符
+async function refreshAdoptPreview() {
   adopting.value = true
   try {
-    adoptResult.value = await adoptScrapeDir(true)
+    adoptResult.value = await adoptScrapeDir(true, adoptFallback.value)
   } catch (err) {
     toast.error(err.message)
     adoptOpen.value = false
@@ -358,8 +374,14 @@ async function previewAdopt() {
 async function runAdopt() {
   adopting.value = true
   try {
-    const data = await adoptScrapeDir(false)
-    toast.success(`已纳入管理 ${(data.adopted || []).length} 个影片`)
+    const data = await adoptScrapeDir(false, adoptFallback.value)
+    const normal = (data.adopted || []).length
+    const through = (data.passthrough || []).length
+    toast.success(
+      through
+        ? `已纳入管理 ${normal + through} 个影片（其中 ${through} 个直通登记）`
+        : `已纳入管理 ${normal} 个影片`,
+    )
     adoptOpen.value = false
     await load()
   } catch (err) {
@@ -979,6 +1001,9 @@ onUnmounted(() => {
           <p class="text-xs text-gray-400">
             未登记 {{ adoptResult.total }} 个 ·
             可纳管 {{ (adoptResult.adopted || []).length }} ·
+            <template v-if="(adoptResult.passthrough || []).length">
+              直通登记 {{ adoptResult.passthrough.length }} ·
+            </template>
             配不到源文件 {{ (adoptResult.unmatched || []).length }} ·
             跳过 {{ (adoptResult.skipped || []).length }}
           </p>
@@ -1001,11 +1026,29 @@ onUnmounted(() => {
             </p>
           </div>
 
+          <!-- 直通登记：配不到源文件但仍要纳管的那批，自己就是源文件 -->
+          <div v-if="(adoptResult.passthrough || []).length" class="space-y-1">
+            <p class="text-[11px] text-sky-400">
+              将以直通模式登记（自己就是源文件，没有种子线索）
+            </p>
+            <p
+              v-for="p in adoptResult.passthrough.slice(0, 8)"
+              :key="p.link_path"
+              class="truncate text-[11px] text-gray-500"
+              :title="p.link_path"
+            >
+              {{ p.code }} · {{ fileName(p.link_path) }}
+            </p>
+            <p v-if="adoptResult.passthrough.length > 8" class="text-[11px] text-gray-600">
+              还有 {{ adoptResult.passthrough.length - 8 }} 条…
+            </p>
+          </div>
+
           <!-- 配不到源文件的多是种子已删、或源文件被移走后失去硬链接关系。
-               这些没法自动纳管，说清原因免得用户以为按钮没生效 -->
+               这些没法按 inode 纳管，说清原因免得用户以为按钮没生效 -->
           <div v-if="(adoptResult.unmatched || []).length" class="space-y-1">
             <p class="text-[11px] text-amber-400">
-              配不到源文件（种子已删、或源文件已不在下载器里），无法纳管
+              配不到源文件（种子已删、或源文件已不在下载器里），无法按 inode 纳管
             </p>
             <p
               v-for="u in adoptResult.unmatched.slice(0, 5)"
@@ -1019,6 +1062,29 @@ onUnmounted(() => {
               还有 {{ adoptResult.unmatched.length - 5 }} 条…
             </p>
           </div>
+
+          <!-- 降级直通的开关。放在列表之后 —— 用户得先看到「配不上多少条」
+               才知道勾这个会影响什么 -->
+          <label
+            v-if="(adoptResult.unmatched || []).length
+              || (adoptResult.passthrough || []).length"
+            class="flex cursor-pointer items-start gap-2 rounded-lg bg-gray-900/60 px-3 py-2"
+          >
+            <input
+              v-model="adoptFallback"
+              type="checkbox"
+              class="mt-0.5"
+              :disabled="adopting"
+              @change="refreshAdoptPreview"
+            />
+            <span class="text-[11px] leading-relaxed text-gray-400">
+              <span class="text-gray-300">把配不到源文件的也纳入管理（直通模式）</span><br />
+              它们会以「自己就是源文件」登记，Emby 里删掉时能删掉文件本身，
+              但没有种子线索，回收不了下载器空间。
+              inode 配不上不代表源文件真的不在 —— 建议先在「孤儿关联」里跑一次
+              「重建关联记录」，那个按下载历史配对，能救回一部分。
+            </span>
+          </label>
 
           <div v-if="(adoptResult.skipped || []).length" class="space-y-1">
             <p class="text-[11px] text-gray-500">跳过</p>
@@ -1037,7 +1103,7 @@ onUnmounted(() => {
           </p>
 
           <p
-            v-if="(adoptResult.adopted || []).length"
+            v-if="adoptTotal"
             class="rounded-lg bg-amber-950/40 px-3 py-2 text-[11px] text-amber-300"
           >
             登记后这些影片就进入删除联动范围：在 Emby 里删掉会连带删源文件与种子。
@@ -1051,7 +1117,7 @@ onUnmounted(() => {
           </button>
           <button
             class="btn-primary px-3 py-1.5 text-xs"
-            :disabled="adopting || !(adoptResult?.adopted || []).length"
+            :disabled="adopting || !adoptTotal"
             @click="runAdopt"
           >
             {{ adopting ? '登记中…' : '确认纳入管理' }}
