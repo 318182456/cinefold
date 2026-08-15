@@ -241,6 +241,24 @@ class TransmissionClient:
             logger.warning(f"读取 Transmission 种子文件清单失败: {exc}")
         return paths
 
+    def list_torrent_files_detailed(self, torrent_hash: str) -> list[dict]:
+        """列出单个种子的文件，带绝对路径与字节数。语义同 qBittorrent 版。"""
+        if not torrent_hash or not self._ensure_client():
+            return []
+
+        try:
+            torrents = self.client.get_torrents(ids=[torrent_hash])
+            if not torrents:
+                return []
+            root = torrents[0].download_dir
+            return [
+                {"path": str(PurePath(root) / f.name), "size": int(f.size or 0)}
+                for f in torrents[0].get_files()
+            ]
+        except Exception as exc:
+            logger.warning(f"读取 Transmission 种子 {torrent_hash} 的文件明细失败: {exc}")
+            return []
+
     def find_torrents_by_path(
         self, paths: Sequence[str] | None
     ) -> dict[str, list[str]]:

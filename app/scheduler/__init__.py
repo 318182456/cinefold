@@ -177,9 +177,20 @@ def translate_titles() -> int:
 
 
 def pt_wait() -> int:
-    """同步下载器状态。"""
+    """同步下载器状态，顺带给正在下的种子补标广告文件。
+
+    补标合在这里而不是单开一个任务：两者都要遍历 DOWNLOADING 的种子，
+    合起来能省一半下载器请求。推送磁链时元数据往往还没到、挑不出广告，
+    这一轮才是实际生效的地方。
+    """
     from app import services
-    return services.sync_download_status()
+    completed = services.sync_download_status()
+    try:
+        services.unwant_junk_for_downloading()
+    except Exception as exc:
+        # 补标失败不该让状态同步的结果丢掉
+        logger.warning(f"[任务] 补标广告文件失败: {exc}")
+    return completed
 
 
 def transfer_seeds() -> int:

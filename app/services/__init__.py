@@ -18,6 +18,7 @@ from app.modules import downloadclient, mediaserver, notify, ptsite, translate
 from app.schemas.torrent import Torrent
 from app.utils import get_magnet_hash
 from app.utils.filters import filter_torrents, has_vr, sort_torrents
+from app.utils.junkfiles import pick_junk_files
 
 
 # ======================================================================
@@ -274,8 +275,92 @@ def download_torrent(code: str, torrent: Torrent | None = None) -> bool:
 
     _record_history(code, torrent_hash)
     _update_code_status(code, CodeStatus.DOWNLOADING)
+    _unwant_junk_files(client, torrent_hash, code)
     send_downloading_message(code, torrent)
     return True
+
+
+def _unwant_junk_files(client, torrent_hash: str, code: str) -> None:
+    """把种子里的广告文件标记为不需要，不下载它们。
+
+    公开站的种子常夹带引流视频、跳转网页、"最新地址"文本。放着不管不只是
+    占磁盘 —— 刮削工具会把它们清掉，媒体服务器随即发出删除事件，联动删除
+    再把整部片的种子和正片一起删了（真实发生过）。源头掐掉最省事。
+
+    整个流程是尽力而为：任何一步失败都只记日志，不能影响下载本身 ——
+    多下几个广告文件是小事，让推送流程崩掉不值得。
+    """
+    detail = getattr(client, "list_torrent_files_detailed", None)
+    unwant = getattr(client, "unwant_torrent_files", None)
+    if detail is None or unwant is None:
+        # 迅雷没实现这两个接口
+        return
+
+    try:
+        files = detail(torrent_hash)
+        if not files:
+            # 磁链刚加进去时元数据还没拿到，文件清单是空的。
+            # 这种情况交给定时任务补（见 unwant_junk_for_downloading）
+            return
+
+        junk = pick_junk_files(files)
+        if not junk:
+            return
+
+        marked, remaining = unwant(torrent_hash, junk)
+        if marked:
+            logger.info(
+                f"[{code}] 已跳过 {marked} 个广告文件，剩余 {remaining} 个文件正常下载"
+            )
+    except Exception as exc:
+        logger.warning(f"[{code}] 标记广告文件失败，不影响下载: {exc}")
+
+
+def unwant_junk_for_downloading() -> int:
+    """给正在下载的种子补标广告文件。返回处理了几个种子。
+
+    推送磁链的那一刻元数据往往还没拿到，文件清单是空的，_unwant_junk_files
+    什么也做不了。这个定时任务补上那一轮 —— 元数据到手后就能挑了。
+
+    已经标记过的种子再跑一次是安全的：pick_junk_files 挑出的还是那批文件，
+    unwant_torrent_files 把已经是 priority=0 的再设一次不改变任何东西，
+    marked 为 0 时不打日志，不会刷屏。
+    """
+    client = downloadclient.get_download_client()
+    if client is None:
+        return 0
+
+    detail = getattr(client, "list_torrent_files_detailed", None)
+    unwant = getattr(client, "unwant_torrent_files", None)
+    if detail is None or unwant is None:
+        return 0
+
+    with session_scope() as session:
+        pairs = session.execute(
+            select(History.hash, History.code)
+            .join(Code, Code.code == History.code)
+            .where(Code.status == CodeStatus.DOWNLOADING)
+        ).all()
+
+    handled = 0
+    for torrent_hash, code in pairs:
+        try:
+            files = detail(torrent_hash)
+            if not files:
+                continue
+            junk = pick_junk_files(files)
+            if not junk:
+                continue
+            marked, remaining = unwant(torrent_hash, junk)
+            if marked:
+                logger.info(
+                    f"[{code}] 补标 {marked} 个广告文件，剩余 {remaining} 个正常下载"
+                )
+                handled += 1
+        except Exception as exc:
+            logger.debug(f"[{code}] 补标广告文件失败: {exc}")
+
+    return handled
 
 
 def _push_to_client(client, torrent: Torrent, code: str) -> str | None:

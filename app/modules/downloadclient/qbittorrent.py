@@ -322,6 +322,31 @@ class QBitTorrentClient:
                 self._on_error(exc, "读取文件清单")
         return paths
 
+    def list_torrent_files_detailed(self, torrent_hash: str) -> list[dict]:
+        """列出单个种子的文件，带绝对路径与字节数。
+
+        挑广告文件要按体积判断（正片总是最大的那个），list_torrent_files
+        只给路径不够用。返回 [{"path": 绝对路径, "size": 字节数}]。
+        """
+        if not torrent_hash or not self._ensure_client():
+            return []
+
+        try:
+            info = self.client.torrents_info(torrent_hashes=[torrent_hash])
+            if not info:
+                return []
+            root = info[0].save_path
+            out = [
+                {"path": str(PurePath(root) / f.name), "size": int(f.size or 0)}
+                for f in self.client.torrents_files(torrent_hash=torrent_hash)
+            ]
+            _report_ok()
+            return out
+        except Exception as exc:
+            logger.warning(f"读取 qBittorrent 种子 {torrent_hash} 的文件明细失败: {exc}")
+            self._on_error(exc, "读取文件明细")
+            return []
+
     def unwant_torrent_files(
         self, torrent_hash: str, paths: Sequence[str]
     ) -> tuple[int, int]:
