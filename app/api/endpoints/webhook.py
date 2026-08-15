@@ -228,15 +228,24 @@ async def emby_webhook(request: Request):
                 logger.info(f"Emby 回调为目录级删除事件且目录下无关联记录，忽略: {link_path}")
                 return ResponseEntity.ok({"ignored": True, "reason": "目录级事件"})
 
-            logger.info(
+            logger.warning(
                 f"Emby 回调路径指向目录，其下有 {len(videos)} 条关联记录，"
-                f"逐个联动: {link_path}"
+                f"逐个联动（事件={event or '未提供'}，"
+                f"来源={request.client.host if request.client else '?'}）: {link_path}"
             )
             results = []
             for video in videos:
                 r = await run_in_threadpool(handle_media_deleted, video, "", dry_run)
                 results.append(r.as_dict())
             return ResponseEntity.ok({"dir_path": link_path, "items": results})
+
+    # 联动删除会真的删掉种子和源文件，事后追责全靠这行 —— 被忽略的事件有日志，
+    # 真正执行删除的反而没有，出事时只能看到"删了什么"，看不到"谁让删的"
+    logger.warning(
+        f"[{code or '?'}] 收到 Emby 删除回调，事件={event or '未提供'}，"
+        f"来源={request.client.host if request.client else '?'}，"
+        f"路径={link_path or '未提供'}"
+    )
 
     result = await run_in_threadpool(
         handle_media_deleted, link_path, code or "", dry_run

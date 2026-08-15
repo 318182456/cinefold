@@ -255,6 +255,13 @@ def download_torrent(code: str, torrent: Torrent | None = None) -> bool:
         logger.info(f"[{code}] 未搜到符合条件的种子")
         return False
 
+    # 过滤日志只记被淘汰的，选中的反而看不见 —— 排查「怎么又下了这个源」
+    # 时没有这行就只能靠 hash 反查下载器
+    logger.info(
+        f"[{code}] 选中 [{torrent.display_site}] {(torrent.title or '')[:50]} "
+        f"({torrent.size_mb:.0f}MB, {torrent.seeders} 种)"
+    )
+
     client = downloadclient.get_download_client()
     if client is None:
         logger.error(f"[{code}] 未配置下载器")
