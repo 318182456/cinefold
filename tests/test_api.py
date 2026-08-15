@@ -606,18 +606,80 @@ class TestResubscribeResetsState:
                 session.merge(History(hash=f"{h}-{code}", code=code))
         return CodeStatus
 
-    def test_subscribe_clears_history(self):
+    @staticmethod
+    def _downloader(monkeypatch, alive_hashes=()):
+        """模拟下载器，只认 alive_hashes 里的种子还在。"""
+        from app import services
+
+        class _Fake:
+            def monitor_torrent(self, hashes=None):
+                return [{"hash": h} for h in (hashes or []) if h in alive_hashes]
+
+        monkeypatch.setattr(
+            services.downloadclient, "get_download_client", lambda name="": _Fake(),
+        )
+
+    def test_vanished_history_is_cleared(self, monkeypatch):
+        """种子已从下载器消失，记录该清掉，让它重新搜种。"""
         from app import services
         from app.database.models import Code, CodeStatus, History
         from app.database.session import session_scope
 
         code = "REDO-001"
         self._seed(code, CodeStatus.DOWNLOADING, hashes=("h1", "h2"))
+        self._downloader(monkeypatch)  # 一个都不在
 
         assert services.subscribe_code(code) is True
         with session_scope() as session:
             assert session.get(Code, code).status == CodeStatus.SUBSCRIBED
             assert session.query(History).filter(History.code == code).count() == 0
+
+    def test_alive_history_is_kept(self, monkeypatch):
+        """种子还在下载器里就保留记录 —— 那仍是有效的番号↔hash 关联，
+        清掉只会白搜一轮，推送时下载器回「已存在」，关联反倒丢了。"""
+        from app import services
+        from app.database.models import Code, CodeStatus, History
+        from app.database.session import session_scope
+
+        code = "KEEP-001"
+        self._seed(code, CodeStatus.DOWNLOADING, hashes=("h1",))
+        self._downloader(monkeypatch, alive_hashes={f"h1-{code}"})
+
+        assert services.subscribe_code(code) is True
+        with session_scope() as session:
+            assert session.get(Code, code).status == CodeStatus.SUBSCRIBED
+            assert session.query(History).filter(History.code == code).count() == 1
+
+    def test_partial_vanish_only_drops_gone_ones(self, monkeypatch):
+        """转种场景下一个番号有多条记录，只清没了的那些。"""
+        from app import services
+        from app.database.models import CodeStatus, History
+        from app.database.session import session_scope
+
+        code = "MIXED-001"
+        self._seed(code, CodeStatus.DOWNLOADING, hashes=("h1", "h2"))
+        self._downloader(monkeypatch, alive_hashes={f"h1-{code}"})
+
+        services.subscribe_code(code)
+        with session_scope() as session:
+            left = [r.hash for r in session.query(History).filter(History.code == code)]
+            assert left == [f"h1-{code}"]
+
+    def test_no_downloader_keeps_history(self, monkeypatch):
+        """下载器没配置时无法判断种子死活，宁可留着记录。"""
+        from app import services
+        from app.database.models import CodeStatus, History
+        from app.database.session import session_scope
+
+        code = "NOCLIENT-001"
+        self._seed(code, CodeStatus.DOWNLOADING)
+        monkeypatch.setattr(
+            services.downloadclient, "get_download_client", lambda name="": None,
+        )
+
+        services.subscribe_code(code)
+        with session_scope() as session:
+            assert session.query(History).filter(History.code == code).count() == 1
 
     def test_cleared_code_searches_again(self, monkeypatch):
         """清掉记录后，download_torrent 不该再判「已下载过」。"""
@@ -626,6 +688,7 @@ class TestResubscribeResetsState:
 
         code = "REDO-002"
         self._seed(code, CodeStatus.DOWNLOADING)
+        self._downloader(monkeypatch)
         services.subscribe_code(code)
 
         # 走到搜种这一步就说明没被 _is_downloaded 短路
@@ -637,7 +700,7 @@ class TestResubscribeResetsState:
         services.download_torrent(code)
         assert searched == [code], "重新订阅后应该重新搜种"
 
-    def test_other_codes_untouched(self):
+    def test_other_codes_untouched(self, monkeypatch):
         """只清自己的记录，别误伤别的番号。"""
         from app import services
         from app.database.models import CodeStatus, History
@@ -646,6 +709,7 @@ class TestResubscribeResetsState:
         mine, other = "REDO-003", "KEEP-003"
         self._seed(mine, CodeStatus.DOWNLOADING)
         self._seed(other, CodeStatus.DOWNLOADING)
+        self._downloader(monkeypatch)
 
         services.subscribe_code(mine)
         with session_scope() as session:

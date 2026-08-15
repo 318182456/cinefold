@@ -536,17 +536,16 @@ def _subscribe_actor_new_works(actor_name: str, limit_date: str | None) -> int:
             row.status = CodeStatus.SUBSCRIBED
 
         if wanted:
-            # 与 subscribe_code 同理：订阅即从头来过，旧下载记录留着会让
-            # download_torrent 判成「已下载过」而永不搜种
-            stale = session.execute(
-                delete(History).where(History.code.in_([r.code for r in wanted]))
-            ).rowcount
-            if stale:
-                logger.info(f"[{actor_name}] 清掉 {stale} 条旧下载记录")
             logger.info(f"[{actor_name}] 新增订阅 {len(wanted)} 个番号")
         if skipped:
             logger.info(f"[{actor_name}] 跳过 {skipped} 个 VR 番号")
-        return len(wanted)
+        picked = [r.code for r in wanted]
+
+    # 与 subscribe_code 同口径：只清种子确实没了的记录，留着的仍是有效关联。
+    # 放在事务外 —— 要问下载器，不该占着数据库连接
+    for code in picked:
+        _drop_vanished_history(code)
+    return len(picked)
 
 
 def is_filtered_code(code: str, title: str = "") -> str:
@@ -574,12 +573,14 @@ def is_filtered_code(code: str, title: str = "") -> str:
 def subscribe_code(code: str) -> bool:
     """订阅单个番号。被过滤规则拦下时返回 False。
 
-    订阅一律当作「从头来过」：把上一轮的下载记录清掉，让它重新搜种。
+    旧的下载记录只在种子确实已从下载器消失时才清 —— 那种记录会让番号卡死：
+    download_torrent 靠 History 判定「已下载过」跳过搜种，
+    _sync_status_from_history 又把状态推到 DOWNLOADING，而
+    sync_download_status 只认下载器里还在的种子，于是永远停在「下载中」。
 
-    不清会卡死 —— 用户在下载器里删掉种子后 History 仍在，download_torrent
-    靠它判定「已下载过」直接跳过搜种，_sync_status_from_history 又把状态
-    推到 DOWNLOADING，而 sync_download_status 只认下载器里还在的种子。
-    番号就停在「下载中」，重新订阅也解不开。
+    种子还在就保留记录：它仍是有效的番号↔hash 关联，联动删除、状态同步、
+    转移做种都要靠它。清掉只会让接下来白搜一轮，推送时下载器回「已存在」，
+    关联反倒丢了。
 
     MediaLink 不动：那是已入库的硬链接，对应真实文件，删掉会让媒体库丢内容。
     重新订阅只是想再下一次，不是要抹掉已有的成果。
@@ -597,14 +598,46 @@ def subscribe_code(code: str) -> bool:
         else:
             row.status = CodeStatus.SUBSCRIBED
 
-        stale = session.execute(
-            delete(History).where(History.code == code)
-        ).rowcount
-        if stale:
-            logger.info(f"[{code}] 重新订阅，清掉 {stale} 条旧下载记录")
-
+    _drop_vanished_history(code)
     send_subscribe_message(code)
     return True
+
+
+def _drop_vanished_history(code: str) -> None:
+    """清掉这个番号在下载器里已经不存在的下载记录。
+
+    下载器连不上或没配置时什么也不做 —— 此时无法判断种子死活，宁可留着
+    记录（大不了这轮不搜种，下轮再来），也不要把有效关联误删。
+    """
+    with session_scope() as session:
+        hashes = list(session.scalars(
+            select(History.hash).where(History.code == code)
+        ).all())
+    if not hashes:
+        return
+
+    client = downloadclient.get_download_client()
+    if client is None:
+        return
+
+    try:
+        states = client.monitor_torrent(hashes)
+    except Exception as exc:
+        logger.warning(f"[{code}] 查询下载器失败，保留下载记录: {exc}")
+        return
+
+    alive = {s.get("hash", "").lower() for s in states}
+    gone = [h for h in hashes if h.lower() not in alive]
+    if not gone:
+        logger.info(f"[{code}] 种子仍在下载器中，保留 {len(hashes)} 条下载记录")
+        return
+
+    # monitor_torrent 出错时也返回空列表，和「种子确实都没了」分不清。
+    # 但这里只影响一个番号：误判的代价是重新搜一次种，不会重复下载 ——
+    # 推送时下载器认得出重复，会回「已存在」并复用同一个 hash
+    with session_scope() as session:
+        session.execute(delete(History).where(History.hash.in_(gone)))
+    logger.info(f"[{code}] 下载器中已无 {len(gone)} 个种子，清掉对应记录，将重新搜种")
 
 
 def cancel_subscribe(code: str) -> bool:
