@@ -72,7 +72,7 @@ onMounted(load)
     <LoadingBlock v-if="loading" :rows="4" />
 
     <template v-else-if="items.length">
-      <div class="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+      <div class="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
         <CodeCard
           v-for="item in items"
           :key="item.code"

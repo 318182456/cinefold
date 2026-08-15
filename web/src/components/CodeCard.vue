@@ -126,7 +126,13 @@ async function download() {
           <span v-if="item.upcoming" class="mr-1">预定</span>{{ item.release_date }}
         </span>
         <span v-if="item.star">★ {{ item.star }}</span>
-        <span v-for="cast in casts" :key="cast" class="truncate">{{ cast }}</span>
+        <!-- 演员名可以很长（数据源里有「エミリサン 26岁 株トレーダー
+             (エミリサン 26歳 株トレーダー)」这种），而 truncate 自带 nowrap。
+             不给 min-w-0，flex item 的 min-width:auto 不许它收缩到内容宽度以下，
+             它就拿满整行、把卡片顶宽，truncate 反而永远不触发。
+             放这张卡片的 grid 还必须写 grid-cols-1（而非省略），否则列的
+             minmax 下限是 auto，同样会被这行字撑开、整页横向溢出 -->
+        <span v-for="cast in casts" :key="cast" class="min-w-0 max-w-full truncate">{{ cast }}</span>
       </div>
 
       <div class="mt-2 flex gap-2">

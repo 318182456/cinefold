@@ -85,7 +85,7 @@ onMounted(load)
         <SelectionBar v-if="today.length" :sel="sel" />
       </div>
       <LoadingBlock v-if="loading" :rows="2" />
-      <div v-else-if="today.length" class="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+      <div v-else-if="today.length" class="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
         <CodeCard
           v-for="item in today"
           :key="item.code"

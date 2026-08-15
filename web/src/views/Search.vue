@@ -163,7 +163,7 @@ const sizeText = (mb) => (mb >= 1024 ? `${(mb / 1024).toFixed(2)} GB` : `${mb.to
     </div>
 
     <!-- 番号结果 -->
-    <div v-if="results.length" class="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+    <div v-if="results.length" class="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
       <div v-for="item in results" :key="item.code" class="space-y-2">
         <CodeCard :item="item" @changed="search" />
         <button class="btn-ghost w-full py-1.5 text-xs" @click="findTorrents(item.code)">

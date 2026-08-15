@@ -192,7 +192,7 @@ onMounted(load)
       <template v-else-if="shown.length">
         <SelectionBar :sel="sel" />
 
-        <div class="grid gap-3 lg:grid-cols-2 2xl:grid-cols-3">
+        <div class="grid grid-cols-1 gap-3 lg:grid-cols-2 2xl:grid-cols-3">
           <CodeCard
             v-for="item in paged"
             :key="item.code"

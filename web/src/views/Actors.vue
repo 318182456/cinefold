@@ -189,7 +189,7 @@ onMounted(() => {
     <section v-if="selected" class="space-y-3">
       <h2 class="text-sm font-medium text-gray-300">{{ selected }} 的作品</h2>
       <LoadingBlock v-if="loadingCodes" :rows="2" />
-      <div v-else-if="codes.length" class="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+      <div v-else-if="codes.length" class="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
         <CodeCard v-for="item in codes" :key="item.code" :item="item" @changed="showCodes(selected)" />
       </div>
       <EmptyState v-else text="库中还没有该演员的作品" />
