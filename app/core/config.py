@@ -320,6 +320,9 @@ class Settings:
     # 关掉后 BT 源仍参与搜索、结果可见，但自动下载不会选它的种子。
     # 适合来源不稳定、只想手动挑的场景
     bt_auto_download: bool = True
+    # BT 源的种子下完后限制上传速度，单位 KB/s，0 表示不限。
+    # PT 站的种子不受影响 —— 那边要保分享率，限速会把账号做死
+    bt_seed_upload_limit_kb: int = 0
 
     # --- 数据库 ---
     # 留空则使用 DATA_DIR 下的 SQLite 文件；填了就连 PostgreSQL 等外部库
@@ -564,6 +567,7 @@ def load_settings() -> Settings:
         bt_header=_env("BT_HEADER"),
         bt_method=_env("BT_METHOD", "get").strip("'\""),
         bt_auto_download=_env_bool("BT_AUTO_DOWNLOAD", True),
+        bt_seed_upload_limit_kb=_env_int("BT_SEED_UPLOAD_LIMIT_KB", 0),
 
         database_url=_env("DATABASE_URL"),
         db_pool_size=_env_int("DB_POOL_SIZE", 5),

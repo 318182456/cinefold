@@ -281,7 +281,7 @@ def download_torrent(code: str, torrent: Torrent | None = None) -> bool:
         _update_code_status(code, CodeStatus.FAILED)
         return False
 
-    _record_history(code, torrent_hash)
+    _record_history(code, torrent_hash, site=torrent.site)
     _update_code_status(code, CodeStatus.DOWNLOADING)
     _unwant_junk_files(client, torrent_hash, code)
     send_downloading_message(code, torrent)
@@ -412,10 +412,14 @@ def _sync_status_from_history(code: str) -> None:
             logger.info(f"[{code}] 有下载记录，状态补正为下载中")
 
 
-def _record_history(code: str, torrent_hash: str, save_path: str = "") -> None:
+def _record_history(
+    code: str, torrent_hash: str, save_path: str = "", site: str = ""
+) -> None:
     with session_scope() as session:
         if session.get(History, torrent_hash) is None:
-            session.add(History(hash=torrent_hash, code=code, save_path=save_path))
+            session.add(History(
+                hash=torrent_hash, code=code, save_path=save_path, site=site or None,
+            ))
 
 
 def _update_code_status(code: str, status: int) -> None:
@@ -792,8 +796,43 @@ def sync_download_status() -> int:
 
     if completed:
         logger.info(f"{completed} 个任务下载完成")
+        _limit_bt_upload(client, just_done)
         _transfer_just_completed(client, just_done)
     return completed
+
+
+def _limit_bt_upload(client, hashes: list[str]) -> None:
+    """给刚下完的 BT 源种子设上传限速。
+
+    只限 BT 源 —— PT 站要保分享率，限速会把账号做死。History.site 为空的
+    老数据一律当作「不是 BT」，不动它们。
+
+    限速失败只记日志：这是下完之后的附加动作，不该影响状态更新与通知。
+    """
+    limit_kb = max(0, int(get_settings().bt_seed_upload_limit_kb or 0))
+    if not limit_kb or not hashes:
+        return
+
+    setter = getattr(client, "set_upload_limit", None)
+    if setter is None:
+        return
+
+    with session_scope() as session:
+        bt_hashes = list(session.scalars(
+            select(History.hash).where(
+                History.hash.in_(hashes), History.site == BT_SITE_NAME
+            )
+        ).all())
+
+    if not bt_hashes:
+        return
+
+    try:
+        done = setter(bt_hashes, limit_kb * 1024)
+        if done:
+            logger.info(f"{len(done)} 个 BT 源种子已限速上传 {limit_kb} KB/s")
+    except Exception as exc:
+        logger.warning(f"设置 BT 源上传限速失败: {exc}")
 
 
 def _transfer_just_completed(client, hashes: list[str]) -> None:

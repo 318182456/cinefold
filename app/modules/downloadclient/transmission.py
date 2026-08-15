@@ -409,6 +409,38 @@ class TransmissionClient:
             logger.error(f"删除 Transmission 种子失败: {exc}")
             return []
 
+    def set_upload_limit(self, hashes: Sequence[str], limit_bytes: int) -> list[str]:
+        """给指定种子设上传限速，单位字节/秒。语义同 qBittorrent 版。
+
+        tr 的限速单位是 KB/s，且要 upload_limited 一起给 —— 只设 upload_limit
+        而不打开开关，限速值存下来了却不生效。
+        """
+        wanted = [h for h in hashes if h]
+        if not wanted or not self._ensure_client():
+            return []
+
+        try:
+            existing = {
+                t.hashString.lower() for t in self.client.get_torrents(ids=list(wanted))
+            }
+            hit = [h for h in wanted if h.lower() in existing]
+            if not hit:
+                return []
+
+            if limit_bytes > 0:
+                # 不足 1KB/s 的限速值向上取整到 1，设成 0 会变成完全禁止上传
+                self.client.change_torrent(
+                    ids=hit,
+                    upload_limited=True,
+                    upload_limit=max(1, int(limit_bytes) // 1024),
+                )
+            else:
+                self.client.change_torrent(ids=hit, upload_limited=False)
+            return hit
+        except Exception as exc:
+            logger.warning(f"设置 Transmission 上传限速失败: {exc}")
+            return []
+
     def control_torrent(self, action: str, hashes: Sequence[str]) -> list[str]:
         """暂停/恢复/重新检查/强制汇报。语义同 qBittorrent 版。"""
         if not hashes or not self._ensure_client():

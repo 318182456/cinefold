@@ -26,6 +26,9 @@ class DownloadClient(Protocol):
     def unwant_torrent_files(
         self, torrent_hash: str, paths: Sequence[str]
     ) -> tuple[int, int]: ...
+    # 上传限速，单位字节/秒，<=0 表示取消限速。
+    # 迅雷未实现，调用方需先探测该方法是否存在
+    def set_upload_limit(self, hashes: Sequence[str], limit_bytes: int) -> list[str]: ...
 
 
 def find_torrents_by_path(paths: Sequence[str]) -> dict[str, list[str]]:

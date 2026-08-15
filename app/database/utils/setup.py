@@ -62,6 +62,8 @@ def update_database() -> None:
         ("actor", "name_2", "VARCHAR(255)"),
         ("actor", "limit_date", "VARCHAR(32)"),
         ("history", "save_path", "TEXT"),
+        # 种子来源站。存量行为空，按「不是 BT 源」处理，不会被误限速
+        ("history", "site", "VARCHAR(64)"),
         ("user", "token", "TEXT"),
         # FALSE 而非 0：PostgreSQL 的 boolean 列不接受整数字面量
         ("datasource", "deleted", "BOOLEAN NOT NULL DEFAULT FALSE"),

@@ -578,6 +578,35 @@ class QBitTorrentClient:
             self._on_error(exc, "删除种子")
             return []
 
+    def set_upload_limit(self, hashes: Sequence[str], limit_bytes: int) -> list[str]:
+        """给指定种子设上传限速，单位字节/秒。返回实际设置到的 hash。
+
+        limit_bytes <= 0 表示取消限速（qb 用 -1 表示不限）。
+        """
+        wanted = [h for h in hashes if h]
+        if not wanted or not self._ensure_client():
+            return []
+
+        try:
+            existing = {
+                t.hash.lower()
+                for t in self.client.torrents_info(torrent_hashes=list(wanted))
+            }
+            hit = [h for h in wanted if h.lower() in existing]
+            if not hit:
+                return []
+
+            self.client.torrents_set_upload_limit(
+                limit=int(limit_bytes) if limit_bytes > 0 else -1,
+                torrent_hashes=hit,
+            )
+            _report_ok()
+            return hit
+        except Exception as exc:
+            logger.warning(f"设置 qBittorrent 上传限速失败: {exc}")
+            self._on_error(exc, "设置上传限速")
+            return []
+
     def control_torrent(self, action: str, hashes: Sequence[str]) -> list[str]:
         """暂停/恢复/重新检查/强制汇报。返回实际操作到的 hash。
 
