@@ -290,7 +290,16 @@ def register_scrape(
 # 删除联动
 # ----------------------------------------------------------------------
 def _lookup_links(link_path: str = "", code: str = "") -> list[MediaLink]:
-    """按链接路径或番号反查关联记录。"""
+    """按链接路径或番号反查关联记录。
+
+    给了 link_path 就只认它，匹配不上宁可什么都不删 —— 不退回按 code 查。
+    番号是整部片的标识，而 link_path 指的是具体某个文件：种子里夹带的引流
+    视频也会被媒体服务器扫成条目，它的 Name 里往往带着同一个番号。删掉那个
+    广告条目时若退回按 code 查，命中的是正片记录，于是广告的删除事件把整部
+    片的种子和正片一起带走了（SNOS-183 实际发生过）。
+
+    只有在压根没给 link_path 时才按 code 查 —— 那是调用方明确想按番号操作。
+    """
     with session_scope() as session:
         if link_path:
             row = session.get(MediaLink, link_path)
@@ -305,6 +314,11 @@ def _lookup_links(link_path: str = "", code: str = "") -> list[MediaLink]:
                 if rows:
                     logger.info(f"link_path 精确匹配失败，按文件名匹配到 {len(rows)} 条")
                     return list(rows)
+            logger.warning(
+                f"link_path 未匹配到任何记录，不退回按番号查（避免广告条目连坐正片）: "
+                f"{link_path!r}"
+            )
+            return []
         if code:
             return list(session.scalars(
                 select(MediaLink).where(MediaLink.code == code)

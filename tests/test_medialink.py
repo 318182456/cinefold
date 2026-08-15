@@ -228,6 +228,38 @@ def test_delete_matches_by_filename_when_path_differs(linked):
     assert odd_path  # 保留变量说明意图
 
 
+def test_unmatched_link_path_does_not_fall_back_to_code(linked):
+    """广告条目的删除事件不能连坐正片。
+
+    种子里夹带的引流视频也会被媒体服务器扫成条目，它的 Name 里往往带着
+    同一个番号。删掉那个广告条目时若退回按 code 查，命中的是正片记录，
+    整部片的种子和正片就被一起带走了（SNOS-183 实际发生过）。
+    """
+    source, link = linked
+    medialink.register_scrape("ABS-001", str(source))
+
+    # 番号对得上，但路径是种子里那个广告视频 —— 库里没有它的关联记录
+    result = medialink.handle_media_deleted(
+        link_path="/mnt/media/ABS-001/台湾uu美少女直播.mp4",
+        code="ABS-001",
+        dry_run=True,
+    )
+
+    assert result.links_deleted == [], "不该命中正片的记录"
+    assert result.errors
+    assert source.exists() and link.exists()
+
+
+def test_code_only_still_works(linked):
+    """没给 link_path 时按 code 查是调用方的明确意图，保持可用。"""
+    source, link = linked
+    medialink.register_scrape("ABS-001", str(source))
+
+    result = medialink.handle_media_deleted(code="ABS-001", dry_run=True)
+
+    assert str(link) in result.links_deleted
+
+
 # ----------------------------------------------------------------------
 # 刮削附属文件与空目录清理
 # ----------------------------------------------------------------------
