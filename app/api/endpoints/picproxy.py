@@ -169,6 +169,31 @@ class RefetchRequest(BaseModel):
     code: str
 
 
+class RedetectRequest(BaseModel):
+    # 默认全量重算：这个功能主要用在判断算法调整后刷新存量结果
+    only_missing: bool = False
+
+
+@router.post("/image-cache/redetect")
+def redetect_portrait(
+    payload: RedetectRequest,
+    current_user: str = Depends(get_current_user),
+):
+    """整库重判封面的人像面。立即返回，进度用 /image-cache/redetect/progress 轮询。"""
+    from app.services import portrait
+
+    if not portrait.start_redetect(only_missing=payload.only_missing):
+        return ResponseEntity.fail("已经有一个判断任务在跑")
+    return ResponseEntity.ok({"started": True})
+
+
+@router.get("/image-cache/redetect/progress")
+def redetect_progress(current_user: str = Depends(get_current_user)):
+    from app.services import portrait
+
+    return ResponseEntity.ok(portrait.get_progress())
+
+
 @router.post("/image-cache/refetch")
 async def refetch_cover(
     payload: RefetchRequest,
@@ -212,7 +237,7 @@ async def refetch_cover(
         return ResponseEntity.fail("封面无效或写入失败")
 
     relative = imagecache.relative_of(stored)
-    side = imgcrop.detect_portrait_side(content)
+    side = imgcrop.detect_portrait_side(content, code)
     with session_scope() as session:
         item = session.get(Code, code)
         if item is not None:

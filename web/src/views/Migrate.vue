@@ -8,6 +8,8 @@ import {
   getImageCacheStats,
   bulkCancelSubscribe,
   getDashboard,
+  redetectPortrait,
+  getRedetectProgress,
 } from '@/api'
 import { useToast } from '@/composables/useToast'
 import EmptyState from '@/components/EmptyState.vue'
@@ -40,7 +42,12 @@ const cleanup = reactive({
 const cleanupBusy = ref('')
 const cleanupPreview = ref(null)
 
+// 封面人像面重判
+const redetecting = ref(false)
+const redetectProgress = ref(null)
+
 let timer = null
+let portraitTimer = null
 
 const TABLE_LABELS = {
   code: '番号',
@@ -190,6 +197,39 @@ function stopPolling() {
   timer = null
 }
 
+async function pollPortrait() {
+  try {
+    const data = await getRedetectProgress()
+    redetectProgress.value = data
+    if (data && !data.running) {
+      stopPortraitPolling()
+      redetecting.value = false
+    }
+  } catch {
+    stopPortraitPolling()
+    redetecting.value = false
+  }
+}
+
+function stopPortraitPolling() {
+  clearInterval(portraitTimer)
+  portraitTimer = null
+}
+
+async function redetect() {
+  redetecting.value = true
+  try {
+    await redetectPortrait(false)
+    toast.success('已开始重新判断封面人像面')
+    await pollPortrait()
+    // 几万张图要跑一会儿，轮询到后端报完成为止
+    if (!portraitTimer) portraitTimer = setInterval(pollPortrait, 1500)
+  } catch (err) {
+    redetecting.value = false
+    toast.error(err.message)
+  }
+}
+
 async function test() {
   if (!form.source) return toast.error('请先选择源数据库')
   testing.value = true
@@ -234,9 +274,19 @@ onMounted(async () => {
   await Promise.all([load(), loadImageCache(), loadStats()])
   await pollProgress()
   if (running.value) startPolling()
+
+  // 刷新页面时任务可能还在后台跑，接着显示进度
+  await pollPortrait()
+  if (redetectProgress.value?.running) {
+    redetecting.value = true
+    portraitTimer = setInterval(pollPortrait, 1500)
+  }
 })
 
-onUnmounted(stopPolling)
+onUnmounted(() => {
+  stopPolling()
+  stopPortraitPolling()
+})
 </script>
 
 <template>
@@ -262,6 +312,26 @@ onUnmounted(stopPolling)
       </p>
       <p v-else class="text-xs text-gray-500">缓存目录尚未创建</p>
       <p v-if="imageCache.dir" class="font-mono text-[11px] text-gray-600">{{ imageCache.dir }}</p>
+
+      <!-- 封面人像面：卡片上封面往哪半边偏，靠这个字段决定 -->
+      <div class="border-t border-gray-800 pt-2">
+        <div class="flex flex-wrap items-center gap-2">
+          <button class="btn-ghost px-2.5 py-1 text-xs" :disabled="redetecting" @click="redetect">
+            {{ redetecting ? '判断中…' : '重设封面人像面' }}
+          </button>
+          <span class="text-[11px] text-gray-500">
+            重新判断所有封面的人像在哪半边，卡片按结果偏移显示
+          </span>
+        </div>
+        <p v-if="redetectProgress" class="mt-1 text-xs text-gray-400">
+          <template v-if="redetectProgress.running">
+            {{ redetectProgress.done }} / {{ redetectProgress.total }}
+          </template>
+          <template v-else-if="redetectProgress.message">
+            {{ redetectProgress.message }}
+          </template>
+        </p>
+      </div>
     </div>
 
     <!-- 清理订阅 -->

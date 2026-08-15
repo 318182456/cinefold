@@ -230,6 +230,10 @@ export const testMigrateTarget = (payload) => http.post('/migrate/test', payload
 export const startMigrate = (payload) => http.post('/migrate/start', payload)
 export const getImageCacheStats = () => http.get('/image-cache/stats')
 export const refetchCover = (code) => http.post('/image-cache/refetch', { code })
+// 整库重判封面人像面。立即返回，进度靠轮询
+export const redetectPortrait = (onlyMissing = false) =>
+  http.post('/image-cache/redetect', { only_missing: onlyMissing })
+export const getRedetectProgress = () => http.get('/image-cache/redetect/progress')
 export const bulkCancelSubscribe = (payload) =>
   http.post('/codes/cancel/bulk', payload)
 

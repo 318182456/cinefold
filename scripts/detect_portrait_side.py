@@ -1,9 +1,15 @@
-"""扫描已缓存的封面，判断人像在哪半边并写回数据库。
+"""扫描已缓存的封面，判断该往哪半边偏并写回数据库。
 
 前端靠 code.portrait_side 决定卡片上封面往哪边偏。这个字段只在封面下载时
 顺手算出来，存量记录是空的，得跑一次这个脚本补上。
 
+判断按番号分类走规则（见 utils/imgcrop.py）：常规有码 JAV 版式固定、人像
+恒在右侧；素人/FC2/无码尺寸不规则，一律不偏、居中显示。
+
 只读图片、只写数据库的一个字段，不动任何图片文件，重复跑是安全的。
+
+设置页「图片缓存」里的「重设封面人像面」按钮做的是同一件事，界面上带进度，
+不方便进容器时用那个更省事。
 
 已经被早期版本裁成竖版的封面会被判成 none（宽高比不满足双拼条件），
 卡片上按普通封面居中显示 —— 那本来就已经是人像半边了，不用再偏。
@@ -68,7 +74,7 @@ def main() -> int:
             missing += 1
             continue
 
-        side = imgcrop.detect_from_file(path)
+        side = imgcrop.detect_from_file(path, code)
         tally[side] = tally.get(side, 0) + 1
         updates.append((code, side))
 

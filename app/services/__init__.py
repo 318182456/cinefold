@@ -1103,7 +1103,7 @@ def cache_lack_photos(limit: int = PHOTO_CACHE_LIMIT) -> int:
         # 已经在盘上但库里没记，直接回填省一次下载
         hit = imagecache.find_cached(url, code, "banner")
         if hit is not None:
-            return code, imagecache.relative_of(hit), imgcrop.detect_from_file(hit)
+            return code, imagecache.relative_of(hit), imgcrop.detect_from_file(hit, code)
 
         try:
             with httpx.Client(
@@ -1129,7 +1129,7 @@ def cache_lack_photos(limit: int = PHOTO_CACHE_LIMIT) -> int:
         if stored is None:
             return None
         # 图片已经在内存里，顺手判断人像面，省得回填脚本再读一遍盘
-        return code, imagecache.relative_of(stored), imgcrop.detect_portrait_side(content)
+        return code, imagecache.relative_of(stored), imgcrop.detect_portrait_side(content, code)
 
     with ThreadPoolExecutor(max_workers=PHOTO_CACHE_WORKERS) as pool:
         results = [r for r in pool.map(fetch, pending) if r and r[1]]
