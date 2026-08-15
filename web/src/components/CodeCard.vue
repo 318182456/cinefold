@@ -3,6 +3,7 @@ import { computed, ref } from 'vue'
 import { codeCover, subscribeCode, cancelCode, downloadCode } from '@/api'
 import { useToast } from '@/composables/useToast'
 import { useConfigStore } from '@/stores/config'
+import { parseCasts } from '@/utils/cast'
 
 const props = defineProps({
   item: { type: Object, required: true },
@@ -39,9 +40,8 @@ const imageClass = computed(() => {
   return ''
 })
 
-const casts = computed(() =>
-  (props.item.casts || '').split(',').filter(Boolean).slice(0, 3),
-)
+// 数据源会把年龄、职业设定、日文原名一起塞进 casts，清洗后再显示
+const casts = computed(() => parseCasts(props.item.casts, 3))
 
 async function toggleSubscribe() {
   busy.value = true
@@ -132,7 +132,18 @@ async function download() {
              它就拿满整行、把卡片顶宽，truncate 反而永远不触发。
              放这张卡片的 grid 还必须写 grid-cols-1（而非省略），否则列的
              minmax 下限是 auto，同样会被这行字撑开、整页横向溢出 -->
-        <span v-for="cast in casts" :key="cast" class="min-w-0 max-w-full truncate">{{ cast }}</span>
+        <!-- 名字已清洗过，但仍保留 min-w-0：外国艺名之类可能本来就很长，
+             而 truncate 自带 nowrap，flex item 的 min-width:auto 会让它
+             拿满整行、把卡片连同整页撑破，truncate 反而永远不触发。
+             放这张卡片的 grid 还必须写 grid-cols-1，理由同上 —— 列的
+             minmax 下限是 auto 时同样会被撑开 -->
+        <span
+          v-for="cast in casts"
+          :key="cast"
+          class="min-w-0 max-w-full truncate"
+          :title="item.casts"
+          >{{ cast }}</span
+        >
       </div>
 
       <div class="mt-2 flex gap-2">
