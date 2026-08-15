@@ -586,6 +586,90 @@ class TestDownloadedStatusFix:
             assert session.get(Code, code).status == CodeStatus.DOWNLOADED
 
 
+class TestResubscribeResetsState:
+    """订阅即从头来过：旧下载记录必须清掉。
+
+    用户在下载器里删掉种子后 History 仍在，番号会被 download_torrent 判成
+    「已下载过」而永不搜种，状态又被推到 DOWNLOADING 无人推进，于是卡死在
+    「下载中」。订阅入口清干净才解得开。
+    """
+
+    def _seed(self, code, status, hashes=("h1",)):
+        from app.database.base import DBBase
+        from app.database.models import Code, CodeStatus, History
+        from app.database.session import engine, session_scope
+
+        DBBase.metadata.create_all(engine)
+        with session_scope() as session:
+            session.merge(Code(code=code, status=status))
+            for h in hashes:
+                session.merge(History(hash=f"{h}-{code}", code=code))
+        return CodeStatus
+
+    def test_subscribe_clears_history(self):
+        from app import services
+        from app.database.models import Code, CodeStatus, History
+        from app.database.session import session_scope
+
+        code = "REDO-001"
+        self._seed(code, CodeStatus.DOWNLOADING, hashes=("h1", "h2"))
+
+        assert services.subscribe_code(code) is True
+        with session_scope() as session:
+            assert session.get(Code, code).status == CodeStatus.SUBSCRIBED
+            assert session.query(History).filter(History.code == code).count() == 0
+
+    def test_cleared_code_searches_again(self, monkeypatch):
+        """清掉记录后，download_torrent 不该再判「已下载过」。"""
+        from app import services
+        from app.database.models import CodeStatus
+
+        code = "REDO-002"
+        self._seed(code, CodeStatus.DOWNLOADING)
+        services.subscribe_code(code)
+
+        # 走到搜种这一步就说明没被 _is_downloaded 短路
+        searched = []
+        monkeypatch.setattr(
+            services, "find_torrent",
+            lambda c: searched.append(c) or None,
+        )
+        services.download_torrent(code)
+        assert searched == [code], "重新订阅后应该重新搜种"
+
+    def test_other_codes_untouched(self):
+        """只清自己的记录，别误伤别的番号。"""
+        from app import services
+        from app.database.models import CodeStatus, History
+        from app.database.session import session_scope
+
+        mine, other = "REDO-003", "KEEP-003"
+        self._seed(mine, CodeStatus.DOWNLOADING)
+        self._seed(other, CodeStatus.DOWNLOADING)
+
+        services.subscribe_code(mine)
+        with session_scope() as session:
+            assert session.query(History).filter(History.code == mine).count() == 0
+            assert session.query(History).filter(History.code == other).count() == 1
+
+    def test_medialink_is_kept(self):
+        """已入库的硬链接对应真实文件，重新订阅不该删。"""
+        from app import services
+        from app.database.models import CodeStatus, MediaLink
+        from app.database.session import session_scope
+
+        code = "REDO-004"
+        self._seed(code, CodeStatus.COMPLETED)
+        with session_scope() as session:
+            session.merge(MediaLink(
+                link_path=f"/media/{code}.mp4", code=code, source_path=f"/dl/{code}.mp4",
+            ))
+
+        services.subscribe_code(code)
+        with session_scope() as session:
+            assert session.query(MediaLink).filter(MediaLink.code == code).count() == 1
+
+
 class TestLocalCodeSearch:
     """本地库命中，避免每次都去远程抓情报。"""
 

@@ -9,7 +9,7 @@ import threading
 from datetime import datetime, timedelta
 
 from loguru import logger
-from sqlalchemy import func, or_, select
+from sqlalchemy import delete, func, or_, select
 
 from app.core.config import get_settings
 from app.database.models import Actor, Code, CodeStatus, History
@@ -432,6 +432,13 @@ def _subscribe_actor_new_works(actor_name: str, limit_date: str | None) -> int:
             row.status = CodeStatus.SUBSCRIBED
 
         if wanted:
+            # 与 subscribe_code 同理：订阅即从头来过，旧下载记录留着会让
+            # download_torrent 判成「已下载过」而永不搜种
+            stale = session.execute(
+                delete(History).where(History.code.in_([r.code for r in wanted]))
+            ).rowcount
+            if stale:
+                logger.info(f"[{actor_name}] 清掉 {stale} 条旧下载记录")
             logger.info(f"[{actor_name}] 新增订阅 {len(wanted)} 个番号")
         if skipped:
             logger.info(f"[{actor_name}] 跳过 {skipped} 个 VR 番号")
@@ -461,7 +468,18 @@ def is_filtered_code(code: str, title: str = "") -> str:
 
 
 def subscribe_code(code: str) -> bool:
-    """订阅单个番号。被过滤规则拦下时返回 False。"""
+    """订阅单个番号。被过滤规则拦下时返回 False。
+
+    订阅一律当作「从头来过」：把上一轮的下载记录清掉，让它重新搜种。
+
+    不清会卡死 —— 用户在下载器里删掉种子后 History 仍在，download_torrent
+    靠它判定「已下载过」直接跳过搜种，_sync_status_from_history 又把状态
+    推到 DOWNLOADING，而 sync_download_status 只认下载器里还在的种子。
+    番号就停在「下载中」，重新订阅也解不开。
+
+    MediaLink 不动：那是已入库的硬链接，对应真实文件，删掉会让媒体库丢内容。
+    重新订阅只是想再下一次，不是要抹掉已有的成果。
+    """
     reason = is_filtered_code(code)
     if reason:
         logger.info(f"[{code}] 命中 {reason} 过滤，不订阅")
@@ -474,6 +492,13 @@ def subscribe_code(code: str) -> bool:
             session.add(row)
         else:
             row.status = CodeStatus.SUBSCRIBED
+
+        stale = session.execute(
+            delete(History).where(History.code == code)
+        ).rowcount
+        if stale:
+            logger.info(f"[{code}] 重新订阅，清掉 {stale} 条旧下载记录")
+
     send_subscribe_message(code)
     return True
 
