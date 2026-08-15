@@ -11,13 +11,25 @@
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
       'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
   }
-  /* 布局把自己撑到一屏高，滚动交给内容区。这条高度链必须打通，
-     否则一屏高的外壳会溢出自动高度的 body，整个画面又多一根滚动条 */
+  /* 移动端整页自然滚动：手机浏览器的地址栏会伸缩，height:100% 对应的是
+     地址栏收起时的大视口，比实际可视区域高。此时若再给 body 加
+     overflow:hidden，超出的那一截既不能靠 body 滚出来、也不在内部滚动容器
+     的高度计算里，底部内容就永远够不着。所以小屏不锁高度，让页面自己滚 */
   html,
   body,
   #app {
-    height: 100%;
-    overflow: hidden;
+    min-height: 100%;
+  }
+
+  /* 桌面才把布局撑到一屏高、滚动交给内容区。这条高度链必须打通，
+     否则一屏高的外壳会溢出自动高度的 body，整个画面又多一根滚动条 */
+  @media (min-width: 1024px) {
+    html,
+    body,
+    #app {
+      height: 100%;
+      overflow: hidden;
+    }
   }
 }
 

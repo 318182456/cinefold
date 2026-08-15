@@ -1,0 +1,50 @@
+{
+  "name": "cinefold",
+  "short_name": "cinefold",
+  "description": "影视资源订阅与整理",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "background_color": "#030712",
+  "theme_color": "#111827",
+  "lang": "zh-CN",
+  "dir": "ltr",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    },
+    {
+      "src": "/icon-maskable.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "maskable"
+    },
+    {
+      "src": "/apple-touch-icon.png",
+      "sizes": "180x180",
+      "type": "image/png",
+      "purpose": "any"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "搜索",
+      "url": "/search",
+      "description": "搜索番号或关键词"
+    },
+    {
+      "name": "订阅",
+      "url": "/subscribe",
+      "description": "查看订阅列表"
+    },
+    {
+      "name": "任务",
+      "url": "/task",
+      "description": "查看下载任务"
+    }
+  ]
+}

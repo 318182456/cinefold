@@ -1,5 +1,5 @@
 <script setup>
-import { onMounted, ref } from 'vue'
+import { onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { checkVersion, getVersion } from '@/api'
 import { useConfigStore } from '@/stores/config'
@@ -48,6 +48,13 @@ const groups = [
   },
 ]
 
+// 移动端整页可滚后，抽屉打开时背景还能跟着滑。锁住 body 的滚动，
+// 关掉再放开。桌面 body 本来就不滚，这条无影响
+watch(menuOpen, (open) => {
+  document.body.classList.toggle('overflow-hidden', open)
+})
+onUnmounted(() => document.body.classList.remove('overflow-hidden'))
+
 function logout() {
   localStorage.removeItem('token')
   router.push({ name: 'Login' })
@@ -71,7 +78,7 @@ onMounted(async () => {
 </script>
 
 <template>
-  <div class="h-full overflow-hidden lg:flex">
+  <div class="lg:flex lg:h-full lg:overflow-hidden">
     <!-- 移动端遮罩 -->
     <div
       v-if="menuOpen"
@@ -84,7 +91,9 @@ onMounted(async () => {
       class="fixed inset-y-0 left-0 z-40 flex w-60 flex-col border-r border-gray-800 bg-gray-900 transition-transform lg:static lg:translate-x-0"
       :class="menuOpen ? 'translate-x-0' : '-translate-x-full'"
     >
-      <div class="flex h-14 items-center gap-2 border-b border-gray-800 px-5">
+      <div
+        class="flex min-h-14 items-center gap-2 border-b border-gray-800 px-5 pt-[env(safe-area-inset-top)] lg:pt-0"
+      >
         <AppLogo :size="28" />
         <span class="font-semibold tracking-tight">cinefold</span>
       </div>
@@ -119,7 +128,7 @@ onMounted(async () => {
         </div>
       </nav>
 
-      <div class="border-t border-gray-800 p-3">
+      <div class="border-t border-gray-800 p-3 pb-[calc(0.75rem+env(safe-area-inset-bottom))]">
         <p v-if="version" class="flex items-center gap-1.5 px-2 pb-2 text-[11px] text-gray-600">
           <span>v{{ version }}</span>
           <template v-if="update">
@@ -133,7 +142,12 @@ onMounted(async () => {
 
     <!-- 主区 -->
     <div class="flex min-w-0 flex-1 flex-col">
-      <header class="z-20 flex h-14 shrink-0 items-center gap-3 border-b border-gray-800 bg-gray-950/90 px-4 backdrop-blur lg:px-6">
+      <!-- 移动端整页滚动，头部改成 sticky 才能跟着留在顶上；桌面外壳不滚，
+           sticky 无副作用。h 用 min-h + 顶部安全区内边距：装成 PWA 后状态栏
+           是半透明的，内容会顶到它下面，不留这段就被系统时间盖住 -->
+      <header
+        class="sticky top-0 z-20 flex min-h-14 shrink-0 items-center gap-3 border-b border-gray-800 bg-gray-950/90 px-4 pt-[env(safe-area-inset-top)] backdrop-blur lg:px-6"
+      >
         <button class="rounded-lg p-1.5 text-gray-400 hover:bg-gray-800 lg:hidden" @click="menuOpen = true">
           <svg class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
             <path stroke-linecap="round" d="M4 6h16M4 12h16M4 18h16" />
@@ -142,7 +156,9 @@ onMounted(async () => {
         <h1 class="text-sm font-medium text-gray-300">{{ route.meta.title || '' }}</h1>
       </header>
 
-      <main class="min-h-0 flex-1 overflow-y-auto p-4 lg:p-6">
+      <!-- 滚动容器只在桌面生效，移动端交给 body 滚。
+           pb 留出底部安全区，免得内容被 iPhone 的 home indicator 压住 -->
+      <main class="flex-1 p-4 pb-[calc(1rem+env(safe-area-inset-bottom))] lg:min-h-0 lg:overflow-y-auto lg:p-6">
         <RouterView v-slot="{ Component }">
           <Transition
             enter-active-class="transition duration-150"

@@ -54,7 +54,7 @@ onUnmounted(() => clearInterval(timer))
 </script>
 
 <template>
-  <div class="flex h-full flex-col gap-3">
+  <div class="flex flex-col gap-3 lg:h-full">
     <div class="flex flex-wrap items-center gap-2">
       <input
         v-model="keyword"
@@ -83,7 +83,7 @@ onUnmounted(() => clearInterval(timer))
     <div
       v-if="filtered.length"
       ref="box"
-      class="min-h-0 flex-1 overflow-auto rounded-xl border border-gray-800 bg-black/40 p-3"
+      class="h-[60vh] overflow-auto rounded-xl border border-gray-800 bg-black/40 p-3 lg:h-auto lg:min-h-0 lg:flex-1"
     >
       <pre
         v-for="(line, index) in filtered"

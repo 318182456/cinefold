@@ -93,7 +93,8 @@ onMounted(async () => {
 </script>
 
 <template>
-  <div class="flex h-full items-center justify-center overflow-y-auto px-4">
+  <!-- min-h 而不是 h：移动端 #app 没有确定高度，h-full 会塌成 0 -->
+  <div class="flex min-h-screen items-center justify-center px-4 lg:h-full lg:min-h-0 lg:overflow-y-auto">
     <div class="w-full max-w-sm">
       <div class="mb-8 flex flex-col items-center gap-3">
         <AppLogo :size="48" />
