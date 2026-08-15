@@ -48,6 +48,21 @@ def _report_error(exc: BaseException, context: str = "") -> None:
         pass
 
 
+def _is_already_exists(exc: BaseException) -> bool:
+    """这个异常是不是「种子已在下载器里」。
+
+    qb 对重复添加回 409 Conflict。qbittorrent-api 把它包成 Conflict409Error，
+    但不同版本的类名与消息不一致，两边都认一下 —— 判漏的代价是番号被误标成
+    下载失败，而误判成「已存在」只会让一次真正的失败被当成成功，下一轮状态
+    同步查不到种子照样能纠正回来。
+    """
+    name = type(exc).__name__.lower()
+    if "conflict" in name or "409" in name:
+        return True
+    text = str(exc).lower()
+    return "conflict" in text or "already" in text
+
+
 class QBitTorrentClient:
     def __init__(
         self,
@@ -230,6 +245,13 @@ class QBitTorrentClient:
             _report_ok()
             return torrent_hash
         except Exception as exc:
+            if _is_already_exists(exc):
+                # qb 对「种子已在列表里」回 409 Conflict。这不是失败 ——
+                # 目的本就是让它在下载器里，现在它就在。当成功返回 hash，
+                # 上游照常记 History、跟踪状态，否则番号会被误标成下载失败
+                logger.info(f"[{code}] 种子已在 qBittorrent 中，hash={torrent_hash}")
+                _report_ok()
+                return torrent_hash
             logger.error(f"[{code}] 推送种子失败: {exc}")
             self._on_error(exc, "推送种子")
             return None
@@ -258,6 +280,10 @@ class QBitTorrentClient:
             _report_ok()
             return torrent_hash
         except Exception as exc:
+            if _is_already_exists(exc):
+                logger.info(f"[{code}] 种子已在 qBittorrent 中，hash={torrent_hash}")
+                _report_ok()
+                return torrent_hash
             logger.error(f"[{code}] 推送磁链失败: {exc}")
             self._on_error(exc, "推送磁链")
             return None

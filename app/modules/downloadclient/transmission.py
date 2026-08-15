@@ -14,6 +14,21 @@ from app.core.config import get_settings
 from app.utils import get_magnet_hash, get_torrent_hash
 
 
+def _is_already_exists(exc: BaseException) -> bool:
+    """这个异常是不是「种子已在下载器里」。
+
+    tr 对重复添加回 "duplicate torrent"，transmission-rpc 把它包成
+    TransmissionDuplicateError（旧版本没有这个类型，只在消息里体现）。
+    判漏会让番号被误标成下载失败；误判只是把一次真正的失败当成成功，
+    下一轮状态同步查不到种子照样能纠正。
+    """
+    name = type(exc).__name__.lower()
+    if "duplicate" in name:
+        return True
+    text = str(exc).lower()
+    return "duplicate" in text or "already" in text
+
+
 class TransmissionClient:
     def __init__(
         self,
@@ -97,6 +112,11 @@ class TransmissionClient:
             logger.info(f"[{code}] 已推送种子到 Transmission，hash={added.hashString}")
             return new_hash
         except Exception as exc:
+            if _is_already_exists(exc):
+                # 种子已经在 tr 里。目的本就是让它在下载器里，现在它就在，
+                # 当成功返回，否则番号会被误标成下载失败
+                logger.info(f"[{code}] 种子已在 Transmission 中，hash={torrent_hash}")
+                return torrent_hash
             logger.error(f"[{code}] 推送种子失败: {exc}")
             return None
 
@@ -115,6 +135,10 @@ class TransmissionClient:
             logger.info(f"[{code}] 已推送磁链到 Transmission，hash={added.hashString}")
             return new_hash
         except Exception as exc:
+            if _is_already_exists(exc):
+                existing = get_magnet_hash(magnet)
+                logger.info(f"[{code}] 种子已在 Transmission 中，hash={existing}")
+                return existing or None
             logger.error(f"[{code}] 推送磁链失败: {exc}")
             return None
 
