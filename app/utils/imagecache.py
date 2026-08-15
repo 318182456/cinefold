@@ -15,7 +15,7 @@ from pathlib import Path
 
 from loguru import logger
 
-from app.utils import get_image_suffix_from_url, get_true_code, imgcrop
+from app.utils import get_image_suffix_from_url, get_true_code
 
 DATA_DIR = Path(os.getenv("DATA_DIR", "/data"))
 PIC_DIR = DATA_DIR / "pics"
@@ -94,7 +94,8 @@ def store(content: bytes, url: str, code: str = "", kind: str = "banner") -> Pat
     """把回源拿到的图片写入缓存，返回落盘路径。
 
     写临时文件再 rename，避免并发请求同一张图时读到写了一半的内容。
-    封面是双拼图时先裁出人像那半边再落盘，详见 utils/imgcrop.py。
+    图片一律完整存盘：双拼封面只在显示时偏到人像那半边（前端按
+    code.portrait_side 设 object-position），点开灯箱还要看完整原图。
     """
     if not content or len(content) < MIN_IMAGE_BYTES:
         return None
@@ -102,14 +103,6 @@ def store(content: bytes, url: str, code: str = "", kind: str = "banner") -> Pat
     target = cache_path(url, code, kind)
     if target is None:
         return None
-
-    if kind in ("banner", "poster"):
-        cropped = imgcrop.pick_portrait_half(content)
-        if cropped is not content:
-            content = cropped
-            # 裁剪后统一重编码成 JPEG，文件名得跟着改，
-            # 否则 .webp 的壳里装着 JPEG，image-local 会按后缀报错的 MIME 返回
-            target = target.with_suffix(".jpg")
 
     try:
         target.parent.mkdir(parents=True, exist_ok=True)

@@ -18,7 +18,7 @@ from app.core.config import get_settings
 from app.database.models import Code
 from app.database.session import session_scope
 from app.schemas.reponse import ResponseEntity
-from app.utils import get_true_code, imagecache
+from app.utils import get_true_code, imagecache, imgcrop
 
 router = APIRouter(tags=["picproxy"])
 
@@ -176,8 +176,8 @@ async def refetch_cover(
 ):
     """重抓某个番号的封面。
 
-    裁剪是覆盖原图的，判断错了没法还原，重抓是唯一的补救手段。
-    先删缓存再回源，拿到新图后重新裁一次并回写 local_banner。
+    先删缓存再回源，拿到新图后重新判断人像在哪半边，回写 local_banner
+    与 portrait_side。源站换图或人像面判错时用它刷新。
     """
     code = get_true_code(payload.code or "")
     if not code:
@@ -212,10 +212,14 @@ async def refetch_cover(
         return ResponseEntity.fail("封面无效或写入失败")
 
     relative = imagecache.relative_of(stored)
+    side = imgcrop.detect_portrait_side(content)
     with session_scope() as session:
         item = session.get(Code, code)
         if item is not None:
             item.local_banner = relative
+            item.portrait_side = side
 
-    logger.info(f"重抓封面完成 {code} -> {relative}")
-    return ResponseEntity.ok({"code": code, "local_banner": relative})
+    logger.info(f"重抓封面完成 {code} -> {relative} (人像面: {side})")
+    return ResponseEntity.ok(
+        {"code": code, "local_banner": relative, "portrait_side": side}
+    )

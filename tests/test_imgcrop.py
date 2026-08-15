@@ -1,8 +1,10 @@
-"""封面双拼图裁剪。
+"""封面双拼图的人像面判断。
 
-源站封面常是「碟片封套 + 人像正片」的横版双拼图，落盘前要把人像那半边裁出来。
-判断靠启发式（边缘密度 + 饱和度分布），所以既要验证能裁对，也要验证
-分不出来时肯放弃 —— 非双拼图被误切一半比不裁更难看。
+源站封面常是「碟片封套 + 人像正片」的横版双拼图。图片完整存盘，只判断人像
+在哪半边，前端据此设 object-position 让卡片露出人像那面。
+
+判断靠启发式（边缘密度 + 饱和度分布），所以既要验证能判对，也要验证
+分不出来时肯返回 NONE —— 非双拼图被偏到一边比居中显示更难看。
 """
 from __future__ import annotations
 
@@ -70,74 +72,64 @@ def _decode(data: bytes):
     return Image.open(io.BytesIO(data))
 
 
-def test_人像在右时裁出右半边():
+def test_人像在右时判为右():
     data = _encode(_join(_sleeve(), _portrait()))
-    out = imgcrop.pick_portrait_half(data)
-
-    assert out is not data, "双拼图应该被裁剪"
-    result = _decode(out)
-    assert result.size == (PANEL_W, PANEL_H)
-    # 封套那面是深蓝底，人像那面是肤色。取红通道明显高于蓝通道即可确认没裁反
-    r, g, b = result.getpixel((5, 5))
-    assert r > b, f"裁出来的应是人像面，实际像素 {(r, g, b)} 更像封套"
+    assert imgcrop.detect_portrait_side(data) == imgcrop.RIGHT
 
 
-def test_人像在左时裁出左半边():
-    """左右哪面是人像没有规律，不能写死切右半。"""
+def test_人像在左时判为左():
+    """左右哪面是人像没有规律，不能写死认右半。"""
     data = _encode(_join(_portrait(seed=2), _sleeve()))
-    out = imgcrop.pick_portrait_half(data)
-
-    assert out is not data
-    result = _decode(out)
-    assert result.size == (PANEL_W, PANEL_H)
-    r, g, b = result.getpixel((5, 5))
-    assert r > b, f"裁出来的应是人像面，实际像素 {(r, g, b)} 更像封套"
+    assert imgcrop.detect_portrait_side(data) == imgcrop.LEFT
 
 
-def test_单张竖版封面保持原样():
-    """不是双拼图就不该动它。"""
+def test_单张竖版封面判为none():
+    """不是双拼图就没有偏移的必要。"""
     data = _encode(_portrait(400, 560, seed=3))
-    assert imgcrop.pick_portrait_half(data) is data
+    assert imgcrop.detect_portrait_side(data) == imgcrop.NONE
 
 
-def test_左右同质时放弃裁剪():
-    """两面得分接近说明多半不是双拼图，宁可不裁也别赌。"""
+def test_左右同质时判为none():
+    """两面得分接近说明多半不是双拼图，宁可居中也别赌。"""
     data = _encode(_join(_portrait(seed=4), _portrait(seed=5)))
-    assert imgcrop.pick_portrait_half(data) is data
+    assert imgcrop.detect_portrait_side(data) == imgcrop.NONE
 
 
-def test_重复裁剪幂等():
-    """回填脚本可能被跑多次，裁过的图不能越裁越窄。"""
+def test_判断不修改图片():
+    """图片要完整存盘，灯箱还要看原图，判断过程不能动它。"""
     data = _encode(_join(_sleeve(), _portrait()))
-    once = imgcrop.pick_portrait_half(data)
-    assert once is not data
-
-    twice = imgcrop.pick_portrait_half(once)
-    assert twice is once, "已经是竖版的图不该再被裁一次"
+    before = _decode(data).size
+    imgcrop.detect_portrait_side(data)
+    assert _decode(data).size == before
 
 
-def test_损坏数据原样返回():
-    """图片处理失败不该让整条封面缓存链路断掉。"""
-    broken = b"definitely not an image" * 50
-    assert imgcrop.pick_portrait_half(broken) is broken
+def test_损坏数据判为none():
+    """判断失败不该让整条封面缓存链路断掉。"""
+    assert imgcrop.detect_portrait_side(b"definitely not an image" * 50) == imgcrop.NONE
 
 
-def test_空数据原样返回():
-    assert imgcrop.pick_portrait_half(b"") == b""
+def test_空数据判为none():
+    assert imgcrop.detect_portrait_side(b"") == imgcrop.NONE
 
 
 def test_带透明通道的图不报错():
     """源图可能是带 alpha 的 png/webp，直接送去 HSV 转换会抛错。"""
-    left = _sleeve().convert("RGBA")
-    right = _portrait().convert("RGBA")
     canvas = Image.new("RGBA", (PANEL_W * 2, PANEL_H))
-    canvas.paste(left, (0, 0))
-    canvas.paste(right, (PANEL_W, 0))
+    canvas.paste(_sleeve().convert("RGBA"), (0, 0))
+    canvas.paste(_portrait().convert("RGBA"), (PANEL_W, 0))
 
     buffer = io.BytesIO()
     canvas.save(buffer, format="PNG")
-    data = buffer.getvalue()
 
-    out = imgcrop.pick_portrait_half(data)
-    assert out is not data
-    assert _decode(out).size == (PANEL_W, PANEL_H)
+    assert imgcrop.detect_portrait_side(buffer.getvalue()) == imgcrop.RIGHT
+
+
+def test_从文件判断(tmp_path):
+    """回填脚本走的是这条路径。"""
+    path = tmp_path / "banner.jpg"
+    path.write_bytes(_encode(_join(_sleeve(), _portrait())))
+    assert imgcrop.detect_from_file(path) == imgcrop.RIGHT
+
+
+def test_文件不存在判为none(tmp_path):
+    assert imgcrop.detect_from_file(tmp_path / "nope.jpg") == imgcrop.NONE

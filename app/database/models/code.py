@@ -42,6 +42,9 @@ class Code(DBBase):
 
     banner: Mapped[str | None] = mapped_column(Text, nullable=True)
     local_banner: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 封面是双拼图时，人像在哪半边（left/right）。空表示还没判断或判断不出，
+    # 前端据此决定 object-position，图片本身始终完整存盘
+    portrait_side: Mapped[str | None] = mapped_column(String(8), nullable=True)
     still_photo: Mapped[str | None] = mapped_column(Text, nullable=True)
     local_still_photo: Mapped[str | None] = mapped_column(Text, nullable=True)
     poster: Mapped[str | None] = mapped_column(Text, nullable=True)

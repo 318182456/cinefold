@@ -59,6 +59,9 @@ def update_database() -> None:
         ("code", "local_still_photo", "TEXT"),
         ("code", "preview_url", "TEXT"),
         ("code", "mode", "VARCHAR(32)"),
+        # 双拼封面的人像在哪半边（left/right）。存量行为空，等于「没判断过」，
+        # 前端按普通封面居中显示，回填脚本跑完才有值
+        ("code", "portrait_side", "VARCHAR(8)"),
         ("actor", "name_2", "VARCHAR(255)"),
         ("actor", "limit_date", "VARCHAR(32)"),
         ("history", "save_path", "TEXT"),

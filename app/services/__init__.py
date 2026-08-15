@@ -1081,7 +1081,7 @@ def cache_lack_photos(limit: int = PHOTO_CACHE_LIMIT) -> int:
     import httpx
     from concurrent.futures import ThreadPoolExecutor
 
-    from app.utils import imagecache
+    from app.utils import imagecache, imgcrop
 
     settings = get_settings()
 
@@ -1098,12 +1098,12 @@ def cache_lack_photos(limit: int = PHOTO_CACHE_LIMIT) -> int:
     if not pending:
         return 0
 
-    def fetch(item: tuple[str, str]) -> tuple[str, str] | None:
+    def fetch(item: tuple[str, str]) -> tuple[str, str, str] | None:
         code, url = item
         # 已经在盘上但库里没记，直接回填省一次下载
         hit = imagecache.find_cached(url, code, "banner")
         if hit is not None:
-            return code, imagecache.relative_of(hit)
+            return code, imagecache.relative_of(hit), imgcrop.detect_from_file(hit)
 
         try:
             with httpx.Client(
@@ -1128,7 +1128,8 @@ def cache_lack_photos(limit: int = PHOTO_CACHE_LIMIT) -> int:
         stored = imagecache.store(content, url, code, "banner")
         if stored is None:
             return None
-        return code, imagecache.relative_of(stored)
+        # 图片已经在内存里，顺手判断人像面，省得回填脚本再读一遍盘
+        return code, imagecache.relative_of(stored), imgcrop.detect_portrait_side(content)
 
     with ThreadPoolExecutor(max_workers=PHOTO_CACHE_WORKERS) as pool:
         results = [r for r in pool.map(fetch, pending) if r and r[1]]
@@ -1137,10 +1138,11 @@ def cache_lack_photos(limit: int = PHOTO_CACHE_LIMIT) -> int:
         return 0
 
     with session_scope() as session:
-        for code, relative in results:
+        for code, relative, side in results:
             row = session.get(Code, code)
             if row is not None:
                 row.local_banner = relative
+                row.portrait_side = side
 
     logger.info(f"已缓存 {len(results)} 张封面")
     return len(results)

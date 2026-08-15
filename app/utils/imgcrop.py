@@ -1,32 +1,42 @@
-"""封面双拼图裁剪。
+"""判断封面双拼图的人像在哪半边。
 
 源站给的封面多是一张横版双拼图：一半是碟片封套（带条码、厂牌 logo、大段
 文字），另一半是人像正片。前端卡片是 80x112 的竖版框，整张塞进去只能看到
 中间接缝那一条，两边都被 object-cover 切掉。
 
-所以落盘前先把人像那半边裁出来。哪半边是人像没有元数据可查，只能看图判断：
-封套那面是印刷排版，成片的纯色块多、边缘集中在文字行；人像那面是照片，
-细节铺满整幅、肤色让饱和度分布更宽。两个指标分别打分再投票。
+这里只做判断、不动图片：图片完整存盘，前端拿判断结果设 object-position，
+让卡片只露人像那半边；点开灯箱时仍然显示完整原图。
 
-判断不可靠时一律原样返回 —— 非双拼的整幅封面被误裁一半，比不裁难看得多。
+哪半边是人像没有元数据可查，只能看图判断：封套那面是印刷排版，成片的纯色
+块多、边缘集中在文字行；人像那面是照片，细节铺满整幅、肤色让饱和度分布
+更宽。两个指标分别打分再投票。
+
+判断不出来时返回 NONE，前端退回居中显示 —— 非双拼的整幅封面被偏到一边，
+比不动它更难看。
 """
 from __future__ import annotations
 
 import io
+from pathlib import Path
 
 from loguru import logger
 
 try:
     from PIL import Image, ImageFilter
-except ImportError:  # pragma: no cover - 没装 Pillow 时整个功能降级为不裁
+except ImportError:  # pragma: no cover - 没装 Pillow 时整个功能降级为不判断
     Image = None
     ImageFilter = None
 
+# 判断结果。存进库里、发给前端的就是这三个值
+LEFT = "left"
+RIGHT = "right"
+NONE = "none"
+
 # 宽高比低于这个值就不是双拼图。正片封面单张接近 2:3，双拼后大于 1.3；
-# 留一点余量，避免把本来就偏方的封面当成双拼切了
+# 留一点余量，避免把本来就偏方的封面当成双拼
 MIN_PANEL_RATIO = 1.3
 
-# 两半的得分差不到这个比例就认为分不出来，保持原图。
+# 两半的得分差不到这个比例就认为分不出来，返回 NONE。
 # 双拼图两面的差异通常很明显，差距小往往说明这压根不是双拼图
 MIN_SCORE_MARGIN = 0.12
 
@@ -89,21 +99,21 @@ def _panel_score(image) -> float:
     return _edge_density(image) / 64 + _saturation_spread(image)
 
 
-def pick_portrait_half(data: bytes) -> bytes:
-    """把双拼封面裁成人像那半边，判断不了就原样返回。
+def detect_portrait_side(data: bytes) -> str:
+    """判断人像在双拼封面的哪半边，返回 LEFT / RIGHT / NONE。
 
-    返回的永远是可以直接落盘的图片字节；任何异常都退回原图，
-    图片处理失败不该让整条封面缓存链路断掉。
+    只读图不改图。任何异常都退回 NONE —— 判断失败不该让整条封面缓存链路断掉，
+    前端拿到 NONE 就按普通封面居中显示。
     """
     if not data or Image is None:
-        return data
+        return NONE
 
     try:
         with Image.open(io.BytesIO(data)) as image:
             image.load()
             width, height = image.size
             if not height or width / height < MIN_PANEL_RATIO:
-                return data
+                return NONE
 
             # 统一转 RGB：源图可能是带调色板的 PNG 或带透明通道的 webp，
             # 直接送进 HSV 转换会抛错
@@ -115,19 +125,21 @@ def pick_portrait_half(data: bytes) -> bytes:
 
             total = left_score + right_score
             if total <= 0:
-                return data
+                return NONE
             if abs(left_score - right_score) / total < MIN_SCORE_MARGIN:
                 # 两面差不多，多半不是双拼图，别赌
-                return data
+                return NONE
 
-            box = (mid, 0, width, height) if right_score > left_score else (0, 0, mid, height)
-            cropped = rgb.crop(box)
-
-            buffer = io.BytesIO()
-            # 统一存 JPEG：缓存层按 URL 后缀决定文件名，而裁完的图重新编码后
-            # 原格式已无意义，JPEG 对照片体积最省
-            cropped.save(buffer, format="JPEG", quality=90)
-            return buffer.getvalue()
+            return RIGHT if right_score > left_score else LEFT
     except Exception as exc:
-        logger.debug(f"封面裁剪失败，保留原图: {exc}")
-        return data
+        logger.debug(f"封面人像面判断失败: {exc}")
+        return NONE
+
+
+def detect_from_file(path) -> str:
+    """从磁盘上的图片判断人像面，读不出来就返回 NONE。"""
+    try:
+        return detect_portrait_side(Path(path).read_bytes())
+    except OSError as exc:
+        logger.debug(f"读取封面失败 {path}: {exc}")
+        return NONE

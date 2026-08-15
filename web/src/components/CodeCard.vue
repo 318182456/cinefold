@@ -4,6 +4,7 @@ import { codeCover, subscribeCode, cancelCode, downloadCode, refetchCover } from
 import { useToast } from '@/composables/useToast'
 import { useConfigStore } from '@/stores/config'
 import { parseCasts } from '@/utils/cast'
+import ImageLightbox from './ImageLightbox.vue'
 
 const props = defineProps({
   item: { type: Object, required: true },
@@ -20,6 +21,8 @@ const refetching = ref(false)
 const imageFailed = ref(false)
 // 重抓后 URL 不变，浏览器会拿着 30 天缓存不动，靠它逼一次重新请求
 const coverVersion = ref(0)
+// 灯箱看的是完整原图，卡片上那半边只是可视窗口挪过去了
+const lightboxOpen = ref(false)
 
 const STATUS = {
   0: { text: '未订阅', class: 'bg-gray-700 text-gray-300' },
@@ -38,6 +41,16 @@ const cover = computed(() => {
   if (!url) return ''
   if (!coverVersion.value) return url
   return `${url}${url.includes('?') ? '&' : '?'}_v=${coverVersion.value}`
+})
+
+// 源站封面常是横版双拼图：一半碟片封套，一半人像正片。图完整存着，
+// 这里把可视窗口挪到人像那半边；判断不出来（portrait_side 为空或 none）
+// 就居中显示，跟普通封面一样
+const coverPosition = computed(() => {
+  const side = props.item.portrait_side
+  if (side === 'left') return 'left center'
+  if (side === 'right') return 'right center'
+  return 'center'
 })
 
 // 图片模式跟随后端配置
@@ -69,7 +82,7 @@ async function toggleSubscribe() {
   }
 }
 
-// 裁剪是覆盖原图的，裁错边只能靠重抓补救
+// 源站换图、或人像面判错时用它刷新
 async function refetch() {
   refetching.value = true
   try {
@@ -77,6 +90,8 @@ async function refetch() {
     if (data?.local_banner) {
       props.item.local_banner = data.local_banner
     }
+    // 重新判断的结果要立刻反映到卡片上，否则还按旧的那半边显示
+    props.item.portrait_side = data?.portrait_side ?? ''
     imageFailed.value = false
     coverVersion.value = Date.now()
     toast.success(`已重抓 ${props.item.code} 的封面`)
@@ -113,15 +128,17 @@ async function download() {
     <!-- 封面 -->
     <div
       class="relative h-28 w-20 shrink-0 overflow-hidden rounded-lg bg-gray-800"
-      @click.stop="selectable ? emit('toggle-select', item.code) : emit('detail', item)"
+      @click.stop="selectable ? emit('toggle-select', item.code) : (lightboxOpen = true)"
     >
       <img
         v-if="cover && !imageFailed"
         :src="cover"
         :alt="item.code"
         loading="lazy"
+        title="点击查看完整封面"
         class="h-full w-full cursor-pointer object-cover"
         :class="imageClass"
+        :style="{ objectPosition: coverPosition }"
         @error="imageFailed = true"
       />
       <div v-else class="flex h-full w-full items-center justify-center text-[10px] text-gray-600">
@@ -187,12 +204,18 @@ async function download() {
         <button
           class="btn-ghost px-2.5 py-1 text-xs"
           :disabled="refetching"
-          title="重新下载封面并重新裁剪"
+          title="重新下载封面并重新判断人像面"
           @click.stop="refetch"
         >
           {{ refetching ? '重抓中…' : '重抓' }}
         </button>
       </div>
     </div>
+
+    <ImageLightbox
+      :src="lightboxOpen ? cover : ''"
+      :alt="item.code"
+      @close="lightboxOpen = false"
+    />
   </div>
 </template>
