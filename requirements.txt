@@ -14,6 +14,10 @@ httpx[socks]~=0.28.1
 # Site scraping goes through pyquery (lxml under the hood)
 pyquery~=2.0.0
 lxml~=5.3.0
+# Cover art from the scrape sites is often a side-by-side sheet: disc sleeve on
+# one half, portrait on the other. Pillow picks the portrait half before the
+# image is written to the cache (utils/imgcrop.py)
+Pillow~=11.0.0
 apscheduler~=3.10.4
 # Realtime file events for watched dirs; without it the feature degrades to
 # periodic full reconciliation, startup is unaffected

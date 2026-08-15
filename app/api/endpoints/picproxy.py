@@ -11,11 +11,14 @@ import httpx
 from fastapi import APIRouter, Depends, Request, Response
 from fastapi.responses import FileResponse
 from loguru import logger
+from pydantic import BaseModel
 
 from app.api.endpoints import get_current_user
 from app.core.config import get_settings
+from app.database.models import Code
+from app.database.session import session_scope
 from app.schemas.reponse import ResponseEntity
-from app.utils import imagecache
+from app.utils import get_true_code, imagecache
 
 router = APIRouter(tags=["picproxy"])
 
@@ -160,3 +163,59 @@ def image_local(request: Request, path: str):
 def image_cache_stats(current_user: str = Depends(get_current_user)):
     """缓存概览，用于确认历史图片是否被识别到。"""
     return ResponseEntity.ok(imagecache.stats())
+
+
+class RefetchRequest(BaseModel):
+    code: str
+
+
+@router.post("/image-cache/refetch")
+async def refetch_cover(
+    payload: RefetchRequest,
+    current_user: str = Depends(get_current_user),
+):
+    """重抓某个番号的封面。
+
+    裁剪是覆盖原图的，判断错了没法还原，重抓是唯一的补救手段。
+    先删缓存再回源，拿到新图后重新裁一次并回写 local_banner。
+    """
+    code = get_true_code(payload.code or "")
+    if not code:
+        return ResponseEntity.fail("番号无效")
+
+    with session_scope() as session:
+        item = session.get(Code, code)
+        if item is None:
+            return ResponseEntity.fail("番号不存在")
+        url = (item.banner or item.poster or "").strip()
+
+    if not url:
+        return ResponseEntity.fail("该番号没有可用的封面地址")
+
+    settings = get_settings()
+    if not _is_allowed(url, settings.image_proxy_hosts):
+        logger.warning(f"拒绝重抓非白名单地址: {url[:80]}")
+        return ResponseEntity.fail("封面地址不在白名单内")
+
+    imagecache.drop_cached(url, code, "banner")
+
+    try:
+        response = await _get_client().get(url)
+        response.raise_for_status()
+        content = response.content
+    except Exception as exc:
+        logger.warning(f"重抓封面失败 {code}: {exc}")
+        return ResponseEntity.fail("下载封面失败")
+
+    stored = imagecache.store(content, url, code, "banner")
+    if stored is None:
+        return ResponseEntity.fail("封面无效或写入失败")
+
+    relative = imagecache.relative_of(stored)
+    with session_scope() as session:
+        item = session.get(Code, code)
+        if item is not None:
+            item.local_banner = relative
+
+    logger.info(f"重抓封面完成 {code} -> {relative}")
+    return ResponseEntity.ok({"code": code, "local_banner": relative})

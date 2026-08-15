@@ -15,7 +15,7 @@ from pathlib import Path
 
 from loguru import logger
 
-from app.utils import get_image_suffix_from_url, get_true_code
+from app.utils import get_image_suffix_from_url, get_true_code, imgcrop
 
 DATA_DIR = Path(os.getenv("DATA_DIR", "/data"))
 PIC_DIR = DATA_DIR / "pics"
@@ -94,6 +94,7 @@ def store(content: bytes, url: str, code: str = "", kind: str = "banner") -> Pat
     """把回源拿到的图片写入缓存，返回落盘路径。
 
     写临时文件再 rename，避免并发请求同一张图时读到写了一半的内容。
+    封面是双拼图时先裁出人像那半边再落盘，详见 utils/imgcrop.py。
     """
     if not content or len(content) < MIN_IMAGE_BYTES:
         return None
@@ -101,6 +102,14 @@ def store(content: bytes, url: str, code: str = "", kind: str = "banner") -> Pat
     target = cache_path(url, code, kind)
     if target is None:
         return None
+
+    if kind in ("banner", "poster"):
+        cropped = imgcrop.pick_portrait_half(content)
+        if cropped is not content:
+            content = cropped
+            # 裁剪后统一重编码成 JPEG，文件名得跟着改，
+            # 否则 .webp 的壳里装着 JPEG，image-local 会按后缀报错的 MIME 返回
+            target = target.with_suffix(".jpg")
 
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -112,6 +121,29 @@ def store(content: bytes, url: str, code: str = "", kind: str = "banner") -> Pat
     except OSError as exc:
         logger.warning(f"写入图片缓存失败 {target}: {exc}")
         return None
+
+
+def drop_cached(url: str, code: str = "", kind: str = "banner") -> int:
+    """删掉某张图的全部缓存副本，返回删除数量。
+
+    要跨扩展名删干净：裁剪会把 .webp 重编码成 .jpg，只删当前 URL 推断出的
+    那一个后缀，另一个后缀的旧文件会被 find_cached 继续命中，重抓就失效了。
+    """
+    target = cache_path(url, code, kind)
+    if target is None:
+        return 0
+
+    removed = 0
+    for ext in CONTENT_TYPES:
+        candidate = target.with_suffix(ext)
+        try:
+            candidate.unlink()
+            removed += 1
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            logger.warning(f"删除图片缓存失败 {candidate}: {exc}")
+    return removed
 
 
 def resolve_relative(relative: str) -> Path | None:

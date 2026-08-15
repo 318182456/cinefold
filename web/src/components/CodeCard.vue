@@ -1,6 +1,6 @@
 <script setup>
 import { computed, ref } from 'vue'
-import { codeCover, subscribeCode, cancelCode, downloadCode } from '@/api'
+import { codeCover, subscribeCode, cancelCode, downloadCode, refetchCover } from '@/api'
 import { useToast } from '@/composables/useToast'
 import { useConfigStore } from '@/stores/config'
 import { parseCasts } from '@/utils/cast'
@@ -16,7 +16,10 @@ const emit = defineEmits(['changed', 'detail', 'toggle-select'])
 const toast = useToast()
 const configStore = useConfigStore()
 const busy = ref(false)
+const refetching = ref(false)
 const imageFailed = ref(false)
+// 重抓后 URL 不变，浏览器会拿着 30 天缓存不动，靠它逼一次重新请求
+const coverVersion = ref(0)
 
 const STATUS = {
   0: { text: '未订阅', class: 'bg-gray-700 text-gray-300' },
@@ -30,7 +33,12 @@ const STATUS = {
 const status = computed(() => STATUS[props.item.status] ?? STATUS[0])
 const subscribed = computed(() => props.item.status >= 1)
 const title = computed(() => props.item.cn_title || props.item.title || '')
-const cover = computed(() => codeCover(props.item))
+const cover = computed(() => {
+  const url = codeCover(props.item)
+  if (!url) return ''
+  if (!coverVersion.value) return url
+  return `${url}${url.includes('?') ? '&' : '?'}_v=${coverVersion.value}`
+})
 
 // 图片模式跟随后端配置
 const imageClass = computed(() => {
@@ -58,6 +66,24 @@ async function toggleSubscribe() {
     toast.error(err.message)
   } finally {
     busy.value = false
+  }
+}
+
+// 裁剪是覆盖原图的，裁错边只能靠重抓补救
+async function refetch() {
+  refetching.value = true
+  try {
+    const data = await refetchCover(props.item.code)
+    if (data?.local_banner) {
+      props.item.local_banner = data.local_banner
+    }
+    imageFailed.value = false
+    coverVersion.value = Date.now()
+    toast.success(`已重抓 ${props.item.code} 的封面`)
+  } catch (err) {
+    toast.error(err.message)
+  } finally {
+    refetching.value = false
   }
 }
 
@@ -157,6 +183,14 @@ async function download() {
         </button>
         <button class="btn-ghost px-2.5 py-1 text-xs" :disabled="busy" @click.stop="download">
           下载
+        </button>
+        <button
+          class="btn-ghost px-2.5 py-1 text-xs"
+          :disabled="refetching"
+          title="重新下载封面并重新裁剪"
+          @click.stop="refetch"
+        >
+          {{ refetching ? '重抓中…' : '重抓' }}
         </button>
       </div>
     </div>
