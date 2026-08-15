@@ -29,6 +29,14 @@ from app.utils.junkfiles import pick_junk_files
 # 过滤排序仍每次现算，改了过滤条件不必等缓存过期。
 TORRENT_CACHE_TTL = 1800
 
+# 缓存里存的是 Torrent.to_dict() 的结果，字段值按写入当时的规则算出。
+# 规则改了缓存不会跟着变 —— 曾经就因此让 BT 源的种子顶着旧的 site 混过
+# find_torrent 的过滤（那批缓存写于 site 覆写规则生效之前）。
+#
+# 改动任何「影响字段取值」的规则时（站名归属、字段语义）都要 +1，
+# 让旧缓存自然失效。只改过滤/排序条件不用动 —— 那些每次现算
+TORRENT_CACHE_SCHEMA = 2
+
 # 与 app.modules.bt.bt.BT.name 一致，用于按站点过滤
 BT_SITE_NAME = "BT"
 
@@ -58,7 +66,7 @@ def _search_pt_cached(code: str, refresh: bool = False) -> list[Torrent]:
     """带缓存的全站检索。缓存的是各站返回的原始种子列表。"""
     import json
 
-    key = code.upper()
+    key = f"{code.upper()}@{TORRENT_CACHE_SCHEMA}"
     if not refresh:
         cached = get_rank_cache("torrent", key, ttl=TORRENT_CACHE_TTL)
         if cached:

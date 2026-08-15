@@ -4,6 +4,7 @@ from __future__ import annotations
 from datetime import date
 
 from fastapi import APIRouter, Depends
+from loguru import logger
 from pydantic import BaseModel
 from sqlalchemy import select
 
@@ -81,6 +82,23 @@ def search_codes(keyword: str, current_user: str = Depends(get_current_user)):
     try:
         from app.modules import ladysite
         remote = ladysite.search_code(code or keyword)
+
+        # 资源站搜不到时未必老实报空 —— 有的返回相近番号，有的直接给搜索页
+        # 第一条（搜 SONS-183 拿回 NASK-183 就是这么来的）。番号是精确标识，
+        # 对不上就是没有，不能拿去糊弄用户，更不能落库污染本地情报。
+        #
+        # 只在请求方给出了合法番号时才校验：按标题、演员名之类的关键词搜索
+        # 本就不该要求返回值等于关键词
+        if code:
+            matched = [
+                item for item in remote
+                if (get_true_code(item.get("code", "")) or "").upper() == code.upper()
+            ]
+            if len(matched) != len(remote):
+                dropped = [item.get("code", "") for item in remote if item not in matched]
+                logger.info(f"[{code}] 远程返回 {dropped} 与请求番号不符，已丢弃")
+            remote = matched
+
         # 抓回来的情报存进库，下次同一个番号直接走本地
         services.cache_remote_codes(remote)
         return ResponseEntity.ok({"items": remote, "source": "remote"})

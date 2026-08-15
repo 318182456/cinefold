@@ -1161,6 +1161,56 @@ def test_emby_webhook_deletes_on_item_remove(linked):
     assert not link.exists()
 
 
+def test_emby_webhook_handles_dir_event_with_code(linked):
+    """目录级事件同样带得出番号，不能因为有 code 就跳过目录处理。
+
+    Emby 的 Item.Name 是「SNOS-183 瀬戸環奈」这种，番号解析得出来。
+    早先要求 code 为空才走目录分支，这类事件就掉到按 link_path 精确查，
+    而目录路径永远查不到记录，删除被静默跳过。
+    """
+    from fastapi.testclient import TestClient
+    from app.api import create_app
+
+    source, link = linked
+    medialink.register_scrape("ABS-001", str(source))
+
+    client = TestClient(create_app())
+    response = client.post(
+        "/api/v1/webhook/emby?dry_run=1",
+        json={
+            "Event": "library.deleted",
+            "Item": {"Path": str(Path(link).parent), "Name": "ABS-001 某演员"},
+        },
+    )
+
+    body = response.json()
+    assert body["code"] == 200, body
+    # 走的是目录分支：返回 dir_path 而不是单条结果
+    assert "dir_path" in body["data"], body["data"]
+    assert body["data"]["items"], "目录下有关联记录，应逐个联动"
+
+
+def test_emby_webhook_ignores_empty_dir_event(linked):
+    """影片删完后空掉的演员目录，Emby 会补一条回调，这类要静默忽略。"""
+    from fastapi.testclient import TestClient
+    from app.api import create_app
+
+    source, link = linked
+    medialink.register_scrape("ABS-001", str(source))
+
+    client = TestClient(create_app())
+    response = client.post(
+        "/api/v1/webhook/emby",
+        json={
+            "Event": "library.deleted",
+            "Item": {"Path": "/mnt/media/某个空目录", "Name": "某演员"},
+        },
+    )
+
+    assert response.json()["data"]["ignored"] is True
+    assert source.exists() and link.exists()
+
+
 # ----------------------------------------------------------------------
 # 硬链接保护
 # ----------------------------------------------------------------------

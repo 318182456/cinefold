@@ -709,6 +709,51 @@ class TestLocalCodeSearch:
         assert services.search_code("   ") == []
 
 
+class TestRemoteSearchMismatch:
+    """资源站搜不到时未必老实报空，返回的番号对不上就该丢掉。
+
+    实际遇到：搜 SONS-183 拿回 NASK-183，页面上显示成搜到了，
+    情报还落进了本地库。
+    """
+
+    def _client(self, client, auth):
+        return client, auth
+
+    def test_mismatched_code_is_dropped(self, client, auth, monkeypatch):
+        from app.modules import ladysite
+
+        monkeypatch.setattr(
+            ladysite, "search_code",
+            lambda kw: [{"code": "NASK-183", "title": "别的片子"}],
+        )
+
+        data = client.get("/api/v1/search?keyword=sons183", headers=auth).json()["data"]
+        assert data["items"] == [], "番号不符的结果不该返回"
+
+    def test_matching_code_is_kept(self, client, auth, monkeypatch):
+        from app.modules import ladysite
+
+        monkeypatch.setattr(
+            ladysite, "search_code",
+            lambda kw: [{"code": "SONS-183", "title": "正确的片子"}],
+        )
+
+        data = client.get("/api/v1/search?keyword=sons183", headers=auth).json()["data"]
+        assert [i["code"] for i in data["items"]] == ["SONS-183"]
+
+    def test_keyword_search_is_not_checked(self, client, auth, monkeypatch):
+        """按标题/演员搜索时，返回值本就不该等于关键词。"""
+        from app.modules import ladysite
+
+        monkeypatch.setattr(
+            ladysite, "search_code",
+            lambda kw: [{"code": "ABC-123", "title": "某演员的作品"}],
+        )
+
+        data = client.get("/api/v1/search?keyword=某演员", headers=auth).json()["data"]
+        assert [i["code"] for i in data["items"]] == ["ABC-123"]
+
+
 class TestCacheRemoteCodes:
     """远程抓回的情报要落库，且不能动已有状态。"""
 

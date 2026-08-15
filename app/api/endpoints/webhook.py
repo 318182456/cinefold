@@ -217,9 +217,11 @@ async def emby_webhook(request: Request):
     # 库里能分：第 1 种查得到目录下的关联记录，第 2 种查不到。查得到就按
     # 查出来的影片逐个联动，查不到才静默忽略。
     #
-    # 判据两个条件都要满足：只看扩展名会误伤 .strm，只看番号会误伤命名
-    # 不规范的影片文件
-    if not code and link_path:
+    # 判据只看扩展名，不看 code 有没有解析出来 —— Emby 的目录级事件同样
+    # 带得出番号（Item.Name 就是「SNOS-183 瀬戸環奈」这种），要求 code 为空
+    # 才走目录分支，那些事件就会掉到下面按 link_path 精确查，而目录路径
+    # 永远查不到关联记录，整个删除就被静默跳过了
+    if link_path:
         from app.services.medialink import VIDEO_SUFFIXES, lookup_links_under_dir
 
         if Path(link_path).suffix.lower() not in VIDEO_SUFFIXES:
