@@ -112,6 +112,29 @@ SOURCES: tuple[dict, ...] = (
     {"key": "xchina", "name": "XChina", "host": "https://xchina.co",
      "parser": "xchina", "bypass_first": False, "interval": 2.0,
      "code_rule": "skip:date"},
+
+    # --- 字幕源（kind="subtitle"）---
+    # 登记在这里只为让用户能在页面上改域名与开关 —— 字幕站换域名同样频繁。
+    # parser 留空是有意的：详情抓取只认有 parser 的源
+    # （enabled_parser_sources），留空才不会被拉进查番号详情那条链路。
+    # 解析实现在 modules/subtitle 下，按 key 取地址
+    {"key": "subtitlecat", "name": "SubtitleCat（字幕）",
+     "host": "https://www.subtitlecat.com", "kind": "subtitle",
+     "parser": "", "bypass_first": False, "interval": 2.0},
+    {"key": "subtitlegh", "name": "GitHub 字幕库",
+     "host": "https://raw.githubusercontent.com/CnSubtitles/subtitles/main",
+     "kind": "subtitle",
+     "parser": "", "bypass_first": False, "interval": 0.5},
+)
+
+# 番号详情源。字幕源与之共用这张表（同样需要页面上改地址），但不参与
+# 详情抓取，凡是遍历"抓详情的源"的地方都该用这个而非 SOURCES
+DETAIL_SOURCES: tuple[dict, ...] = tuple(
+    item for item in SOURCES if item.get("kind", "detail") == "detail"
+)
+
+SUBTITLE_SOURCES: tuple[dict, ...] = tuple(
+    item for item in SOURCES if item.get("kind") == "subtitle"
 )
 
 SOURCE_MAP: dict[str, dict] = {item["key"]: item for item in SOURCES}

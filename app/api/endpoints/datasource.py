@@ -73,6 +73,9 @@ def list_datasources(current_user: str = Depends(get_current_user)):
             item["builtin"] = is_builtin(row.key)
             item["protected"] = is_protected(row.key)
             item["in_detail"] = row.key in detail_keys
+            # 用途分区：字幕源与番号源共用这张表，但页面上要分开列 ——
+            # 混在一起时用户会以为字幕站也参与番号检索
+            item["kind"] = SOURCE_MAP.get(row.key, {}).get("kind", "detail")
             items.append(item)
 
     return ResponseEntity.ok({"items": items, "removed": removed})

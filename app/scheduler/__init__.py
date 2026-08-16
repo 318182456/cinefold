@@ -170,6 +170,13 @@ def fill_empty_banner() -> int:
     return services.fill_lack_codes()
 
 
+def fill_subtitles() -> int:
+    """给媒体库里没字幕的影片补抓。开关（SUBTITLE_ENABLED）关着时直接返回。"""
+    from app.services import subtitle
+    logger.info("[任务] 开始补抓字幕")
+    return subtitle.fill_lack_subtitles()
+
+
 def translate_titles() -> int:
     """翻译缺中文标题的番号。"""
     from app import services
@@ -358,6 +365,8 @@ JOBS: dict[str, dict] = {
     "sync_news": {"func": sync_news, "name": "同步新片", "cron_key": "sync_news"},
     "fill_empty_banner": {"func": fill_empty_banner, "name": "补全缺图", "cron_key": "fill_empty_image_time"},
     "warm_page_cache": {"func": warm_page_cache, "name": "预热页面缓存", "cron_key": "warm_cache_time"},
+    # 默认凌晨跑：每部片都要跨境请求，白天跑会跟抓取任务抢过盾服务
+    "fill_subtitles": {"func": fill_subtitles, "name": "补抓字幕", "cron_key": "subtitle_fill_time"},
 }
 
 # 固定间隔任务，不走 crontab

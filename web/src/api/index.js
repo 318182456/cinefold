@@ -110,6 +110,9 @@ export const getMediaLinkStats = (checkMissing = true) =>
     ...(checkMissing ? { timeout: 300000 } : {}),
   })
 export const registerMediaLink = (payload) => http.post('/medialinks/register', payload)
+// 手动抓字幕。要跨境搜好几个站，比普通请求慢，放宽超时
+export const fetchSubtitle = (code, force = false) =>
+  http.post('/medialinks/subtitle', { code, force }, { timeout: 120000 })
 export const previewMediaLinkDelete = (payload) =>
   http.post('/medialinks/preview', payload)
 export const deleteMediaLink = (payload) => http.post('/medialinks/delete', payload)

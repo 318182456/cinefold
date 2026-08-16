@@ -33,11 +33,19 @@ const STATUS = {
 // 混进来会让用户以为拖它的顺序能影响检索。
 // 按 priority 排：这一组的次序就是抓取顺序，页面上要能看出来
 const byPriority = (a, b) => a.priority - b.priority || a.key.localeCompare(b.key)
+// 自定义源没有 kind 字段，按番号源处理
+const isSubtitle = (i) => i.kind === 'subtitle'
 const usable = computed(
-  () => items.value.filter((i) => i.has_parser && i.in_detail).sort(byPriority),
+  () => items.value
+    .filter((i) => i.has_parser && i.in_detail && !isSubtitle(i))
+    .sort(byPriority),
 )
+// 字幕源单列一区：它们不参与番号检索，混在一起会让人误解
+const subtitles = computed(() => items.value.filter(isSubtitle).sort(byPriority))
 const registered = computed(
-  () => items.value.filter((i) => !i.has_parser || !i.in_detail),
+  () => items.value.filter(
+    (i) => !isSubtitle(i) && (!i.has_parser || !i.in_detail),
+  ),
 )
 
 // 番号规则的影章文案。后端把不带 only:/skip: 前缀的裸规则当 only 处理
@@ -409,6 +417,43 @@ onMounted(load)
               </button>
             </div>
 
+            <p v-if="item.status_message" class="text-[11px] text-gray-600">
+              {{ item.status_message }}
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <!-- 字幕源。按顺序尝试，命中简体中文即停 -->
+      <div v-if="subtitles.length" class="space-y-2 border-t border-gray-800 pt-4">
+        <p class="text-xs text-gray-500">
+          字幕源（按顺序尝试，命中简体中文即停。抓取开关在「设置 › 字幕」）
+        </p>
+        <div class="grid gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
+          <div
+            v-for="item in subtitles"
+            :key="item.key"
+            class="card cursor-pointer space-y-2 transition-colors hover:border-gray-700"
+            @click="open(item)"
+          >
+            <div class="flex items-center gap-2">
+              <span class="h-2 w-2 shrink-0 rounded-full" :class="STATUS[item.status].dot" />
+              <span class="truncate text-sm text-gray-300">{{ item.name }}</span>
+              <span
+                v-if="!item.enabled"
+                class="badge shrink-0 bg-gray-800 text-gray-500"
+              >
+                已停用
+              </span>
+              <button
+                class="btn-ghost ml-auto shrink-0 px-2 py-0.5 text-[11px]"
+                :disabled="checking === item.key"
+                @click.stop="check(item)"
+              >
+                {{ checking === item.key ? '测试中' : '测试' }}
+              </button>
+            </div>
+            <p class="truncate text-[11px] text-gray-500">{{ item.host }}</p>
             <p v-if="item.status_message" class="text-[11px] text-gray-600">
               {{ item.status_message }}
             </p>

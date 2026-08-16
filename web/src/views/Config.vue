@@ -104,11 +104,21 @@ function generateWebhookToken() {
   toast.success('已生成密钥，保存后生效')
 }
 
+// 侧边导航的大类。分组多了平铺一排按钮找不着东西，按用途归到四类下面
+const CATEGORIES = [
+  { key: 'pipeline', title: '下载链路' },
+  { key: 'library', title: '媒体库' },
+  { key: 'assist', title: '通知与 AI' },
+  { key: 'system', title: '系统' },
+]
+
 // 字段类型 t: text(默认) / password / bool / select / textarea / tags / size
 // 每个分组按用途拆成若干 section，每个 section 一张卡片
+// cat 指向所属大类，决定它在侧边导航里排到哪一栏
 const GROUPS = [
   {
     key: 'downloader',
+    cat: 'pipeline',
     title: '下载器',
     sections: [
       {
@@ -173,6 +183,7 @@ const GROUPS = [
   },
   {
     key: 'media',
+    cat: 'library',
     title: '媒体库',
     sections: [
       {
@@ -235,7 +246,29 @@ const GROUPS = [
     tests: ['emby', 'jellyfin', 'plex'],
   },
   {
+    key: 'subtitle',
+    cat: 'library',
+    title: '字幕',
+    sections: [
+      {
+        title: '自动抓取',
+        hint: '刮削登记完成后按番号找字幕，放到影片旁边。只认简体中文 —— '
+          + '字幕站的「中文」大量是繁体或机翻日文，挑不出简体就不放文件。'
+          + '关掉开关后仍可在番号详情页手动抓',
+        fields: [
+          { k: 'subtitle_enabled', label: '启用自动抓取', t: 'bool',
+            hint: '入库即抓，并允许定时补漏' },
+          { k: 'subtitle_fill_limit', label: '补漏每轮上限', t: 'number', ph: '30',
+            hint: '每部要跨境请求两三次，媒体库大时别设太高' },
+          { k: 'subtitle_fill_time', label: '补漏时间',
+            hint: 'crontab 格式。默认凌晨跑，避开白天与抓取任务抢过盾服务' },
+        ],
+      },
+    ],
+  },
+  {
     key: 'pt',
+    cat: 'pipeline',
     title: 'PT 站点',
     sections: [
       {
@@ -273,6 +306,7 @@ const GROUPS = [
   },
   {
     key: 'bt',
+    cat: 'pipeline',
     title: '自定义 BT 源',
     sections: [
       {
@@ -291,6 +325,7 @@ const GROUPS = [
   },
   {
     key: 'notify',
+    cat: 'assist',
     title: '通知',
     sections: [
       {
@@ -347,6 +382,7 @@ const GROUPS = [
   },
   {
     key: 'filter',
+    cat: 'pipeline',
     title: '过滤与排序',
     sections: [
       {
@@ -400,6 +436,7 @@ const GROUPS = [
   },
   {
     key: 'schedule',
+    cat: 'system',
     title: '定时任务',
     sections: [
       {
@@ -442,6 +479,7 @@ const GROUPS = [
   },
   {
     key: 'auth',
+    cat: 'system',
     title: '登录方式',
     sections: [
       {
@@ -485,20 +523,10 @@ const GROUPS = [
     ],
   },
   {
-    key: 'other',
-    title: '其他',
+    key: 'ai',
+    cat: 'assist',
+    title: '翻译与 AI',
     sections: [
-      {
-        title: '网络',
-        fields: [
-          { k: 'proxy', label: 'HTTP/SOCKS 代理', ph: 'socks5://127.0.0.1:7890' },
-          { k: 'bypass_url', label: '反爬绕过服务', ph: 'http://127.0.0.1:8191/v1',
-            hint: 'FlareSolverr 等，直连被拦时改走它' },
-          { k: 'image_proxy_hosts', label: '图片代理域名',
-            hint: '逗号分隔，追加到内置白名单' },
-          { k: 'javdb_host', label: 'JavDB 地址' },
-        ],
-      },
       {
         title: '翻译',
         hint: '按 AI → 百度 → Google 的顺序取第一个配好的',
@@ -522,6 +550,25 @@ const GROUPS = [
           { k: 'agent_api_key', label: 'API Key', t: 'password' },
         ],
       },
+    ],
+  },
+  {
+    key: 'network',
+    cat: 'system',
+    title: '网络与存储',
+    sections: [
+      {
+        title: '网络',
+        fields: [
+          { k: 'proxy', label: 'HTTP/SOCKS 代理', ph: 'socks5://127.0.0.1:7890' },
+          { k: 'bypass_url', label: '反爬绕过服务', ph: 'http://127.0.0.1:8191/v1',
+            hint: 'FlareSolverr 等，直连被拦时改走它' },
+          { k: 'image_proxy_hosts', label: '图片代理域名',
+            hint: '逗号分隔，追加到内置白名单' },
+          { k: 'javdb_host', label: 'JavDB 地址',
+            hint: '其余站点的地址在「数据源」页里改' },
+        ],
+      },
       {
         title: 'CloudDrive2',
         fields: [
@@ -531,6 +578,13 @@ const GROUPS = [
           { k: 'cloudnas_savepath', label: '保存路径' },
         ],
       },
+    ],
+  },
+  {
+    key: 'upgrade',
+    cat: 'system',
+    title: '版本与更新',
+    sections: [
       {
         title: '版本与更新',
         hint: '更新包从 GitHub Releases 下载，装到 /data 挂载卷，重建容器不会丢',
@@ -551,6 +605,11 @@ const GROUPS = [
     ],
   },
 ]
+
+/** 某个大类下的分组，供侧边导航渲染 */
+function groupsOf(cat) {
+  return GROUPS.filter((group) => group.cat === cat)
+}
 
 /** 分组内的全部字段，save 时按此收集 */
 function groupFields(group) {
@@ -836,20 +895,31 @@ onUnmounted(stopUpgradePoll)
 </script>
 
 <template>
-  <div class="space-y-4">
-    <!-- 分组切换 -->
-    <div class="flex flex-wrap gap-2">
-      <button
-        v-for="group in GROUPS"
-        :key="group.key"
-        class="btn px-3 py-1.5 text-xs"
-        :class="activeGroup === group.key ? 'bg-brand text-white' : 'btn-ghost'"
-        @click="activeGroup = group.key"
-      >
-        {{ group.title }}
-      </button>
-    </div>
+  <div class="gap-4 lg:flex lg:items-start">
+    <!-- 分组导航。窄屏横向滚动一排，宽屏收成左侧竖栏 -->
+    <nav
+      class="-mx-1 mb-4 flex gap-4 overflow-x-auto px-1 pb-2 lg:mx-0 lg:mb-0 lg:w-44
+             lg:shrink-0 lg:flex-col lg:gap-4 lg:overflow-visible lg:pb-0"
+    >
+      <div v-for="cat in CATEGORIES" :key="cat.key" class="shrink-0 lg:shrink">
+        <p class="mb-1.5 px-1 text-[11px] font-medium uppercase tracking-wide text-gray-600">
+          {{ cat.title }}
+        </p>
+        <div class="flex gap-2 lg:flex-col lg:gap-1">
+          <button
+            v-for="group in groupsOf(cat.key)"
+            :key="group.key"
+            class="btn whitespace-nowrap px-3 py-1.5 text-xs lg:text-left"
+            :class="activeGroup === group.key ? 'bg-brand text-white' : 'btn-ghost'"
+            @click="activeGroup = group.key"
+          >
+            {{ group.title }}
+          </button>
+        </div>
+      </div>
+    </nav>
 
+    <div class="min-w-0 flex-1 space-y-4">
     <LoadingBlock v-if="loading" :rows="6" />
 
     <template v-else>
@@ -1291,5 +1361,6 @@ onUnmounted(stopUpgradePoll)
         密码类字段显示为掩码时表示未改动，直接保存不会覆盖原值
       </p>
     </template>
+    </div>
   </div>
 </template>

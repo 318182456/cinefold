@@ -1544,20 +1544,35 @@ class TestCodeRouting:
             session.execute(delete(DataSource))
 
     def test_all_builtin_sources_have_parsers(self):
-        """内置源全部接入解析，不再有只能测连通性的源。"""
-        from app.modules.ladysite.sources import SOURCES
+        """内置详情源全部接入解析，不再有只能测连通性的源。
 
-        assert [s["key"] for s in SOURCES if not s["parser"]] == []
+        字幕源不在此列：它们与详情源共用 datasource 表（同样要能在页面上
+        改地址），但解析实现在 modules/subtitle 下，不走详情抓取那条链路。
+        """
+        from app.modules.ladysite.sources import DETAIL_SOURCES
+
+        assert [s["key"] for s in DETAIL_SOURCES if not s["parser"]] == []
 
     def test_every_parser_is_constructible(self):
-        """SOURCES 里登记的 parser 都要能在工厂里建出实例。"""
+        """详情源登记的 parser 都要能在工厂里建出实例。"""
         from app.modules.ladysite import _SITE_CLASSES, _get_site
-        from app.modules.ladysite.sources import SOURCES
+        from app.modules.ladysite.sources import DETAIL_SOURCES
 
-        for source in SOURCES:
+        for source in DETAIL_SOURCES:
             key = source["key"]
             assert key in _SITE_CLASSES, f"{key} 未登记到 _SITE_CLASSES"
             assert _get_site(key) is not None, f"{key} 构造失败"
+
+    def test_subtitle_sources_stay_out_of_detail_crawling(self):
+        """字幕源不能被拉进详情抓取 —— 它们没有 CodeInfo 解析器。"""
+        from app.modules.ladysite import DETAIL_SITES, SPECIAL_SITES
+        from app.modules.ladysite.sources import SUBTITLE_SOURCES
+
+        assert SUBTITLE_SOURCES, "字幕源清单不该为空"
+        for source in SUBTITLE_SOURCES:
+            assert source["key"] not in DETAIL_SITES + SPECIAL_SITES
+            # parser 为空是把它挡在 enabled_parser_sources 之外的那道闸
+            assert not source["parser"]
 
     def test_fc2_code_skips_jav_sites(self):
         """FC2 番号在日系有码源上查不到，不该白开线程。

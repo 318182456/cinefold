@@ -273,6 +273,13 @@ class Settings:
     download_schedule_time: str = "0 22 * * *"
     # 榜单缓存 30 分钟过期，预热间隔必须比它短，否则用户还是会撞上冷缓存
     warm_cache_time: str = "*/25 * * * *"
+    subtitle_fill_time: str = "0 4 * * *"
+
+    # --- 字幕 ---
+    # 刮削登记完成后自动抓字幕，并允许定时补漏。关掉则只剩页面手动触发
+    subtitle_enabled: bool = False
+    # 定时补漏每轮最多处理几部。每部要跨境请求两三次，媒体库大时别设太高
+    subtitle_fill_limit: int = 30
 
     # --- 榜单订阅 ---
     rank_page: int = 0
@@ -533,6 +540,10 @@ def load_settings() -> Settings:
         actor_schedule_time=_env("ACTOR_SCHEDULE_TIME", "0 21 * * *").strip("'\""),
         download_schedule_time=_env("DOWNLOAD_SCHEDULE_TIME", "0 22 * * *").strip("'\""),
         warm_cache_time=_env("WARM_CACHE_TIME", "*/25 * * * *").strip("'\""),
+        subtitle_fill_time=_env("SUBTITLE_FILL_TIME", "0 4 * * *").strip("'\""),
+
+        subtitle_enabled=_env_bool("SUBTITLE_ENABLED", False),
+        subtitle_fill_limit=_env_int("SUBTITLE_FILL_LIMIT", 30),
 
         rank_page=_env_int("RANK_PAGE", 0),
         rank_type=_env("RANK_TYPE"),

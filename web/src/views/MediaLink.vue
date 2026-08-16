@@ -2,8 +2,9 @@
 import { computed, onMounted, ref } from 'vue'
 import {
   batchDeleteMediaLinks, batchDropMediaLinkRecords, deleteMediaLink,
-  dropMediaLinkRecord, getMediaLinkStats, listMediaLinkOrphans, listMediaLinks,
-  previewMediaLinkDelete, pruneMediaLinks, recoverMediaLinks, registerMediaLink,
+  dropMediaLinkRecord, fetchSubtitle, getMediaLinkStats, listMediaLinkOrphans,
+  listMediaLinks, previewMediaLinkDelete, pruneMediaLinks, recoverMediaLinks,
+  registerMediaLink,
 } from '@/api'
 import { useToast } from '@/composables/useToast'
 import LoadingBlock from '@/components/LoadingBlock.vue'
@@ -366,6 +367,24 @@ async function dropRecord(item) {
   }
 }
 
+// ---------------------------------------------------------------- 字幕
+// 自动抓漏了、或想换一版时的手动入口。不看 SUBTITLE_ENABLED 开关 ——
+// 那个管的是自动行为，人点了按钮就是明确要抓
+const subtitleBusy = ref('')
+
+async function grabSubtitle(code) {
+  subtitleBusy.value = code
+  try {
+    const data = await fetchSubtitle(code)
+    toast.success(`已写入 ${data.written} 处字幕`)
+  } catch (err) {
+    // 找不到字幕是常态（站点收录有滞后），不当报错刷红
+    toast.error(err.message || '未找到简体中文字幕')
+  } finally {
+    subtitleBusy.value = ''
+  }
+}
+
 // ---------------------------------------------------------------- 记录重建
 // 误删记录后的补救：按 History.save_path 把关联配回来。
 // 先演练看配对结果，确认无误再落库 —— 重建的是反向删除的依据
@@ -684,7 +703,15 @@ onMounted(() => {
             {{ shortTime(group.links[0].create_time) }}
           </span>
           <button
-            class="btn-ghost ml-auto px-2 py-0.5 text-[11px] text-red-400 hover:bg-red-950/40"
+            class="btn-ghost ml-auto px-2 py-0.5 text-[11px]"
+            :disabled="subtitleBusy === group.code"
+            :title="'按番号搜简体中文字幕，放到影片旁边'"
+            @click="grabSubtitle(group.code)"
+          >
+            {{ subtitleBusy === group.code ? '抓取中…' : '抓字幕' }}
+          </button>
+          <button
+            class="btn-ghost px-2 py-0.5 text-[11px] text-red-400 hover:bg-red-950/40"
             @click="askDelete(group)"
           >
             联动删除

@@ -139,6 +139,19 @@ id (autoincrement) / namespace / key / content / create_time
 ### 翻译 `modules/translate/`
 - `baidu` · `google` · `translateai`（OpenAI 兼容）
 
+### 字幕 `modules/subtitle/`
+统一接口：`search(code)` → `SubtitleItem | None`，按 `SUBTITLE_SITES` 顺序命中即停。
+- `subtitlecat` — 主力，搜索页取详情页再挑下载链接
+- `github` — GitHub 字幕仓库，按番号命名，作 subtitlecat 跑路时的兜底
+
+**只认简体中文**。站点的语言标注不可信（大量繁体与机翻日文标成 Chinese），
+标注只用来缩小候选，最终按正文判定：汉字数量 → 假名占比 → 简繁字形计数
+（`base.is_simplified_chinese`）。判不出就放弃 —— 媒体库里出现看不懂的字幕
+比没有字幕更麻烦。编码按字节猜（`decode_subtitle`），站点常透传 GBK/BIG5。
+
+两个字幕源登记在 `datasource` 表里（地址可在页面上改），但 `parser` 留空、
+`kind="subtitle"`，因此不会被 `enabled_parser_sources` 拉进详情抓取链路。
+
 ### AI 助手 `modules/agent/`
 - `agent` — ChatAgent，OpenAI 兼容接口 + function calling，最多 5 轮工具调用
 - `tools` — 只读工具：`overview` / `query_codes` / `code_detail` / `list_actors` /
@@ -159,6 +172,7 @@ id (autoincrement) / namespace / key / content / create_time
 补全       fill_lack_codes / fill_lack_actors (+ _by_list 变体)
 下载       download_torrent / run_sub_task / run_run_actor
 翻译       translate_title / translate_codes
+字幕       subtitle.fetch_for_code / subtitle.fill_lack_subtitles
 媒体库     is_exist_server
 图片       remove_deleted_photo / batch_remove_deleted_photo / search_code_exist_banner
 通知       send_message / send_subscribe_message / send_subscribe_actor_message /
@@ -166,6 +180,14 @@ id (autoincrement) / namespace / key / content / create_time
 缓存       get_rank_cache
 转移做种   seedtransfer.transfer_hashes / run_auto_transfer / list_candidates
 ```
+
+**字幕 `services/subtitle.py`** — 抓取与落盘。三条触发路径共用：
+刮削登记完成（`register_scrape` 尾部，异常吞掉不影响登记）、定时任务
+`fill_subtitles`、页面按钮（`POST /medialinks/subtitle`，`manual=True`
+跳过总开关 —— 开关管的是自动行为）。字幕写到影片旁边、与影片同名并带
+`.zh-CN` 语言后缀，同一番号的每个硬链接位置都写一份。先写临时文件再
+原子改名，避免媒体服务器扫到半截文件。已有同名字幕（含用户手工放的）
+默认不覆盖，`force=True` 才覆盖。
 
 **转移做种 `services/seedtransfer.py`** — 把 qb 里已下载完的种子交给 tr 继续做种。
 导出 `.torrent` 原文件（磁链拿不到私有站的 metadata），按 `SEED_TRANSFER_PATH_MAP`
@@ -194,6 +216,7 @@ qb 卡死（WebAPI 不响应但进程还在）时重启它的容器。`QBitTorre
 | `sub_rank` | `0 20 * * *` | 排行榜订阅 |
 | `run_actors` | `0 21 * * *` | 演员订阅 |
 | `run_codes_task` | `0 22 * * *` | 订阅下载 |
+| `fill_subtitles` | `0 4 * * *` | 补抓字幕（`SUBTITLE_ENABLED` 关闭时直接返回） |
 
 另有 `cache_photos` / `save_image` / `translate_titles` / `pt_wait` / `transfer_seeds` / `push_job` / `start_scheduler` / `restart_scheduler`。
 

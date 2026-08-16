@@ -41,6 +41,12 @@ class DeleteRequest(BaseModel):
     dry_run: bool = True
 
 
+class SubtitleRequest(BaseModel):
+    code: str
+    # 覆盖已有字幕。默认不覆盖，避免把用户手工放的那份冲掉
+    force: bool = False
+
+
 class BatchRequest(BaseModel):
     """一批 link_path。孤儿一览的多选批量操作用。
 
@@ -402,6 +408,33 @@ def register_medialink(
         )
     _drop_stats_cache()
     return ResponseEntity.ok({"links": links}, message=f"已登记 {len(links)} 条")
+
+
+@router.post("/subtitle")
+def fetch_subtitle(
+    body: SubtitleRequest, current_user: str = Depends(get_current_user)
+):
+    """给一个番号抓字幕。自动抓漏了、或想换一版时的手动入口。
+
+    不看 SUBTITLE_ENABLED 开关 —— 那个管的是自动行为，人点了按钮就是
+    明确要抓（与 qb 手动重启不看开关同理）。
+    """
+    code = (body.code or "").strip()
+    if not code:
+        return ResponseEntity.fail("番号不能为空", code=400)
+
+    from app.services import subtitle as subtitle_service
+
+    written = subtitle_service.fetch_for_code(code, force=body.force, manual=True)
+    if not written:
+        return ResponseEntity.fail(
+            "未找到简体中文字幕。确认该番号已刮削入库，"
+            "或稍后再试（字幕站收录有滞后）",
+            code=404,
+        )
+    return ResponseEntity.ok(
+        {"written": written}, message=f"已写入 {written} 处"
+    )
 
 
 @router.post("/preview")

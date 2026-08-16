@@ -283,7 +283,21 @@ def register_scrape(
 
     logger.info(f"[{code}] 已登记 {len(unique)} 条硬链接关联")
     mark_completed(code)
+    _fetch_subtitle_quietly(code)
     return unique
+
+
+def _fetch_subtitle_quietly(code: str) -> None:
+    """刮削登记完就顺手抓字幕。开关关着时是空操作。
+
+    抓字幕要跨境请求，慢且不稳。它失败不能影响登记结果 —— 登记是这条
+    链路的正事，字幕只是附赠，所以异常一律吞掉只记日志。
+    """
+    try:
+        from app.services import subtitle
+        subtitle.fetch_for_code(code)
+    except Exception as exc:
+        logger.warning(f"[{code}] 抓字幕失败: {exc}")
 
 
 # ----------------------------------------------------------------------
