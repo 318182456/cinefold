@@ -318,6 +318,67 @@ def test_endpoint_returns_written_count(monkeypatch, library):
     assert payload["code"] == 404, payload
 
 
+# ----------------------------------------------------------------------
+# subtitlecat 解析
+# ----------------------------------------------------------------------
+# 详情页的真实结构：语言标在文件名上，链接文本一律是 Download
+_DETAIL_HTML = """
+<html><body>
+<a href="/subs/1341/SONE-895-zh-CN.srt">Download</a>
+<a href="/subs/1340/SONE-895-zh-TW.srt">Download</a>
+<a href="/subs/1348/SONE-895-en.srt">Download</a>
+<a href="/subs/1353/SONE-895-ja.srt">Download</a>
+<a href="/subs/1350/SONE-895-th.srt">Download</a>
+</body></html>
+"""
+
+
+def test_candidate_links_prefers_simplified_and_drops_traditional():
+    """语言标在 URL 上，只看链接文本的话十几种语言全都无从区分。"""
+    from app.modules.subtitle.subtitlecat import SubtitleCat
+
+    links = SubtitleCat(host="https://sc.test")._candidate_links(_DETAIL_HTML)
+
+    # 简中排第一
+    assert links[0].endswith("SONE-895-zh-CN.srt")
+    # 繁中直接排除，连下载都不该发起
+    assert not any("zh-TW" in u for u in links)
+    # 其余语言仍留作兜底（正文判定会把它们挡下）
+    assert any(u.endswith("-en.srt") for u in links)
+    # 全部补成绝对地址
+    assert all(u.startswith("https://sc.test/") for u in links)
+
+
+def test_search_result_relative_href_becomes_absolute(monkeypatch):
+    """搜索结果的 href 不带前导斜杠，拼错会变成 sc.testsubs/... 这种死域名。"""
+    from app.modules.subtitle.subtitlecat import SubtitleCat
+
+    site = SubtitleCat(host="https://sc.test")
+    monkeypatch.setattr(site.client, "get", lambda *a, **k: """
+        <table><tbody><tr><td>
+          <a href="subs/1340/SONE-895.html">SONE-895</a>
+        </td></tr></tbody></table>
+    """)
+
+    path, title = site._find_detail("SONE-895")
+    assert path == "https://sc.test/subs/1340/SONE-895.html"
+    assert title == "SONE-895"
+
+
+def test_search_result_ignores_other_codes(monkeypatch):
+    """搜索是模糊匹配，SSIS-001 会带回 SSIS-0011 那部片。"""
+    from app.modules.subtitle.subtitlecat import SubtitleCat
+
+    site = SubtitleCat(host="https://sc.test")
+    monkeypatch.setattr(site.client, "get", lambda *a, **k: """
+        <table><tbody>
+          <tr><td><a href="subs/1/SSIS-0011.html">SSIS-0011</a></td></tr>
+        </tbody></table>
+    """)
+
+    assert site._find_detail("SSIS-001") == ("", "")
+
+
 def test_has_subtitle_not_fooled_by_longer_code(enabled, tmp_path):
     """ABS-0011.srt 不是 ABS-001 的字幕，前缀匹配会误判。"""
     folder = tmp_path / "lib" / "ABS-001"

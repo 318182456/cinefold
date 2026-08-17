@@ -195,7 +195,9 @@ class SiteClient:
         站点声明了 bypass_first 则跳过直连，直接走该服务。
         """
         settings = get_settings()
-        url = path if path.startswith("http") else f"{self.host}{path}"
+        # 补斜杠而不是直接拼：少一个斜杠拼出来的是 example.comsubs/x，
+        # 域名整个变了，却只会报一个看着与 URL 无关的 DNS/SSL 错误
+        url = path if path.startswith("http") else absolute_url(path, self.host)
 
         # 直连必被拦的站点，配了 bypass 就不必先撞一次 403。
         # Cookie 必须一并带过去：mgstage 的 adc、dmm 的 age_check_done
@@ -373,6 +375,10 @@ def absolute_url(url: str, host: str) -> str:
 
     host 必须传配置里的（client.host），不能用模块常量：这些站换域名很
     频繁，用户在页面上改了地址后，用常量拼出来的图片链接全指向死域名。
+
+    不带前导斜杠的相对路径（subs/1407/x.html）同样要补全 —— 原样返回的话
+    调用方拼出来的是 host+path 连在一起的 subtitlecat.comsubs/...，
+    域名都变了，报出来却是一个看着与 URL 无关的 SSL 错误。
     """
     if not url:
         return ""
@@ -380,7 +386,10 @@ def absolute_url(url: str, host: str) -> str:
         return f"https:{url}"
     if url.startswith("/"):
         return f"{host.rstrip('/')}{url}"
-    return url
+    # 已经是绝对地址（含 data: 这类 scheme）就别动
+    if "://" in url or url.startswith("data:"):
+        return url
+    return f"{host.rstrip('/')}/{url}"
 
 
 # 各式日期文本：2021-02-19 / 2021/2/19 / 2021年2月19日

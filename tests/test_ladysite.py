@@ -1689,6 +1689,14 @@ class TestBaseHelpers:
         ("//cdn.x/a.jpg", "https://x.biz", "https://cdn.x/a.jpg"),
         ("https://cdn.x/a.jpg", "https://x.biz", "https://cdn.x/a.jpg"),
         ("", "https://x.biz", ""),
+        # 不带前导斜杠的相对路径（subtitlecat 的搜索结果就是这种）。
+        # 原样返回的话调用方拼出 x.bizsubs/1/a.html —— 域名都变了，
+        # 报出来却是个看着与 URL 无关的 SSL/DNS 错误
+        ("subs/1/a.html", "https://x.biz", "https://x.biz/subs/1/a.html"),
+        ("subs/1/a.html", "https://x.biz/", "https://x.biz/subs/1/a.html"),
+        # 其它 scheme 不能被当成相对路径拼上 host
+        ("data:image/png;base64,AA", "https://x.biz", "data:image/png;base64,AA"),
+        ("http://cdn.x/a.jpg", "https://x.biz", "http://cdn.x/a.jpg"),
     ])
     def test_absolute_url(self, url, host, expected):
         from app.modules.ladysite.base import absolute_url

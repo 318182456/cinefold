@@ -102,7 +102,11 @@ class SubtitleCat:
         return "", ""
 
     def _candidate_links(self, html: str) -> list[str]:
-        """详情页里可能是简中的下载链接，按可信度排序。"""
+        """详情页里可能是简中的下载链接，按可信度排序。
+
+        语言标在文件名上（SONE-895-zh-CN.srt），链接文本一律是 "Download"，
+        所以判定必须看 URL —— 只看文本的话十几种语言全都无从区分。
+        """
         doc = PyQuery(html)
         preferred: list[str] = []
         fallback: list[str] = []
@@ -114,8 +118,9 @@ class SubtitleCat:
             ):
                 continue
 
-            # 语言标注在链接文本上，也可能在所属区块的标题里
-            label = f"{link.text()} {link.parent().text()}"[:200]
+            # URL 里的语言码是主要依据；文本与区块标题作补充（站点改版
+            # 换成文本标注时仍能认出来）
+            label = f"{href} {link.text()} {link.parent().text()}"[:300]
             if _ZH_EXCLUDE.search(label):
                 continue
 
