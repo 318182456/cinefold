@@ -24,6 +24,7 @@ from app.schemas.reponse import ResponseEntity
 from app.services.medialink import (
     handle_media_deleted, register_scrape, torrent_batch,
 )
+from app.utils import get_true_code
 
 router = APIRouter(prefix="/medialinks", tags=["硬链接"])
 
@@ -86,6 +87,25 @@ def _invalidate(*paths: str) -> None:
     """删过文件之后把相关路径踢出缓存，避免页面还显示"存在"。"""
     for path in paths:
         _exists_cache.pop(path, None)
+        _subtitle_cache.pop(path, None)
+
+
+# 字幕探测要列一次目录，比 exists 贵，但同样是"看一眼磁盘"，沿用同样的
+# TTL。抓完字幕后显式失效（见 fetch_subtitle），不必等 TTL 到期
+_subtitle_cache: dict[str, tuple[float, bool]] = {}
+
+
+def _has_subtitle_cached(path: str) -> bool:
+    now = time.monotonic()
+    hit = _subtitle_cache.get(path)
+    if hit is not None and now - hit[0] < _EXISTS_TTL:
+        return hit[1]
+
+    from app.services.subtitle import has_subtitle
+
+    value = has_subtitle(path)
+    _subtitle_cache[path] = (now, value)
+    return value
 
 
 # 全量失效统计的缓存。stats 和 missing_only 都要扫全表做探测，
@@ -225,6 +245,14 @@ def list_medialinks(
             .limit(size)
         ).all())
 
+        # 字幕探测要逐条列目录，串行跑一页 50 条在 NAS 上能等好几秒。
+        # 与存在性探测同理，并发压下往返时间。文件已不在的不必探
+        live = [r.link_path for r in rows if _exists_cached(r.link_path)]
+        subtitled: dict[str, bool] = {}
+        if live:
+            with ThreadPoolExecutor(max_workers=_PROBE_WORKERS) as pool:
+                subtitled = dict(zip(live, pool.map(_has_subtitle_cached, live)))
+
         page_items = [{
             "link_path": r.link_path,
             "code": r.code,
@@ -234,6 +262,7 @@ def list_medialinks(
             "create_time": r.create_time.isoformat() if r.create_time else "",
             "link_exists": _exists_cached(r.link_path),
             "source_exists": _exists_cached(r.source_path),
+            "has_subtitle": subtitled.get(r.link_path, False),
         } for r in rows]
 
     # 种子数与文件名别名都按番号批量查，避免每行一次查询
@@ -432,6 +461,16 @@ def fetch_subtitle(
             "或稍后再试（字幕站收录有滞后）",
             code=404,
         )
+
+    # 刚写完就把这个番号的探测结果踢掉，否则页面刷新后 TTL 未到，
+    # 标记还是「无字幕」—— 用户会以为按钮没生效
+    with session_scope() as session:
+        paths = session.scalars(
+            select(MediaLink.link_path).where(MediaLink.code == get_true_code(code))
+        ).all()
+    for path in paths:
+        _subtitle_cache.pop(path, None)
+
     return ResponseEntity.ok(
         {"written": written}, message=f"已写入 {written} 处"
     )

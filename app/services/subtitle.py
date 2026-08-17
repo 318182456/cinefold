@@ -157,6 +157,18 @@ def _library_paths(code: str) -> list[Path]:
     return out
 
 
+def has_subtitle(link_path: str) -> bool:
+    """这条硬链接旁边有字幕吗。供页面展示用。
+
+    与抓取时的跳过判据是同一个函数 —— 分成两套的话，页面显示「有字幕」
+    而抓取仍去抓（或反过来）这种自相矛盾迟早出现。
+    """
+    try:
+        return _has_subtitle(Path(link_path))
+    except OSError:
+        return False
+
+
 def _has_subtitle(video: Path) -> bool:
     """影片旁边已经有字幕了吗。
 

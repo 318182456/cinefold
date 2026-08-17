@@ -187,7 +187,9 @@ id (autoincrement) / namespace / key / content / create_time
 跳过总开关 —— 开关管的是自动行为）。字幕写到影片旁边、与影片同名并带
 `.zh-CN` 语言后缀，同一番号的每个硬链接位置都写一份。先写临时文件再
 原子改名，避免媒体服务器扫到半截文件。已有同名字幕（含用户手工放的）
-默认不覆盖，`force=True` 才覆盖。
+默认不覆盖，`force=True` 才覆盖。硬链接列表带 `has_subtitle` 字段（探测走
+30 秒 TTL 缓存 + 并发，抓完显式失效），页面据此标「有字幕」，多个位置只命中
+部分时标成 `字幕 1/2` —— 换个入口播放就没有，得看得出来还要补。
 
 **转移做种 `services/seedtransfer.py`** — 把 qb 里已下载完的种子交给 tr 继续做种。
 导出 `.torrent` 原文件（磁链拿不到私有站的 metadata），按 `SEED_TRANSFER_PATH_MAP`

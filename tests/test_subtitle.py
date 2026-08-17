@@ -379,6 +379,44 @@ def test_search_result_ignores_other_codes(monkeypatch):
     assert site._find_detail("SSIS-001") == ("", "")
 
 
+def test_list_reports_subtitle_state(monkeypatch, tmp_path):
+    """列表要带 has_subtitle —— 页面靠它标「有字幕」，且要能看出部分命中。"""
+    from fastapi.testclient import TestClient
+
+    from app.api import create_app
+    from app.api.endpoints import get_current_user
+    from app.api.endpoints import medialink as endpoint
+
+    # 两个位置，只有一处放了字幕
+    paths = []
+    for name, with_sub in (("分类A", True), ("分类B", False)):
+        folder = tmp_path / name / "ABS-005"
+        folder.mkdir(parents=True)
+        video = folder / "ABS-005.mp4"
+        video.write_bytes(b"x" * 1024)
+        if with_sub:
+            (folder / "ABS-005.zh-CN.srt").write_text(SRT_ZH, encoding="utf-8")
+        paths.append(str(video))
+        with session_scope() as session:
+            session.add(MediaLink(
+                link_path=str(video), code="ABS-005",
+                source_path=str(video), inode=5, device=1,
+            ))
+
+    # 探测结果带 TTL 缓存，用例之间会互相污染
+    endpoint._subtitle_cache.clear()
+    endpoint._exists_cache.clear()
+
+    app = create_app()
+    app.dependency_overrides[get_current_user] = lambda: "tester"
+    client = TestClient(app)
+
+    payload = client.get("/api/v1/medialinks", params={"keyword": "ABS-005"}).json()
+    assert payload["code"] == 200, payload
+    state = {i["link_path"]: i["has_subtitle"] for i in payload["data"]["items"]}
+    assert state == {paths[0]: True, paths[1]: False}
+
+
 def test_has_subtitle_not_fooled_by_longer_code(enabled, tmp_path):
     """ABS-0011.srt 不是 ABS-001 的字幕，前缀匹配会误判。"""
     folder = tmp_path / "lib" / "ABS-001"

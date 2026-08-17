@@ -94,7 +94,14 @@ const grouped = computed(() => {
     if (!map.has(item.code)) map.set(item.code, [])
     map.get(item.code).push(item)
   })
-  return [...map.entries()].map(([code, links]) => ({ code, links }))
+  return [...map.entries()].map(([code, links]) => ({
+    code,
+    links,
+    // 字幕按番号汇总：还在的链接里有几处已有字幕。
+    // 部分命中要能看出来 —— 分类目录各放一份时，只有一处有字幕就该补
+    subtitled: links.filter((l) => l.has_subtitle).length,
+    liveCount: links.filter((l) => l.link_exists).length,
+  }))
 })
 
 function fileName(path) {
@@ -372,11 +379,20 @@ async function dropRecord(item) {
 // 那个管的是自动行为，人点了按钮就是明确要抓
 const subtitleBusy = ref('')
 
-async function grabSubtitle(code) {
-  subtitleBusy.value = code
+async function grabSubtitle(group) {
+  // 已有字幕时按钮显示的是「重抓」，那就得真的覆盖 —— 否则服务端会因为
+  // 已有字幕直接跳过，回一个「未找到」，跟按钮写的对不上
+  const force = group.subtitled > 0
+  if (force && !window.confirm(`重抓会覆盖 ${group.code} 现有的字幕，继续？`)) {
+    return
+  }
+
+  subtitleBusy.value = group.code
   try {
-    const data = await fetchSubtitle(code)
+    const data = await fetchSubtitle(group.code, force)
     toast.success(`已写入 ${data.written} 处字幕`)
+    // 重新拉列表，让「有字幕」标记跟上
+    await load()
   } catch (err) {
     // 找不到字幕是常态（站点收录有滞后），不当报错刷红
     toast.error(err.message || '未找到简体中文字幕')
@@ -702,13 +718,33 @@ onMounted(() => {
           <span class="text-[11px] text-gray-600">
             {{ shortTime(group.links[0].create_time) }}
           </span>
+          <!-- 字幕状态。部分命中单独标出来 —— 多个位置只有一处有字幕时，
+               换个入口播放就没有，得能看出来还要补 -->
+          <span
+            v-if="group.liveCount && group.subtitled >= group.liveCount"
+            class="badge bg-emerald-950 text-emerald-300"
+            title="影片旁边已有字幕"
+          >
+            有字幕
+          </span>
+          <span
+            v-else-if="group.subtitled"
+            class="badge bg-amber-950 text-amber-300"
+            :title="`${group.liveCount} 处链接里只有 ${group.subtitled} 处有字幕`"
+          >
+            字幕 {{ group.subtitled }}/{{ group.liveCount }}
+          </span>
           <button
             class="btn-ghost ml-auto px-2 py-0.5 text-[11px]"
             :disabled="subtitleBusy === group.code"
-            :title="'按番号搜简体中文字幕，放到影片旁边'"
-            @click="grabSubtitle(group.code)"
+            :title="group.subtitled
+              ? '已有字幕。重抓会覆盖现有的那份'
+              : '按番号搜简体中文字幕，放到影片旁边'"
+            @click="grabSubtitle(group)"
           >
-            {{ subtitleBusy === group.code ? '抓取中…' : '抓字幕' }}
+            {{ subtitleBusy === group.code
+              ? '抓取中…'
+              : (group.subtitled ? '重抓字幕' : '抓字幕') }}
           </button>
           <button
             class="btn-ghost px-2 py-0.5 text-[11px] text-red-400 hover:bg-red-950/40"
