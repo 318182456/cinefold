@@ -1,19 +1,25 @@
-"""Rousi。
+"""Rousi（站点后端已改名 PeerGo）。
 
-新站（rousi.pro）是前后端分离架构，不再是 NexusPHP：
-- 认证用 `Authorization: Bearer <API Key>`
-- 数据走 `/api/torrent/search?query=<番号>`，返回 JSON
+认证用个人 API Key，凭据只此一项 —— 账号密码登录换 JWT、Tracker Passkey
+都已废弃。同一把 Key 也能给 MoviePilot、PT-depiler 等工具用，需在站点
+授予「读取账户资料」「读取与搜索种子」「下载种子」三项权限。
 
-只认站点签发的个人 API Key。那是一把通用 Key，同一把也能给 MoviePilot、
-PT-depiler 等工具用，按授予的权限调用 —— 本模块需要「读取账户资料」
-「读取与搜索种子」「下载种子」三项。
+接口在 2026 年换了一版，实测确认的差异（旧实现全部对不上）：
 
-早先支持过账号密码登录换 JWT、以及 Tracker Passkey 拼下载地址，现已全部
-去掉：Key 不过期、不需要续期，也就没有登录、token 缓存、过期判断这些环节。
-只填 Key 一项即可。
+- 路径前缀是 /api/v1，旧的 /api/torrent/search 与 /api/me 都已 404
+- 搜索走 GET /api/v1/torrents?query=&limit=&offset=
+- Key 必须用 `X-API-Key` 头传。用 `Authorization: Bearer` 会被路由到
+  一个旧版兼容接口：它照样回 200，但返回 {"code":0,"data":{"torrents"}}
+  且**忽略全部查询参数** —— 于是每次搜索都拿回全站第一页 100 条，
+  番号搜索静默失效。这个坑不看返回结构发现不了。
+- 新接口返回 {"items":[...],"total":N,"limit":,"offset":}，字段名也变了：
+  name（原 title）、size_bytes（原 size）、promotion 是字符串（原对象）
+- 列表项不含 info_hash，要 GET /api/v1/torrents/{id} 才有 info_hash_v1
 
-下载地址把 Key 放在请求路径里（站点上游下载协议如此设计），不是查询参数。
-这个地址等同于凭据，别外传，日志里也不打印完整地址。
+下载：GET /api/v1/torrents/{id}/download 只认浏览器会话（401
+web_session_required），API Key 用不了。站点说 Key 的下载走上游协议的
+专用路径、Key 在路径里，但那条路径未在前端代码中出现，也未验证成功 ——
+详见 _build_download_url 的说明。
 """
 from __future__ import annotations
 
@@ -29,6 +35,8 @@ from app.utils import get_true_code
 from app.utils.filters import has_chinese, has_uc, has_uhd
 
 DEFAULT_HOST = "https://rousi.pro"
+# 一次搜索取多少条。番号搜索通常只有几条，给足冗余即可
+SEARCH_LIMIT = 50
 
 
 class Rousi:
@@ -40,6 +48,7 @@ class Rousi:
     def __init__(self, apikey: str = "", host: str = ""):
         settings = get_settings()
         self.host = (host or os.getenv("ROUSI_HOST", "") or DEFAULT_HOST).rstrip("/")
+        # 从网页复制 Key 容易带上首尾空白，原样进 header 会鉴权失败
         self.apikey = (apikey or settings.rousi_apikey or "").strip()
         self.proxy = settings.proxy or None
 
@@ -48,18 +57,13 @@ class Rousi:
         return bool(self.apikey)
 
     # ------------------------------------------------------------------
-    @staticmethod
-    def _user_agent() -> str:
-        return (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        )
-
     def _headers(self) -> dict:
         return {
-            "Authorization": f"Bearer {self.apikey}",
+            # 必须是 X-API-Key。换成 Authorization: Bearer 会落到旧版接口，
+            # 那边忽略查询参数，搜索会静默返回全站第一页
+            "X-API-Key": self.apikey,
             "Accept": "application/json",
-            "User-Agent": self._user_agent(),
+            "User-Agent": "Mozilla/5.0 cinefold",
             "Referer": f"{self.host}/",
         }
 
@@ -75,7 +79,7 @@ class Rousi:
     def _get(self, path: str, params: dict | None = None) -> dict:
         with self._client() as client:
             response = client.get(
-                f"{self.host}/api{path}", headers=self._headers(), params=params
+                f"{self.host}/api/v1{path}", headers=self._headers(), params=params
             )
             response.raise_for_status()
             return response.json()
@@ -85,17 +89,22 @@ class Rousi:
         if not self.enabled:
             return False, "未配置 Rousi API Key"
         try:
-            payload = self._get("/me")
-            if payload.get("code") != 0:
-                # Key 权限不足时也走这里，提示里带上要授哪些权限
-                return False, (
-                    f"{payload.get('message', '鉴权失败')}"
-                    f"（确认 API Key 已授予「读取账户资料」权限）"
-                )
-            stats = (payload.get("data") or {}).get("stats") or {}
-            return True, f"连接成功，用户 {stats.get('username', '')}"
+            # 用一次最小搜索验证：/api/v1/me 已不存在，而 me/ 下的接口要
+            # 浏览器会话，API Key 一律 401，拿它判断会误报未配置
+            payload = self._get("/torrents", {"limit": 1, "offset": 0})
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 401:
+                return False, "API Key 无效或已撤销"
+            if exc.response.status_code == 403:
+                return False, "API Key 权限不足，需授予「读取与搜索种子」"
+            return False, f"HTTP {exc.response.status_code}"
         except Exception as exc:
             return False, str(exc)[:60]
+
+        if not isinstance(payload, dict) or "items" not in payload:
+            # 落到旧接口时是这个形状，说明 Key 没走对头
+            return False, "响应结构异常，可能命中了旧版接口"
+        return True, f"连接成功，站上共 {payload.get('total', '?')} 个种子"
 
     # ------------------------------------------------------------------
     def search(self, keyword: str) -> list[Torrent]:
@@ -106,67 +115,71 @@ class Rousi:
 
         code = get_true_code(keyword) or keyword
         try:
-            payload = self._get("/torrent/search", {"query": code, "page": 0})
+            payload = self._get(
+                "/torrents",
+                {"query": code, "limit": SEARCH_LIMIT, "offset": 0},
+            )
         except Exception as exc:
             logger.warning(f"[Rousi] 搜索异常: {exc}")
             self.search_failed = True
             return []
 
-        if payload.get("code") != 0:
-            logger.warning(f"[Rousi] 搜索失败: {payload.get('message')}")
+        items = payload.get("items")
+        if items is None:
+            # 旧接口的形状。真发生了就是 Key 传法不对，搜索结果不可信，
+            # 当失败处理而不是把全站第一页当成命中
+            logger.warning(
+                f"[Rousi] 搜索响应缺少 items，疑似命中旧版接口: "
+                f"{list(payload)[:5]}"
+            )
             self.search_failed = True
             return []
 
-        items = self._extract_items(payload.get("data"))
         return [self._convert(item, code) for item in items]
 
-    @staticmethod
-    def _extract_items(data) -> list[dict]:
-        if isinstance(data, dict):
-            return data.get("torrents") or data.get("list") or []
-        return data if isinstance(data, list) else []
-
     def _convert(self, item: dict, code: str) -> Torrent:
+        # 新接口的字段是 name / size_bytes，旧的是 title / size
         title = str(item.get("name") or item.get("title") or "")
-        attributes = item.get("attributes") or {}
-        promotion = item.get("promotion") or {}
+        subtitle = str(item.get("subtitle") or "")
+        # 中文判定要带上副标题：站上主标题常是纯日文原名，中文信息在副标题里
+        combined = f"{title} {subtitle}"
 
-        # 免费判定：促销类型为 free，或魔力值价格为 0
-        discount = str(promotion.get("type") or promotion.get("discount") or "").lower()
-        free = "free" in discount or str(item.get("price", "")) == "0"
-
-        resolution = str(attributes.get("resolution") or "")
+        # promotion 现在是字符串：none / free / double_upload_free …
+        promotion = str(item.get("promotion") or "").lower()
 
         return Torrent(
             id=int(item.get("id") or 0),
             site=self.name,
             title=title,
-            # size 是字节
-            size_mb=round(int(item.get("size") or 0) / 1024 / 1024, 2),
+            size_mb=round(int(item.get("size_bytes") or 0) / 1024 / 1024, 2),
             seeders=int(item.get("seeders") or 0),
-            chinese=has_chinese(title),
-            uc=has_uc(title),
-            uhd=has_uhd(title) or resolution in ("2160p", "4K", "8K"),
-            free=free,
-            download_url=self._build_download_url(item.get("id"), item.get("info_hash")),
-            detail_url=f"{self.host}/torrent/{item.get('id')}",
+            chinese=has_chinese(combined),
+            uc=has_uc(combined),
+            uhd=has_uhd(title),
+            free="free" in promotion,
+            download_url=self._build_download_url(item.get("id")),
+            detail_url=f"{self.host}/torrents/{item.get('id')}",
             code=code,
         )
 
-    def _build_download_url(self, torrent_id, info_hash: str = "") -> str:
-        """拼下载地址。Key 放在**路径**里，不是查询参数。
+    def _build_download_url(self, torrent_id) -> str:
+        """下载地址。
 
-        站点已对该路径关闭访问与错误日志并禁止 Referrer，但地址本身等同于
-        凭据，不要外传。
+        /api/v1/torrents/{id}/download 存在但只认浏览器会话（401
+        web_session_required），API Key 无论放 header 还是查询参数都过不去。
 
-        没有 Key 时退回磁力链只是兜底 —— 私有站没有 DHT，磁力拿不到
-        metadata，实际能否用取决于下载器自己连不连得上 tracker。
+        站点文档说 Key 的下载走上游协议的专用路径、Key 在请求路径里，但
+        实测 /api/torrent/download/{key}/{id} 是 404，前端代码里也没有这条
+        路径（网页自己走会话下载，不会引用它）。真实形式未确认。
+
+        所以这里仍拼 /api/v1 那条并带上 Key：拿到正确路径后只改这一处即可。
+        下载失败会在 download_seed 里报出来，不会静默当成成功。
+
+        这个地址等同于凭据，别外传，日志里也不打印完整地址。
         """
-        if torrent_id and self.apikey:
-            return f"{self.host}/api/torrent/download/{self.apikey}/{torrent_id}"
-        if info_hash:
-            return f"magnet:?xt=urn:btih:{info_hash}"
-        return ""
+        if not torrent_id or not self.apikey:
+            return ""
+        return f"{self.host}/api/v1/torrents/{torrent_id}/download"
 
     def download_seed(self, torrent: Torrent) -> bytes | None:
         url = torrent.download_url
