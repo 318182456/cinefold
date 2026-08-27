@@ -375,3 +375,71 @@ class TestSilentTruncation:
 
         assert looks_like_refusal(REFUSAL, JA_TITLE) is True
         assert looks_like_refusal("【VR】我的女友在", JA_TITLE) is False
+
+
+class TestGoogleBillingRefusal:
+    """Google 翻译没有免费额度，项目没绑结算账号时每次调用都 403。
+
+    它的文案是「User Rate Limit Exceeded」，看着像临时限流，实际重试多少次
+    都一样（实测单字符、间隔 3 秒重试，一律 403）。判据是免费的 languages
+    端点返回 200 而计费的 translate/detect 一律 403 —— key 有效、API 已启用，
+    纯粹是没开通结算。
+    """
+
+    def _client(self, monkeypatch, status, payload=None):
+        from app.modules.translate import google as gmod
+
+        class _Resp:
+            status_code = status
+
+            def raise_for_status(self):
+                if status >= 400:
+                    raise RuntimeError(f"HTTP {status}")
+
+            def json(self):
+                return payload or {}
+
+        class _Client:
+            def __init__(self, *a, **kw):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def post(self, *a, **kw):
+                return _Resp()
+
+        monkeypatch.setattr(gmod.httpx, "Client", _Client)
+        gmod.Google._quota_warned = False
+        return gmod.Google(api_key="k")
+
+    def test_403_returns_empty_for_fallback(self, monkeypatch):
+        """403 要返回空串，好让工厂降级到下一家，而不是抛出去。"""
+        g = self._client(monkeypatch, 403)
+        assert g.translate("配送途中") == ""
+
+    def test_billing_warning_logged_once(self, monkeypatch):
+        """45000 条番号不能每条刷一行告警。"""
+        from app.modules.translate import google as gmod
+
+        g = self._client(monkeypatch, 403)
+        seen = []
+        monkeypatch.setattr(gmod.logger, "warning", lambda m: seen.append(m))
+
+        for _ in range(5):
+            g.translate("配送途中")
+
+        assert len(seen) == 1
+        # 得说清楚是结算问题，别让人以为是限流去傻等
+        assert "结算" in seen[0]
+
+    def test_success_path_unaffected(self, monkeypatch):
+        """正常 200 照旧取译文。"""
+        g = self._client(
+            monkeypatch, 200,
+            {"data": {"translations": [{"translatedText": "配送途中"}]}},
+        )
+        assert g.translate("配送途中") == "配送途中"

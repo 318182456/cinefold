@@ -130,7 +130,8 @@ const translating = ref(false)
 async function translateTitle() {
   translating.value = true
   try {
-    const data = (await translateCodeTitle(props.item.code)).data || {}
+    // http 拦截器已经把统一响应体拆掉了，返回的就是 data 本身，别再取一层
+    const data = (await translateCodeTitle(props.item.code)) || {}
     if (data.cn_title) {
       props.item.cn_title = data.cn_title
     }
@@ -151,7 +152,7 @@ const resetting = ref(false)
 async function reset() {
   resetting.value = true
   try {
-    const preview = (await resetCode(props.item.code, true)).data || {}
+    const preview = (await resetCode(props.item.code, true)) || {}
     const lines = []
     if (preview.cache_cleared) lines.push('· 清掉媒体库判定缓存')
     const removed = (preview.history_removed || []).length
