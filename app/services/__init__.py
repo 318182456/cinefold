@@ -1039,8 +1039,10 @@ def translate_codes(limit: int = 50) -> int:
                 count += 1
 
     if count:
-        # 同上：列表快照里存的是旧标题，不清则定时任务翻好了页面也看不到
-        drop_listing_cache()
+        # 同上：快照里存的是旧标题，不同步则定时任务翻好了页面也看不到。
+        # 逐条替换，避免整份丢弃后榜单要重抓
+        for code, translated in results:
+            patch_listing_cache(code, cn_title=translated)
         logger.info(f"已翻译 {count} 个标题")
     return count
 
@@ -1055,7 +1057,7 @@ def purge_refused_translations() -> int:
     """
     from app.modules.translate.translateai import looks_like_refusal
 
-    cleared = 0
+    cleared_codes = []
     with session_scope() as session:
         rows = session.scalars(
             select(Code).where(Code.cn_title.isnot(None), Code.cn_title != "")
@@ -1064,10 +1066,12 @@ def purge_refused_translations() -> int:
             # 原文一并传进去，长度比那关才有判断依据
             if looks_like_refusal(row.cn_title, row.title or ""):
                 row.cn_title = ""
-                cleared += 1
+                cleared_codes.append(row.code)
 
+    cleared = len(cleared_codes)
     if cleared:
-        drop_listing_cache()
+        for code in cleared_codes:
+            patch_listing_cache(code, cn_title="")
         logger.info(f"已清掉 {cleared} 条被当成译文存下的拒绝说明")
     return cleared
 
@@ -1123,7 +1127,8 @@ def translate_code_title(code: str) -> dict:
                 row = session.get(Code, row_code)
                 if row is not None:
                     row.cn_title = ""
-            drop_listing_cache()
+            # 快照里那句拒绝说明也要一起抹掉
+            patch_listing_cache(row_code, cn_title="")
 
         # 翻译失败时保留其余的原有译文：覆盖成空串等于把卡片上已经有的中文
         # 标题弄丢了。
@@ -1145,9 +1150,10 @@ def translate_code_title(code: str) -> dict:
             return {"error": f"{row_code} 不在库中"}
         row.cn_title = translated
 
-    # 榜单/厂牌列表缓存的是整行详情的 JSON 快照，不清的话列表页会继续显示
-    # 翻译前的旧标题 —— 点完翻译卡片变中文、一刷新又变回日文
-    drop_listing_cache()
+    # 榜单/厂牌列表缓存的是整行详情的 JSON 快照，不同步的话列表页会继续发
+    # 翻译前的旧标题 —— 点完翻译卡片变中文、一刷新又变回日文。
+    # 只替换这一条，不整份丢弃：重建榜单要把缺详情的番号逐个跨境重抓
+    patch_listing_cache(row_code, cn_title=translated)
 
     logger.info(f"[{row_code}] 已手动翻译标题")
     return {"code": row_code, "cn_title": translated, "changed": translated != old}
@@ -1747,39 +1753,96 @@ def drop_media_exists_cache(code: str = "") -> bool:
     return hit or removed > 0
 
 
-def drop_listing_cache() -> bool:
-    """清掉榜单/厂牌那两份列表快照。
+def patch_listing_cache(code: str, **fields) -> int:
+    """把列表快照里某个番号的字段就地改掉，不整份丢弃。
 
-    它们缓存的是 enrich_codes 的完整结果（整行详情，cn_title 也在里面），
-    TTL 分别 30 / 60 分钟。所以改了某个番号的标题之后，列表页还会拿着旧快照
-    继续显示改之前的值 —— 手动翻译完点刷新又变回日文，就是这个原因：库里已经
-    是中文，前端拿到的是缓存里那份旧 JSON。
+    榜单/厂牌缓存的是 enrich_codes 的完整结果（整行详情），改了某个番号的
+    标题却不同步，列表页就会继续发翻译前的旧值 —— 手动翻译完点刷新又变回
+    日文，就是这个原因。
 
-    快照本身可重建（大不了重抓一次榜单），所以宁可清掉重来，不做精细的
-    「只改快照里那一条」—— 那需要反序列化每个 key 再回写，还要处理并发覆盖，
-    收益远不及风险。
+    早先的做法是整份清掉让它重建，但榜单重建要把每个缺详情的番号跨境重抓一遍
+    （实测单个番号 11 个源全试要 68 秒），点一次翻译就让整页卡住，代价太高。
+    这里改成只替换那一条：反序列化 → 找到 code 那项 → 改字段 → 写回。
 
-    Redis 与数据库两边都要清：set_rank_cache 只在 Redis 写失败时才落库。
+    create_time 保持不动，TTL 该到点还是到点 —— 否则每次翻译都把快照续命，
+    榜单可能长时间拿不到真正的新数据。
+
+    返回改动了几个 key。
     """
+    import json
+
     from app.core import redis as redis_cache
     from app.database.models import Cache
 
-    hit = False
+    target = (code or "").strip().upper()
+    if not target or not fields:
+        return 0
+
+    def _patched(raw: str) -> str | None:
+        """改过就回新 JSON，这份快照里没有这个番号就回 None。"""
+        try:
+            items = json.loads(raw)
+        except (ValueError, TypeError):
+            return None
+        if not isinstance(items, list):
+            return None
+
+        hit = False
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            if (item.get("code") or "").strip().upper() != target:
+                continue
+            for k, v in fields.items():
+                item[k] = v
+            hit = True
+        if not hit:
+            return None
+        return json.dumps(items, ensure_ascii=False, default=str)
+
+    changed = 0
+
+    # Redis 侧。scan 出 rank/brand 两个 namespace 下的所有 key 逐个看
     try:
         client = redis_cache.get_client()
         if client is not None:
             for ns in ("rank", "brand"):
-                for k in client.scan_iter(match=_cache_key(ns, "*"), count=500):
-                    client.delete(k)
-                    hit = True
+                for rkey in client.scan_iter(match=_cache_key(ns, "*"), count=500):
+                    raw = client.get(rkey)
+                    if raw is None:
+                        continue
+                    if isinstance(raw, bytes):
+                        raw = raw.decode("utf-8", "ignore")
+                    patched = _patched(raw)
+                    if patched is None:
+                        continue
+                    # 保住原有 TTL：直接 set 会把过期时间抹掉，变成永不过期
+                    ttl = client.ttl(rkey)
+                    if ttl and ttl > 0:
+                        client.set(rkey, patched, ex=ttl)
+                    else:
+                        client.set(rkey, patched)
+                    changed += 1
     except Exception as exc:
-        logger.debug(f"清 Redis 列表缓存失败: {exc}")
+        logger.debug(f"改 Redis 列表缓存失败: {exc}")
 
-    with session_scope() as session:
-        removed = session.execute(
-            delete(Cache).where(Cache.namespace.in_(("rank", "brand")))
-        ).rowcount or 0
-    return hit or removed > 0
+    # 数据库侧。set_rank_cache 只在 Redis 写失败时才落库，两处都可能有值
+    try:
+        with session_scope() as session:
+            rows = session.scalars(
+                select(Cache).where(Cache.namespace.in_(("rank", "brand")))
+            ).all()
+            for row in rows:
+                patched = _patched(row.content or "")
+                if patched is None:
+                    continue
+                # 不碰 create_time —— get_rank_cache 靠它判 TTL
+                row.content = patched
+                changed += 1
+    except Exception as exc:
+        logger.debug(f"改数据库列表缓存失败: {exc}")
+
+    return changed
 
 
 def set_rank_cache(

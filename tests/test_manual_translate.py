@@ -445,15 +445,18 @@ class TestGoogleBillingRefusal:
         assert g.translate("配送途中") == "配送途中"
 
 
-class TestListingCacheInvalidation:
-    """改了标题必须清掉榜单/厂牌的列表快照。
+class TestListingCachePatch:
+    """改了标题要把榜单/厂牌快照里那一条同步掉，而且是就地替换不是整份丢弃。
 
     那两份缓存存的是 enrich_codes 的完整结果（整行详情，cn_title 也在里面），
-    TTL 30 / 60 分钟。不清的话库里已经是中文、列表页却还在发旧 JSON ——
+    TTL 30 / 60 分钟。不同步的话库里已经是中文、列表接口却还在发旧 JSON ——
     表现就是「点完翻译卡片变中文，一刷新又变回日文」。
+
+    但也不能整份清掉：重建榜单要把缺详情的番号逐个跨境重抓（实测单个番号
+    11 个源全试 68 秒），点一次翻译就让整页卡住。
     """
 
-    def _seed_with_cache(self, code="LC-001", cn=""):
+    def _seed_with_cache(self, code="LC-001", cn="", other="OTHER-999"):
         import json
         from app import services
         from app.database.base import DBBase
@@ -463,15 +466,23 @@ class TestListingCacheInvalidation:
         DBBase.metadata.create_all(engine)
         with session_scope() as session:
             session.merge(Code(code=code, title=JA_TITLE, cn_title=cn))
-        # 模拟列表页访问过一次，快照里是翻译前的样子
-        services.set_rank_cache(
-            "rank", "daily", json.dumps([{"code": code, "cn_title": cn}])
-        )
-        services.set_rank_cache(
-            "brand", "prestige", json.dumps([{"code": code, "cn_title": cn}])
-        )
+        # 快照里除了目标番号还有别人，用来确认没被连带影响
+        snapshot = json.dumps([
+            {"code": code, "cn_title": cn, "title": JA_TITLE, "star": "4.2"},
+            {"code": other, "cn_title": "别人的译文", "title": "他人のタイトル"},
+        ])
+        services.set_rank_cache("rank", "daily", snapshot)
+        services.set_rank_cache("brand", "prestige:7:14", snapshot)
 
-    def test_manual_translate_drops_snapshot(self, monkeypatch):
+    def _snapshot(self, ns="rank", key="daily", ttl=1800):
+        import json
+        from app import services
+
+        raw = services.get_rank_cache(ns, key, ttl=ttl)
+        return json.loads(raw) if raw else None
+
+    def test_manual_translate_patches_in_place(self, monkeypatch):
+        """快照要留着，只有那一条的 cn_title 变了。"""
         from app import services
 
         self._seed_with_cache()
@@ -479,31 +490,58 @@ class TestListingCacheInvalidation:
         monkeypatch.setattr(services, "translate_title", lambda t: "新译文")
 
         assert services.translate_code_title("LC-001").get("error") is None
-        # 两个 namespace 都得清，否则厂牌页仍旧
-        assert services.get_rank_cache("rank", "daily", ttl=1800) is None
-        assert services.get_rank_cache("brand", "prestige", ttl=3600) is None
 
-    def test_batch_translate_drops_snapshot(self, monkeypatch):
+        for ns, key, ttl in (("rank", "daily", 1800), ("brand", "prestige:7:14", 3600)):
+            items = self._snapshot(ns, key, ttl)
+            # 整份还在（没被丢弃），否则榜单要重抓
+            assert items is not None, f"{ns} 快照被整份清掉了"
+            assert len(items) == 2
+            target = next(i for i in items if i["code"] == "LC-001")
+            assert target["cn_title"] == "新译文"
+            # 同一条里的其他字段不能丢
+            assert target["star"] == "4.2"
+            assert target["title"] == JA_TITLE
+            # 别的番号不受影响
+            other = next(i for i in items if i["code"] == "OTHER-999")
+            assert other["cn_title"] == "别人的译文"
+
+    def test_batch_translate_patches_each(self, monkeypatch):
         from app import services
+        from app.database.models import Code
+        from app.database.session import session_scope
 
         self._seed_with_cache(code="LC-002")
+        # 别的用例会在同一个库里留下待翻译的行，limit 有可能全被它们占满，
+        # 轮不到 LC-002。先清干净，让这条用例只面对自己造的数据
+        with session_scope() as session:
+            from sqlalchemy import select as _select
+
+            for row in session.scalars(
+                _select(Code).where(Code.code != "LC-002")
+            ).all():
+                session.delete(row)
+
         monkeypatch.setattr(services.translate, "is_available", lambda: True)
         monkeypatch.setattr(services, "translate_title", lambda t: "批量译文")
         monkeypatch.setattr(services, "TRANSLATE_WORKERS", 1)
 
         assert services.translate_codes(limit=10) >= 1
-        assert services.get_rank_cache("rank", "daily", ttl=1800) is None
+        items = self._snapshot()
+        assert items is not None
+        assert next(i for i in items if i["code"] == "LC-002")["cn_title"] == "批量译文"
 
-    def test_purge_drops_snapshot(self):
-        """清掉存量拒绝说明后，列表快照同样得失效。"""
+    def test_purge_patches_snapshot(self):
+        """清掉存量拒绝说明后，快照里那句英文也要抹掉。"""
         from app import services
 
         self._seed_with_cache(code="LC-003", cn=REFUSAL)
         assert services.purge_refused_translations() >= 1
-        assert services.get_rank_cache("rank", "daily", ttl=1800) is None
+        items = self._snapshot()
+        assert items is not None
+        assert next(i for i in items if i["code"] == "LC-003")["cn_title"] == ""
 
-    def test_no_translation_leaves_cache_alone(self, monkeypatch):
-        """翻译失败又没有旧拒绝说明可清时，别白清缓存。"""
+    def test_no_translation_leaves_snapshot_untouched(self, monkeypatch):
+        """翻译失败又没有旧拒绝说明可清时，快照一个字都不该动。"""
         from app import services
 
         self._seed_with_cache(code="LC-004", cn="原有正常译文")
@@ -511,5 +549,39 @@ class TestListingCacheInvalidation:
         monkeypatch.setattr(services, "translate_title", lambda t: "")
 
         assert services.translate_code_title("LC-004").get("error")
-        # 什么都没改，快照该留着 —— 否则每次失败都要让榜单重抓一遍
-        assert services.get_rank_cache("rank", "daily", ttl=1800) is not None
+        items = self._snapshot()
+        assert items is not None
+        assert next(i for i in items if i["code"] == "LC-004")["cn_title"] == "原有正常译文"
+
+    def test_patch_ignores_code_absent_from_snapshot(self):
+        """番号不在快照里就什么都不改，别把无关 key 写一遍。"""
+        from app import services
+
+        self._seed_with_cache(code="LC-005")
+        before = services.get_rank_cache("rank", "daily", ttl=1800)
+        assert services.patch_listing_cache("NOT-INSNAPSHOT") == 0
+        assert services.get_rank_cache("rank", "daily", ttl=1800) == before
+
+    def test_ttl_not_extended_by_patch(self):
+        """替换不能顺手给快照续命，否则榜单长期拿不到新数据。"""
+        from app import services
+        from app.database.models import Cache
+        from app.database.session import session_scope
+        from sqlalchemy import select as _select
+
+        self._seed_with_cache(code="LC-006")
+        with session_scope() as session:
+            row = session.scalar(
+                _select(Cache).where(Cache.namespace == "rank", Cache.key == "daily")
+            )
+            before = row.create_time if row else None
+
+        services.patch_listing_cache("LC-006", cn_title="改过了")
+
+        with session_scope() as session:
+            row = session.scalar(
+                _select(Cache).where(Cache.namespace == "rank", Cache.key == "daily")
+            )
+            assert row is not None
+            # create_time 是 get_rank_cache 判 TTL 的依据，不能被刷新
+            assert row.create_time == before
