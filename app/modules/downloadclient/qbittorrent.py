@@ -506,8 +506,12 @@ class QBitTorrentClient:
     def get_torrent_detail(self, torrent_hash: str) -> dict | None:
         """单个种子的详情，转移做种要用到保存路径与内容路径。
 
-        返回 {hash, name, save_path, content_path, category, tags, progress}，
-        查不到返回 None。
+        返回 {hash, name, save_path, content_path, category, tags, progress,
+        state, infohash_v1, infohash_v2}，查不到返回 None。
+
+        带上两个 infohash 是为了在导出前认出 BitTorrent v2 种子 —— qb 5.2.3
+        导出 v2-only 种子会把整个 WebAPI 锁死，必须提前跳过，见
+        seedtransfer._is_transferable。
         """
         if not torrent_hash or not self._ensure_client():
             return None
@@ -534,6 +538,11 @@ class QBitTorrentClient:
             "tags": getattr(t, "tags", "") or "",
             "progress": round(t.progress, 4),
             "state": t.state,
+            # v2 种子才有 infohash_v2；纯 v1 种子这项为空。
+            # qb 4.4 以下没有这两个字段，取不到时留空 —— 那些版本也没有
+            # v2 支持，不会遇到这个问题
+            "infohash_v1": (getattr(t, "infohash_v1", "") or "").strip(),
+            "infohash_v2": (getattr(t, "infohash_v2", "") or "").strip(),
         }
 
     def find_torrents_by_path(

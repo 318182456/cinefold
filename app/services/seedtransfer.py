@@ -67,14 +67,66 @@ def _is_transferable(detail: dict) -> tuple[bool, str]:
     if state in UNSAFE_STATES:
         return False, f"状态 {detail.get('state')}，文件尚未就位"
 
+    unsafe, why = _export_would_hang(detail)
+    if unsafe:
+        return False, why
+
     return True, ""
+
+
+def _export_would_hang(detail: dict) -> tuple[bool, str]:
+    """导出这个种子会不会把 qb 的 WebAPI 锁死。返回 (会, 原因)。
+
+    实测 qb 5.2.3：某些 BitTorrent v2 种子一导出就无限挂起 —— 不是慢，是
+    不返回。期间连 /app/version（只回六个字节）都超时，而 WebUI 首页仍是
+    302 正常。进程活着，锁被占住，整个 WebAPI 陪着一起冻住。
+
+    判据是「qb 汇报的 hash 其实是 v2 infohash 的前 40 位」：
+
+        列表 hash   = 732b39f8c4ed974b3712eaf7dea7ed79206af7a9
+        infohash_v1 = 06b913089397c11fe27f09c0e709e1736cfd367c   ← 不是它
+        infohash_v2 = 732b39f8...206af7a9252eda8b05fc049ee748202e
+                      └─ 前 40 位正好是列表 hash
+
+    /torrents/export 只按 v1 索引找种子，拿这个截断的 v2 值去查必然落空；
+    qb 没有返回 404，而是卡在那里不放锁。实测拿真正的 v1 hash 去导会得到
+    404（0.06 秒），说明这个种子的 v1 结构压根没注册进去 —— 两条路都走不通，
+    只能不导。
+
+    对照实验确认这不是普遍问题：同一台 qb 上纯 v1 的种子导出 200、180KB、
+    0.30 秒。所以只挡这一类，不要扩大到全部 v2 / hybrid 种子。
+
+    字段取不到时返回 False：qb 4.4 以下没有 infohash_v1/v2，那些版本也
+    没有 v2 支持 —— 宁可放行也不误挡正常种子。
+    """
+    v2 = (detail.get("infohash_v2") or "").strip().lower()
+    if not v2 or not v2.strip("0"):
+        return False, ""
+
+    reported = (detail.get("hash") or "").strip().lower()
+    v1 = (detail.get("infohash_v1") or "").strip().lower()
+
+    # 汇报的 hash 就是 v1 时，导出走得通，放行
+    if reported and reported == v1:
+        return False, ""
+
+    if reported and reported == v2[:len(reported)]:
+        return True, (
+            "BitTorrent v2 种子（qb 汇报的 hash 是 v2 截断值），"
+            "qBittorrent 导出会挂起并锁死 WebAPI，已跳过"
+        )
+
+    return False, ""
 
 
 # 导出失败过的种子在这段时间内不再进自动候选（秒）。
 #
-# 巨型种子的导出会稳定失败：qb 序列化两万个 piece hash 时单核吃满、
-# WebAPI 30 秒不响应。不记住它的话每轮扫描都会再撞一次，等于每小时
-# 主动把 qb 打满一次 —— 日志刷满、自愈计数被喂饱，而结果不会变。
+# 已知会稳定失败的是 v2-only 种子，那个由 _is_v2_only 事先挡掉。这个冷却
+# 兜的是剩下那些事先认不出来的：导出超时后不记一笔，每轮扫描都会再撞一次，
+# 日志刷满而结果不会变。
+#
+# 跟种子体积无关 —— 实测 180KB 的正常种子 0.3 秒就导完了，卡死的是锁，
+# 不是计算量。
 #
 # 只挡自动扫描，手动指定 hash 转移照旧放行：用户明确要转、或换了
 # 环境想再试一次，不该被这个缓存拦住。
@@ -438,10 +490,21 @@ def list_candidates(limit: int | None = None) -> list[dict]:
         torrent_hash = row.get("hash") or ""
         if not torrent_hash:
             continue
-        if categories or tags:
-            detail = qb.get_torrent_detail(torrent_hash)
-            if detail is None or not _matches_filter(detail, categories, tags):
-                continue
+
+        # 这里必须逐个查详情，哪怕没配分类/标签过滤：判断「导出会不会锁死
+        # WebAPI」要看 infohash_v1/v2，而列表接口不返回这两项。列表里留着
+        # 一个点下去就会卡死 qb 的种子，比多打几次查询糟得多
+        detail = qb.get_torrent_detail(torrent_hash)
+        if detail is None:
+            continue
+        if (categories or tags) and not _matches_filter(detail, categories, tags):
+            continue
+
+        transferable, why = _is_transferable(detail)
+        if not transferable:
+            logger.debug(f"[转移做种] {torrent_hash} 不列入候选：{why}")
+            continue
+
         out.append({
             "hash": torrent_hash,
             "name": row.get("name", ""),

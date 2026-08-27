@@ -964,3 +964,84 @@ class TestExportFailCooldown:
         qb, tr = self._wire(monkeypatch, export=b"torrent-bytes")
         assert seedtransfer.run_auto_transfer() == 1
         assert not seedtransfer._export_recently_failed("C1")
+
+
+class TestV2ExportHang:
+    """qb 5.2.3 导出某些 v2 种子会锁死整个 WebAPI，必须事先跳过。
+
+    实测现场（moon-042）：/torrents/export 无限挂起，期间 /app/version
+    这种只回六个字节的接口也超时，而 WebUI 首页仍是 302 正常 —— 进程活着，
+    锁被占住。对照组纯 v1 种子同一台 qb 上 200、180KB、0.30 秒。
+
+    判据是「qb 汇报的 hash 是 v2 infohash 的前 40 位」，不是「有没有 v2」——
+    hybrid 种子只要汇报的是 v1 就能正常导出，不该被误挡。
+    """
+
+    # 实测抓到的真实值
+    HASH = "732b39f8c4ed974b3712eaf7dea7ed79206af7a9"
+    V1 = "06b913089397c11fe27f09c0e709e1736cfd367c"
+    V2 = "732b39f8c4ed974b3712eaf7dea7ed79206af7a9252eda8b05fc049ee748202e"
+
+    def _detail_for(self, hash_, v1, v2):
+        d = _detail(hash_)
+        d.update({"hash": hash_, "infohash_v1": v1, "infohash_v2": v2})
+        return d
+
+    def test_real_moon042_skipped(self):
+        """现场那个种子必须被挡住。"""
+        d = self._detail_for(self.HASH, self.V1, self.V2)
+        ok, why = seedtransfer._is_transferable(d)
+        assert ok is False
+        assert "v2" in why.lower()
+
+    def test_hybrid_reporting_v1_allowed(self):
+        """hybrid 种子汇报 v1 时导出走得通，不能误挡。"""
+        d = self._detail_for(self.V1, self.V1, self.V2)
+        assert seedtransfer._is_transferable(d)[0] is True
+
+    def test_plain_v1_allowed(self):
+        """纯 v1 种子照常转移 —— 对照组实测 0.30 秒导完。"""
+        d = self._detail_for(self.V1, self.V1, "")
+        assert seedtransfer._is_transferable(d)[0] is True
+
+    def test_old_qb_without_fields_allowed(self):
+        """qb 4.4 以下没有这两个字段，宁可放行也不误挡。"""
+        d = _detail("AAA")
+        d.pop("infohash_v1", None)
+        d.pop("infohash_v2", None)
+        assert seedtransfer._is_transferable(d)[0] is True
+
+    def test_zeroed_v2_allowed(self):
+        """v2 字段是全零等同于没有，不该当成 v2 种子。"""
+        d = self._detail_for(self.V1, self.V1, "0" * 64)
+        assert seedtransfer._is_transferable(d)[0] is True
+
+    def test_never_exported(self, wired, monkeypatch):
+        """整条链路上不能对这种种子调 export —— 调了就会卡死 qb。"""
+        d = self._detail_for(self.HASH, self.V1, self.V2)
+        qb = FakeQB(details={self.HASH: d},
+                    rows=[{"hash": self.HASH, "name": "moon-042",
+                           "completed": True, "state": "stalledUP",
+                           "save_path": "/dl"}])
+        tr = FakeTR()
+        monkeypatch.setattr(seedtransfer, "_clients", lambda: (qb, tr))
+        monkeypatch.setattr(seedtransfer, "is_available", lambda: (True, ""))
+        _settings(monkeypatch)
+
+        assert seedtransfer.run_auto_transfer() == 0
+        # 最关键的一条：一次都不能碰导出接口
+        assert qb.exported == []
+        assert tr.added == []
+
+    def test_not_a_candidate(self, monkeypatch):
+        """前端候选列表里也不该出现 —— 免得用户手点触发卡死。"""
+        d = self._detail_for(self.HASH, self.V1, self.V2)
+        qb = FakeQB(details={self.HASH: d},
+                    rows=[{"hash": self.HASH, "name": "moon-042",
+                           "completed": True, "state": "stalledUP",
+                           "save_path": "/dl"}])
+        monkeypatch.setattr(seedtransfer, "_clients", lambda: (qb, FakeTR()))
+        monkeypatch.setattr(seedtransfer, "is_available", lambda: (True, ""))
+        _settings(monkeypatch)
+
+        assert seedtransfer.list_candidates() == []
