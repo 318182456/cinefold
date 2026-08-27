@@ -228,7 +228,8 @@ def is_exist_server(code: str) -> bool:
         return cached == "1"
 
     exists = mediaserver.exists_in_any(code)
-    set_rank_cache("media", key, "1" if exists else "0")
+    set_rank_cache("media", key, "1" if exists else "0",
+                   ttl=MEDIA_EXISTS_CACHE_TTL)
     return exists
 
 
@@ -1463,11 +1464,21 @@ def get_rank_cache(namespace: str, key: str, ttl: int = 0) -> str | None:
         return row.content
 
 
-def set_rank_cache(namespace: str, key: str, content: str) -> None:
+def set_rank_cache(
+    namespace: str, key: str, content: str, ttl: int = 0
+) -> None:
+    """写缓存。ttl > 0 时同时给 Redis key 设过期时间。
+
+    ttl 必须显式传进来：get_rank_cache 的 ttl 只管数据库那一侧（靠
+    create_time 判断），Redis 这边不设 ex 就是永不过期。两者不一致时，
+    配了 Redis 的部署里缓存会一直返回第一次写进去的值 ——
+    「媒体库里有没有这个番号」这种判断一旦被永久缓存成「有」，
+    番号删掉重下时会被一直拦在门外，且 10 分钟的 TTL 形同虚设。
+    """
     from app.core import redis as redis_cache
 
     # Redis 写入成功就不再落库，榜单快照本身是可重建的
-    if redis_cache.set(_cache_key(namespace, key), content):
+    if redis_cache.set(_cache_key(namespace, key), content, ttl=ttl or None):
         return
 
     from app.database.models import Cache

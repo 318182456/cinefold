@@ -1527,3 +1527,61 @@ class TestTranslateStreak:
         assert services.translate_codes(limit=30) == 0
         # 撞到阈值就停，不该把 30 条全试一遍
         assert calls["n"] <= services.TRANSLATE_FAILURE_LIMIT + 1
+
+
+class TestRedisCacheTTL:
+    """Redis 缓存必须带过期时间。
+
+    get_rank_cache 的 ttl 只管数据库那一侧（靠 create_time 判断），Redis
+    这边不传 ex 就是永不过期。两边不一致时，配了 Redis 的部署里
+    「媒体库有没有这个番号」会被永久缓存成「有」—— 番号删掉重下会被一直
+    拦在门外（_split_existing 直接判为 existing，压根不调 subscribe_code），
+    而 MEDIA_EXISTS_CACHE_TTL=600 形同虚设。
+    """
+
+    def test_media_exists_cache_sets_ttl(self, monkeypatch):
+        from app import services
+
+        captured = {}
+
+        def fake_set(key, value, ttl=None):
+            captured["key"] = key
+            captured["value"] = value
+            captured["ttl"] = ttl
+            return True
+
+        from app.core import redis as redis_cache
+        monkeypatch.setattr(redis_cache, "set", fake_set)
+        monkeypatch.setattr(services.mediaserver, "exists_in_any",
+                            lambda code: True)
+        monkeypatch.setattr(services, "get_rank_cache", lambda *a, **k: None)
+
+        assert services.is_exist_server("MOON-042") is True
+        assert captured["value"] == "1"
+        # 关键：必须把 TTL 传下去，不能是 None
+        assert captured["ttl"] == services.MEDIA_EXISTS_CACHE_TTL
+
+    def test_set_rank_cache_passes_ttl_to_redis(self, monkeypatch):
+        from app import services
+
+        from app.core import redis as redis_cache
+        seen = {}
+        monkeypatch.setattr(
+            redis_cache, "set",
+            lambda key, value, ttl=None: seen.update(ttl=ttl) or True,
+        )
+        services.set_rank_cache("media", "X-1", "1", ttl=600)
+        assert seen["ttl"] == 600
+
+    def test_zero_ttl_means_no_expiry(self, monkeypatch):
+        """榜单快照那类不传 ttl 的调用仍是永久缓存，行为不变。"""
+        from app import services
+
+        from app.core import redis as redis_cache
+        seen = {}
+        monkeypatch.setattr(
+            redis_cache, "set",
+            lambda key, value, ttl=None: seen.update(ttl=ttl) or True,
+        )
+        services.set_rank_cache("rank", "daily", "[]")
+        assert seen["ttl"] is None
