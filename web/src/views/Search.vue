@@ -1,6 +1,12 @@
 <script setup>
 import { ref, onMounted } from 'vue'
-import { searchCodes, searchTorrents, subscribeCode, downloadCode } from '@/api'
+import {
+  searchCodes,
+  searchTorrents,
+  subscribeCode,
+  downloadCode,
+  precheckDownload,
+} from '@/api'
 import { useToast } from '@/composables/useToast'
 import CodeCard from '@/components/CodeCard.vue'
 import EmptyState from '@/components/EmptyState.vue'
@@ -99,17 +105,47 @@ async function findTorrents(code, refresh = false) {
   }
 }
 
+// 已下载过／已入库时不直接放弃，弹确认让用户自己决定要不要重下
+const pending = ref(null)
+const pushing = ref(false)
+
 async function pushTorrent(torrent) {
+  try {
+    const check = await precheckDownload(currentCode.value)
+    if (check?.blocked) {
+      pending.value = { torrent, reason: check.reason }
+      return
+    }
+  } catch {
+    // 预检只为提前问一句，问不到就照常推送，让后端给最终结论
+  }
+  await sendTorrent(torrent, false)
+}
+
+async function sendTorrent(torrent, force) {
+  pushing.value = true
   try {
     await downloadCode({
       code: currentCode.value,
       download_url: torrent.download_url,
       site: torrent.site,
+      // MTeam 的 download_url 恒为空，下载链接要用 id 换 token。少了 id
+      // 后端定位不到种子，会退回自动选种 —— 点 12G 的下回来 9G 的那个
+      torrent_id: torrent.id,
+      title: torrent.title,
+      force,
     })
-    toast.success('已推送到下载器')
+    toast.success(force ? '已强制推送到下载器' : '已推送到下载器')
+    pending.value = null
   } catch (err) {
     toast.error(err.message)
+  } finally {
+    pushing.value = false
   }
+}
+
+function confirmPush() {
+  if (pending.value) sendTorrent(pending.value.torrent, true)
 }
 
 async function quickSubscribe() {
@@ -233,7 +269,11 @@ const sizeText = (mb) => (mb >= 1024 ? `${(mb / 1024).toFixed(2)} GB` : `${mb.to
                 <span v-if="torrent.uc" class="badge bg-amber-900 text-amber-300">无码</span>
               </td>
               <td class="py-2">
-                <button class="btn-primary px-2.5 py-1 text-xs" @click="pushTorrent(torrent)">
+                <button
+                  class="btn-primary px-2.5 py-1 text-xs disabled:opacity-50"
+                  :disabled="pushing"
+                  @click="pushTorrent(torrent)"
+                >
                   下载
                 </button>
               </td>
@@ -242,5 +282,44 @@ const sizeText = (mb) => (mb >= 1024 ? `${(mb / 1024).toFixed(2)} GB` : `${mb.to
         </table>
       </div>
     </section>
+
+    <!-- 已下载过／已入库／VR 过滤时的确认。拦下来只是提醒，不是禁止 ——
+         换个版本重下是正常需求，确认后带 force 照推 -->
+    <div
+      v-if="pending"
+      class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+      @click.self="pending = null"
+    >
+      <div class="card w-full max-w-md space-y-3">
+        <p class="text-sm font-medium text-gray-200">
+          仍要下载 <span class="font-mono text-brand">{{ currentCode }}</span> 吗？
+        </p>
+
+        <p class="text-xs text-gray-400">
+          这个番号<span class="text-amber-400">{{ pending.reason }}</span>，
+          自动下载会跳过它。手动下载可以照常继续。
+        </p>
+
+        <p class="truncate text-[11px] text-gray-500" :title="pending.torrent.title">
+          {{ pending.torrent.title }}
+        </p>
+        <p class="text-[11px] tabular-nums text-gray-500">
+          {{ pending.torrent.display_site || pending.torrent.site }} ·
+          {{ sizeText(pending.torrent.size_mb) }} ·
+          {{ pending.torrent.seeders }} 种
+        </p>
+
+        <div class="flex justify-end gap-2 pt-1">
+          <button class="btn-ghost px-3 py-1.5 text-xs" @click="pending = null">取消</button>
+          <button
+            class="btn-primary px-3 py-1.5 text-xs disabled:opacity-50"
+            :disabled="pushing"
+            @click="confirmPush"
+          >
+            {{ pushing ? '推送中…' : '仍然下载' }}
+          </button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>

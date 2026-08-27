@@ -1616,3 +1616,162 @@ class TestResetCode:
         assert out["history_removed"] == []
         with session_scope() as session:
             assert session.get(History, "h1" * 20) is not None
+
+
+class TestManualDownload:
+    """手动选种必须下用户点的那个，不能悄悄回落到自动选种。"""
+
+    def test_torrent_id_without_url_keeps_user_choice(self, client, auth, monkeypatch):
+        """MTeam 的 download_url 恒为空，只有 id —— 这时也不许自动选种。"""
+        from app import services
+
+        captured = {}
+
+        def fake_download(code, torrent=None, force=False):
+            captured["torrent"] = torrent
+            return True
+
+        def boom(code):  # pragma: no cover - 被调用即失败
+            raise AssertionError("不该回落到自动选种")
+
+        monkeypatch.setattr(services, "download_torrent", fake_download)
+        monkeypatch.setattr(services, "find_torrent", boom)
+
+        response = client.post(
+            "/api/v1/codes/download",
+            json={
+                "code": "MXGS-891",
+                "download_url": "",
+                "site": "MTeam",
+                "torrent_id": 424242,
+                "title": "12.82 GB 的那个",
+            },
+            headers=auth,
+        )
+        assert response.status_code == 200
+        assert response.json()["code"] == 200
+
+        torrent = captured["torrent"]
+        assert torrent is not None, "只有 id 时种子被丢掉了，会退回自动选种"
+        assert torrent.id == 424242
+        assert torrent.site == "MTeam"
+
+    def test_no_torrent_info_still_auto_selects(self, client, auth, monkeypatch):
+        """卡片上的「下载」不带种子信息，仍应走自动选种。"""
+        from app import services
+
+        captured = {}
+
+        def fake_download(code, torrent=None, force=False):
+            captured["torrent"] = torrent
+            return True
+
+        monkeypatch.setattr(services, "download_torrent", fake_download)
+
+        response = client.post(
+            "/api/v1/codes/download", json={"code": "MXGS-891"}, headers=auth
+        )
+        assert response.status_code == 200
+        assert captured["torrent"] is None
+
+    def test_force_passed_through(self, client, auth, monkeypatch):
+        from app import services
+
+        captured = {}
+
+        def fake_download(code, torrent=None, force=False):
+            captured["force"] = force
+            return True
+
+        monkeypatch.setattr(services, "download_torrent", fake_download)
+
+        client.post(
+            "/api/v1/codes/download",
+            json={"code": "MXGS-891", "force": True},
+            headers=auth,
+        )
+        assert captured["force"] is True
+
+    def test_precheck_reports_downloaded(self, client, auth, monkeypatch):
+        from app import services
+
+        monkeypatch.setattr(
+            services, "get_download_block_reason", lambda code: "已下载过"
+        )
+        response = client.get(
+            "/api/v1/codes/download/precheck",
+            params={"code": "MXGS-891"},
+            headers=auth,
+        )
+        assert response.status_code == 200
+        data = response.json()["data"]
+        assert data["blocked"] is True
+        assert data["reason"] == "已下载过"
+
+    def test_precheck_clean_code(self, client, auth, monkeypatch):
+        from app import services
+
+        monkeypatch.setattr(services, "get_download_block_reason", lambda code: "")
+        response = client.get(
+            "/api/v1/codes/download/precheck",
+            params={"code": "MXGS-891"},
+            headers=auth,
+        )
+        data = response.json()["data"]
+        assert data["blocked"] is False
+
+
+class TestForceDownloadBypassesGuards:
+    """force 只给手动下载：已下载过的番号确认后要能重下。"""
+
+    def _prepare(self, code):
+        from app.database.base import DBBase
+        from app.database.models import Code, CodeStatus, History
+        from app.database.session import engine, session_scope
+
+        DBBase.metadata.create_all(engine)
+        with session_scope() as session:
+            session.merge(Code(code=code, status=CodeStatus.DOWNLOADED))
+            session.merge(History(hash=f"hash-{code}", code=code))
+
+    def test_downloaded_code_skipped_without_force(self):
+        from app import services
+
+        code = "FORCE-001"
+        self._prepare(code)
+        assert services.download_torrent(code) is False
+
+    def test_force_pushes_downloaded_code(self, monkeypatch):
+        from app import services
+        from app.schemas.torrent import Torrent
+
+        code = "FORCE-002"
+        self._prepare(code)
+
+        pushed = {}
+        monkeypatch.setattr(
+            services, "_push_to_client",
+            lambda client, torrent, code: pushed.setdefault("hash", "newhash"),
+        )
+        monkeypatch.setattr(
+            services.downloadclient, "get_download_client", lambda: object()
+        )
+        monkeypatch.setattr(services, "send_downloading_message", lambda *a, **k: None)
+        monkeypatch.setattr(services, "_unwant_junk_files", lambda *a, **k: None)
+
+        torrent = Torrent(id=1, site="MTeam", title="重下这个", code=code)
+        assert services.download_torrent(code, torrent, force=True) is True
+        assert pushed["hash"] == "newhash"
+
+    def test_block_reason_reports_downloaded(self):
+        from app import services
+
+        code = "FORCE-003"
+        self._prepare(code)
+        assert services.get_download_block_reason(code) == "已下载过"
+
+    def test_block_reason_empty_for_unknown_code(self, monkeypatch):
+        from app import services
+
+        monkeypatch.setattr(services, "is_exist_server", lambda code: False)
+        assert services.get_download_block_reason("NOPE-999") == ""

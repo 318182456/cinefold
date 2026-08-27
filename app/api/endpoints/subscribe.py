@@ -29,6 +29,10 @@ class DownloadRequest(BaseModel):
     code: str
     download_url: str | None = None
     site: str | None = None
+    torrent_id: int | str | None = None
+    title: str | None = None
+    # 已下载过/已入库时前端先弹确认，用户确认后带 force 再来一次
+    force: bool = False
 
 
 @router.get("/dashboard")
@@ -269,22 +273,50 @@ def bulk_cancel(
 
 @router.post("/codes/download")
 def manual_download(body: DownloadRequest, current_user: str = Depends(get_current_user)):
-    """手动下载。指定 download_url 时直接推送该种子。"""
+    """手动下载。指定 download_url 或 torrent_id 时直接推送该种子。
+
+    force=True 跳过「已下载过/已入库/VR 过滤」三道闸门，供前端在弹确认
+    框后重下用。
+    """
     from app import services
 
     code = get_true_code(body.code) or body.code
+
+    # 只看 download_url 会把 MTeam 这类站的手动选种整个丢掉 —— 它搜索结果里
+    # 的 download_url 恒为空（下载链接要用 id 单独换 token），于是 torrent
+    # 留成 None，download_torrent 回落到自动选种，用户点哪个都下同一个。
+    # 有 id 就够定位种子，download_seed 会自己去换链接。
     torrent = None
-    if body.download_url:
+    if body.download_url or body.torrent_id:
         torrent = Torrent(
+            id=int(body.torrent_id) if str(body.torrent_id or "").isdigit() else 0,
             site=body.site or "manual",
-            title=code,
-            download_url=body.download_url,
+            title=body.title or code,
+            download_url=body.download_url or "",
             code=code,
         )
 
-    if not services.download_torrent(code, torrent):
+    if not services.download_torrent(code, torrent, force=body.force):
         return ResponseEntity.fail("下载失败，请查看日志", code=500)
-    return ResponseEntity.ok(message=f"已推送 {code} 到下载器")
+    suffix = "（强制重新下载）" if body.force else ""
+    return ResponseEntity.ok(message=f"已推送 {code} 到下载器{suffix}")
+
+
+@router.get("/codes/download/precheck")
+def download_precheck(code: str, current_user: str = Depends(get_current_user)):
+    """手动下载前的拦截预检。
+
+    三道闸门（VR 过滤、媒体库已存在、已下载过）在服务层是静默 return
+    False，前端只看到「下载失败」。这里先把原因问出来，好让界面弹一句
+    「已下载过，仍要下载吗」而不是把人拦在门外。
+    """
+    from app import services
+
+    code = get_true_code(code) or code
+    reason = services.get_download_block_reason(code)
+    return ResponseEntity.ok(
+        {"code": code, "blocked": bool(reason), "reason": reason}
+    )
 
 
 @router.post("/codes/download/all")

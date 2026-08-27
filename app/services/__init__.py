@@ -236,29 +236,39 @@ def is_exist_server(code: str) -> bool:
 # ======================================================================
 # 下载
 # ======================================================================
-def download_torrent(code: str, torrent: Torrent | None = None) -> bool:
-    """下载指定番号。torrent 为空时自动搜索最优种子。"""
+def download_torrent(
+    code: str, torrent: Torrent | None = None, force: bool = False
+) -> bool:
+    """下载指定番号。torrent 为空时自动搜索最优种子。
+
+    force 只给手动下载用：VR 过滤、媒体库已存在、已下载过这三道闸门都是
+    「自动流程别浪费带宽」的判断，人点了下载并确认过就该照办 —— 想换个
+    版本重下时被静默拦住，界面上只剩一句「下载失败」，无从下手。
+    自动任务一律不传 force，行为不变。
+    """
     settings = get_settings()
 
     # 种子名未必带 VR 标记，靠 filter_torrents 拦不住，这里用番号情报再判一次
     reason = is_filtered_code(code)
-    if reason:
+    if reason and not force:
         logger.info(f"[{code}] 命中 {reason} 过滤，不下载")
         return False
 
     # 已入库的直接跳过，避免重复占用带宽
-    if settings.enable_auto_complete and is_exist_server(code):
+    if not force and settings.enable_auto_complete and is_exist_server(code):
         logger.info(f"[{code}] 媒体库中已存在，跳过下载")
         _update_code_status(code, CodeStatus.COMPLETED)
         return False
 
     # 查历史比搜种便宜得多，放在搜索前面短路，省掉一轮全站检索
     if _is_downloaded(code):
-        # 已推过下载器却仍是待下载，说明状态没跟上，补正一次；
-        # 否则每轮订阅任务都会重新搜一遍，番号永远留在订阅列表里
-        logger.info(f"[{code}] 已下载过，跳过")
-        _sync_status_from_history(code)
-        return False
+        if not force:
+            # 已推过下载器却仍是待下载，说明状态没跟上，补正一次；
+            # 否则每轮订阅任务都会重新搜一遍，番号永远留在订阅列表里
+            logger.info(f"[{code}] 已下载过，跳过")
+            _sync_status_from_history(code)
+            return False
+        logger.info(f"[{code}] 已下载过，手动强制重新下载")
 
     torrent = torrent or find_torrent(code)
     if torrent is None:
@@ -390,6 +400,23 @@ def _push_to_client(client, torrent: Torrent, code: str) -> str | None:
 
     logger.warning(f"[{code}] 无法获取种子内容")
     return None
+
+
+def get_download_block_reason(code: str) -> str:
+    """手动下载会被哪道闸门拦住，没有就返回空串。
+
+    与 download_torrent 里三道闸门的判断保持一致，供前端在弹确认框前预检。
+    """
+    if not code:
+        return ""
+    reason = is_filtered_code(code)
+    if reason:
+        return f"命中 {reason} 过滤"
+    if get_settings().enable_auto_complete and is_exist_server(code):
+        return "媒体库中已存在"
+    if _is_downloaded(code):
+        return "已下载过"
+    return ""
 
 
 def _is_downloaded(code: str) -> bool:
