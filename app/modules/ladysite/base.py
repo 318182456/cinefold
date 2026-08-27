@@ -18,7 +18,8 @@ from loguru import logger
 from app.core.config import get_settings
 from app.utils import clean_header_value
 
-# bypass 服务类型探测结果缓存：{base_url: 是否为 FlareSolverr}
+# bypass 服务类型探测结果缓存：{base_url: 是否讲 FlareSolverr 协议}
+# 覆盖 FlareSolverr / Byparr / TRAWL，三家都是 POST /v1
 _BYPASS_KIND: dict[str, bool] = {}
 
 # 解 Cloudflare 挑战要跑一个真实浏览器，给足时间（毫秒）
@@ -31,7 +32,7 @@ BYPASS_CHECK_TIMEOUT_MS = 20000
 # 连接类异常（SSL EOF、连接重置）的额外重试次数
 CONNECT_RETRIES = 1
 
-# FlareSolverr 每个会话独占一个浏览器实例，并发请求会互相拖慢甚至超时，
+# 这类服务每个会话独占一个浏览器实例，并发请求会互相拖慢甚至超时，
 # 因此同一时刻只允许一个请求进入。
 _BYPASS_LOCK = threading.Lock()
 
@@ -270,7 +271,8 @@ def fetch_via_bypass(
     """通过用户自建的 bypass 服务抓取页面。
 
     兼容两类常见服务：
-    - FlareSolverr：POST /v1，body 为 {cmd, url, maxTimeout}
+    - FlareSolverr 及其兼容实现（Byparr、TRAWL）：POST /v1，
+      body 为 {cmd, url, maxTimeout}，返回 {status, solution: {response}}
     - cloudflare-bypass-for-scraping：GET /html?url=...
 
     通过 BYPASS_URL 配置服务地址；未配置时直接返回空串。
@@ -301,6 +303,8 @@ def fetch_via_bypass(
             if base.endswith("/v1") or _is_flaresolverr(base):
                 endpoint = base if base.endswith("/v1") else f"{base}/v1"
                 body: dict = {"cmd": "request.get", "url": url, "maxTimeout": solver_timeout}
+                # Byparr 的 LinkRequest 没有 cookies 字段，多给不会报错（被忽略），
+                # 代价只是它过不了 mgstage 那种靠 Cookie 的年龄门。
                 pairs = _cookie_pairs(clean_header_value(cookie))
                 if pairs:
                     body["cookies"] = pairs
@@ -310,10 +314,15 @@ def fetch_via_bypass(
                 )
                 response.raise_for_status()
                 payload = response.json()
-                if payload.get("status") != "ok":
-                    logger.warning(f"bypass 返回失败: {payload.get('message', '')[:120]}")
+                solution = payload.get("solution") or {}
+                html = solution.get("response") or ""
+                # 三家都填 status="ok"，但 Byparr 的老版本会漏掉这个字段。
+                # 只要 HTML 到手就认，别为一个缺字段丢掉已经抓回来的内容。
+                if payload.get("status") not in ("ok", None) and not html:
+                    message = payload.get("message") or payload.get("msg") or ""
+                    logger.warning(f"bypass 返回失败: {str(message)[:120]}")
                     return ""
-                return (payload.get("solution") or {}).get("response", "")
+                return html
 
             # cloudflare-bypass-for-scraping 风格
             response = client.get(f"{base}/html", params={"url": url})
@@ -325,7 +334,13 @@ def fetch_via_bypass(
 
 
 def _is_flaresolverr(base: str) -> bool:
-    """探测服务类型，结果缓存避免重复请求。"""
+    """探测服务是否讲 FlareSolverr 协议（POST /v1），结果缓存避免重复请求。
+
+    FlareSolverr / Byparr / TRAWL 三家都认 POST /v1，但根路径长得毫不相干：
+    FlareSolverr 返回自报家门的 HTML，TRAWL 返回 {"msg": "TRAWL is ready!"}，
+    Byparr 则 301 跳 /docs。按名字认必然漏，所以直接问 /v1 在不在——
+    带一个空 url 打过去，返回什么内容不重要，只看端点是否存在。
+    """
     if base in _BYPASS_KIND:
         return _BYPASS_KIND[base]
 
@@ -333,12 +348,11 @@ def _is_flaresolverr(base: str) -> bool:
     try:
         # bypass 服务通常在内网，不能走系统代理
         with httpx.Client(timeout=8, verify=False, trust_env=False) as client:
-            root = base[: -len("/v1")] if base.endswith("/v1") else base
-            response = client.get(root)
-            body = (response.text or "").lower()
-            # TRAWL 等兼容实现不会自称 flaresolverr，但同样只认 POST /v1，
-            # 认名字会把它们误判成 GET /html 风格，故一并放行。
-            is_flare = any(k in body for k in ("flaresolverr", "trawl", "is ready"))
+            endpoint = base if base.endswith("/v1") else f"{base}/v1"
+            response = client.post(endpoint, json={"cmd": "request.get", "url": ""})
+            # 404/405 说明没有这个端点，其余（含参数校验失败的 4xx、
+            # 解不开挑战的 500）都证明端点确实在
+            is_flare = response.status_code not in (404, 405)
     except Exception:
         pass
 
