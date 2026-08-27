@@ -259,3 +259,35 @@ def test_业务错误保留客户端(monkeypatch):
     client.client = sentinel
     client._on_error(qbittorrentapi.NotFound404Error("no such torrent"), "删除种子")
     assert client.client is sentinel
+
+
+def test_导出种子超时不计入健康判断(monkeypatch, restarts):
+    """导出超时说明「这个种子难导」，不是「qb 坏了」。
+
+    实测现场：导出时 qb CPU 96%、磁盘 0B —— 进程活得好好的，只是被这一个
+    请求占住。计进去会攒够阈值重启一个健康的 qb，把正在下载的任务全打断。
+    """
+    _enable(monkeypatch)
+    for _ in range(5):
+        qbwatchdog.report_failure(TIMEOUT, "导出种子")
+    assert restarts == []
+    assert qbwatchdog.get_state()["failures"] == 0
+
+
+def test_导出超时不影响其他操作的计数(monkeypatch, restarts):
+    """导出被排除，但别的操作照常计数 —— 真卡死了还是要救。"""
+    _enable(monkeypatch)
+    qbwatchdog.report_failure(TIMEOUT, "导出种子")
+    assert qbwatchdog.get_state()["failures"] == 0
+
+    for _ in range(3):
+        qbwatchdog.report_failure(TIMEOUT, "查询任务状态")
+    assert restarts == ["restart"]
+
+
+def test_真正的卡死仍能触发重启(monkeypatch, restarts):
+    """轻操作上的超时才是卡死的证据，这条路必须留着。"""
+    _enable(monkeypatch)
+    for ctx in ("查询任务状态", "读取种子详情", "推送种子"):
+        qbwatchdog.report_failure(TIMEOUT, ctx)
+    assert restarts == ["restart"]

@@ -21,7 +21,9 @@ metadata。加到 tr 时保存路径对齐 qb 的 save_path，再触发一次校
 """
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
+from threading import Lock
 
 from loguru import logger
 
@@ -66,6 +68,48 @@ def _is_transferable(detail: dict) -> tuple[bool, str]:
         return False, f"状态 {detail.get('state')}，文件尚未就位"
 
     return True, ""
+
+
+# 导出失败过的种子在这段时间内不再进自动候选（秒）。
+#
+# 巨型种子的导出会稳定失败：qb 序列化两万个 piece hash 时单核吃满、
+# WebAPI 30 秒不响应。不记住它的话每轮扫描都会再撞一次，等于每小时
+# 主动把 qb 打满一次 —— 日志刷满、自愈计数被喂饱，而结果不会变。
+#
+# 只挡自动扫描，手动指定 hash 转移照旧放行：用户明确要转、或换了
+# 环境想再试一次，不该被这个缓存拦住。
+EXPORT_FAIL_COOLDOWN = 6 * 3600
+
+# {hash: 失败时刻}。只存内存 —— 进程重启后本该重新试一次，
+# 说不定 qb 已经升级或种子已被删
+_export_failed: dict[str, float] = {}
+_export_lock = Lock()
+
+
+def _note_export_failure(torrent_hash: str) -> None:
+    with _export_lock:
+        _export_failed[torrent_hash] = time.monotonic()
+
+
+def _export_recently_failed(torrent_hash: str) -> bool:
+    """这个种子最近导出失败过吗（在冷却期内）。"""
+    with _export_lock:
+        at = _export_failed.get(torrent_hash)
+        if at is None:
+            return False
+        if time.monotonic() - at >= EXPORT_FAIL_COOLDOWN:
+            # 冷却期已过，清掉记录让它重新试一次
+            del _export_failed[torrent_hash]
+            return False
+        return True
+
+
+def reset_export_failures() -> int:
+    """清空导出失败记录，让它们立刻能重试。返回清掉的条数。"""
+    with _export_lock:
+        count = len(_export_failed)
+        _export_failed.clear()
+    return count
 
 
 def _batch_limit() -> int:
@@ -223,6 +267,8 @@ def transfer_hashes(hashes: list[str], delete_source: bool | None = None) -> Tra
             # 别一律报「需 4.5+」：qb 卡死时导出也会失败，那句会把人引到
             # 升级版本上去，其实等下一轮重试就行。客户端已经把原因分好类
             reason = getattr(qb, "last_export_error", "") or "导出种子失败"
+            # 记一笔，别让自动扫描每轮都拿它去把 qb 打满
+            _note_export_failure(torrent_hash)
             result.failed.append({"hash": torrent_hash, "reason": reason})
             continue
 
@@ -331,6 +377,11 @@ def run_auto_transfer() -> int:
     for row in rows:
         torrent_hash = row.get("hash") or ""
         if not torrent_hash:
+            continue
+
+        # 导出失败过的先放一放。手动转移不走这里，仍可随时重试
+        if _export_recently_failed(torrent_hash):
+            logger.debug(f"[转移做种] {torrent_hash} 近期导出失败，冷却期内跳过")
             continue
 
         # 过滤要看分类和标签，monitor_torrent 不返回这两项，只能逐个查详情。

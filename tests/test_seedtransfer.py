@@ -6,6 +6,7 @@
 3. 两端挂载点不同时，保存路径要按映射换算过再交给 tr
 """
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -30,6 +31,7 @@ class FakeQB:
         self.export = export
         self.rows = rows or []
         self.deleted = []
+        self.exported = []
         # 对应 QBITTORRENT_CATEGORY；留空表示 qb 侧不过滤
         self.category = category
         self.monitor_calls = []
@@ -51,6 +53,8 @@ class FakeQB:
         return self.details.get(torrent_hash)
 
     def export_torrent(self, torrent_hash):
+        # 记录每次调用，用于断言「失败过的种子没被反复重试」
+        self.exported.append(torrent_hash)
         return self.export
 
     def delete_torrent(self, hashes, delete_files=False):
@@ -73,6 +77,18 @@ class FakeTR:
             "labels": labels,
         })
         return self.result
+
+
+@pytest.fixture(autouse=True)
+def _clear_export_failures():
+    """导出失败记录是模块级状态，测试之间必须隔离。
+
+    否则前一个用例记下的失败会让后一个用例的种子被冷却期挡掉 ——
+    表现为「候选莫名少了一个」，很难查。
+    """
+    seedtransfer.reset_export_failures()
+    yield
+    seedtransfer.reset_export_failures()
 
 
 @pytest.fixture
@@ -890,3 +906,61 @@ class TestExportErrorClassify:
         assert "拒绝访问" in _export_error_reason(
             qbittorrentapi.Forbidden403Error("403 Forbidden")
         )
+
+
+class TestExportFailCooldown:
+    """导出失败过的种子别每轮再撞一次。
+
+    有些种子的导出会稳定失败（qb 序列化时把自己卡住）。不记住的话每轮
+    扫描都会再触发一次，日志刷满、qb 被反复打满，而结果不会变。
+    """
+
+    def _wire(self, monkeypatch, export=None):
+        qb = FakeQB(details={"C1": _detail("C1")},
+                    rows=[{"hash": "C1", "name": "片", "completed": True,
+                           "state": "stalledUP", "save_path": "/dl"}],
+                    export=export)
+        qb.last_export_error = "qBittorrent 未响应（APIConnectionError），稍后重试"
+        tr = FakeTR()
+        monkeypatch.setattr(seedtransfer, "_clients", lambda: (qb, tr))
+        monkeypatch.setattr(seedtransfer, "is_available", lambda: (True, ""))
+        _settings(monkeypatch)
+        return qb, tr
+
+    def test_second_round_skips_failed_hash(self, monkeypatch):
+        """第一轮失败后，第二轮不该再去导出它。"""
+        qb, tr = self._wire(monkeypatch)
+
+        assert seedtransfer.run_auto_transfer() == 0
+        assert len(qb.exported) == 1          # 第一轮撞了一次
+
+        assert seedtransfer.run_auto_transfer() == 0
+        assert len(qb.exported) == 1          # 第二轮没有再撞
+
+    def test_manual_transfer_still_allowed(self, monkeypatch):
+        """手动指定 hash 不受冷却期限制 —— 用户明确要转就该放行。"""
+        qb, tr = self._wire(monkeypatch)
+        seedtransfer.run_auto_transfer()
+        assert len(qb.exported) == 1
+
+        seedtransfer.transfer_hashes(["C1"])
+        assert len(qb.exported) == 2          # 手动这次照样尝试
+
+    def test_cooldown_expires(self, monkeypatch):
+        """冷却期过了要重新试 —— qb 可能已经升级，或种子已被删。"""
+        qb, tr = self._wire(monkeypatch)
+        seedtransfer.run_auto_transfer()
+        assert len(qb.exported) == 1
+
+        # 把时钟往前拨过冷却期。base 先取出来，否则 lambda 里再调
+        # 已被替换的 monotonic 会无限递归
+        base = time.monotonic() + seedtransfer.EXPORT_FAIL_COOLDOWN + 1
+        monkeypatch.setattr(seedtransfer.time, "monotonic", lambda: base)
+        seedtransfer.run_auto_transfer()
+        assert len(qb.exported) == 2
+
+    def test_success_not_remembered(self, monkeypatch):
+        """导出成功的种子不该被记进失败名单。"""
+        qb, tr = self._wire(monkeypatch, export=b"torrent-bytes")
+        assert seedtransfer.run_auto_transfer() == 1
+        assert not seedtransfer._export_recently_failed("C1")

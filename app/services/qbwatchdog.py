@@ -14,6 +14,8 @@ qb 偶发卡死 —— WebAPI 不再响应但进程还在，表现为请求全�
 - 两次重启之间有冷却期。qb 重启后要几十秒才能响应 WebAPI，这期间的
   请求照样超时，没有冷却就会连着重启好几轮
 - 重启后计数清零，让它重新攒够 N 次才允许下一次重启
+- 已知的重操作（导出巨型种子）超时不计入，见 _NON_HEALTH_CONTEXTS ——
+  那是「qb 忙」，不是「qb 坏」
 
 状态只存内存：进程重启后本该从零开始判断，落库反而会让重启后的第一次
 失败就直接触发重启。
@@ -62,6 +64,19 @@ _CONNECTION_ERROR_HINTS = (
     "network is unreachable",
     "远程主机强迫关闭",
 )
+
+# 这些操作超时不算「qb 连不上」，不计入自愈。
+#
+# 导出巨型种子是已知的重活：/torrents/export 要把 piece hash 数组重新
+# 序列化成 bencode，300 GiB 的种子有两万个以上 piece，qb 干这活时单核
+# 吃满、WebAPI 整体不响应，30 秒超时是必然的（实测 CPU 96% 而磁盘 0B ——
+# 纯计算，不是 IO 卡住，也不是进程死了）。
+#
+# 这种超时说明「这个种子大」，不是「qb 坏了」。计进去会攒够阈值重启一个
+# 本来健康的 qb，把正在下载的任务全打断 —— 比不转移这一个种子的代价大得多。
+# 真正的卡死照样会在状态同步、查询列表这些轻操作上暴露出来，漏不掉。
+_NON_HEALTH_CONTEXTS = frozenset({"导出种子"})
+
 
 _lock = threading.Lock()
 # 连续连接失败次数
@@ -113,6 +128,13 @@ def report_failure(exc: BaseException | None = None, context: str = "") -> None:
     global _failures, _restarting
 
     if exc is not None and not is_connection_error(exc):
+        return
+
+    if context in _NON_HEALTH_CONTEXTS:
+        logger.debug(
+            f"[qb 自愈] {context}超时不计入健康判断 —— 这类操作本身就重，"
+            f"qb 是忙不是坏"
+        )
         return
 
     settings = get_settings()
