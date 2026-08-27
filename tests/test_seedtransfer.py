@@ -812,3 +812,81 @@ class TestOnlyComplete:
 
         assert seedtransfer.run_auto_transfer() == 0
         assert tr.added == []
+
+
+class TestExportFailureReason:
+    """导出失败的理由要说准。
+
+    原先无论什么原因都记「导出种子失败，qBittorrent 需 4.5+」。qb 卡死时
+    导出同样失败，那句会把人引到升级 qb 上去 —— 实际只是当时没响应，
+    等下一轮重试就行。
+    """
+
+    def _wire(self, monkeypatch, reason):
+        qb = FakeQB(details={"E1": _detail("E1")}, export=None)
+        qb.last_export_error = reason
+        tr = FakeTR()
+        monkeypatch.setattr(seedtransfer, "_clients", lambda: (qb, tr))
+        monkeypatch.setattr(seedtransfer, "is_available", lambda: (True, ""))
+        _settings(monkeypatch)
+        return qb, tr
+
+    def test_timeout_reason_surfaced(self, monkeypatch):
+        """qb 未响应时照原样报出来，不能说成版本问题。"""
+        qb, tr = self._wire(monkeypatch, "qBittorrent 未响应（APIConnectionError），稍后重试")
+        result = seedtransfer.transfer_hashes(["E1"])
+
+        assert result.transferred == []
+        assert len(result.failed) == 1
+        assert "未响应" in result.failed[0]["reason"]
+        assert "4.5" not in result.failed[0]["reason"]
+        # 导出没成功就绝不能往 tr 里加
+        assert tr.added == []
+
+    def test_version_reason_still_reported(self, monkeypatch):
+        """真的是旧版 qb 时，仍要提示升级。"""
+        qb, tr = self._wire(
+            monkeypatch, "qBittorrent 无 /torrents/export 接口（需 4.5+），或种子已不存在"
+        )
+        result = seedtransfer.transfer_hashes(["E1"])
+        assert "4.5+" in result.failed[0]["reason"]
+
+    def test_falls_back_when_client_has_no_reason(self, monkeypatch):
+        """客户端没提供原因时给个兜底文案，不能报出空字符串。"""
+        qb = FakeQB(details={"E1": _detail("E1")}, export=None)
+        tr = FakeTR()
+        monkeypatch.setattr(seedtransfer, "_clients", lambda: (qb, tr))
+        monkeypatch.setattr(seedtransfer, "is_available", lambda: (True, ""))
+        _settings(monkeypatch)
+
+        result = seedtransfer.transfer_hashes(["E1"])
+        assert result.failed[0]["reason"] == "导出种子失败"
+
+
+class TestExportErrorClassify:
+    """_export_error_reason 的分类。"""
+
+    def test_connection_error_says_retry(self):
+        import qbittorrentapi
+        from app.modules.downloadclient.qbittorrent import _export_error_reason
+
+        exc = qbittorrentapi.APIConnectionError(
+            "Failed to connect to qBittorrent. Unknown Error: ReadTimeout(...)"
+        )
+        assert "未响应" in _export_error_reason(exc)
+
+    def test_404_says_version_or_missing(self):
+        import qbittorrentapi
+        from app.modules.downloadclient.qbittorrent import _export_error_reason
+
+        assert "4.5+" in _export_error_reason(
+            qbittorrentapi.NotFound404Error("404 Not Found")
+        )
+
+    def test_403_says_permission(self):
+        import qbittorrentapi
+        from app.modules.downloadclient.qbittorrent import _export_error_reason
+
+        assert "拒绝访问" in _export_error_reason(
+            qbittorrentapi.Forbidden403Error("403 Forbidden")
+        )

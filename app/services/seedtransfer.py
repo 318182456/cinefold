@@ -220,10 +220,10 @@ def transfer_hashes(hashes: list[str], delete_source: bool | None = None) -> Tra
 
         content = qb.export_torrent(torrent_hash)
         if not content:
-            result.failed.append({
-                "hash": torrent_hash,
-                "reason": "导出种子失败，qBittorrent 需 4.5+",
-            })
+            # 别一律报「需 4.5+」：qb 卡死时导出也会失败，那句会把人引到
+            # 升级版本上去，其实等下一轮重试就行。客户端已经把原因分好类
+            reason = getattr(qb, "last_export_error", "") or "导出种子失败"
+            result.failed.append({"hash": torrent_hash, "reason": reason})
             continue
 
         save_path = _map_path(detail.get("save_path") or "")

@@ -63,6 +63,30 @@ def _is_already_exists(exc: BaseException) -> bool:
     return "conflict" in text or "already" in text
 
 
+def _export_error_reason(exc: BaseException) -> str:
+    """把导出种子的异常翻成一句能照着处置的说明。
+
+    区分三种：qb 没响应（等下一轮就行）、接口不存在（得升级 qb）、
+    种子已不在（无需重试）。原先一律报「需 4.5+」，qb 卡死时会把运维
+    引到升级版本上去，实际只是当时连不上。
+    """
+    from app.services.qbwatchdog import is_connection_error
+
+    if is_connection_error(exc):
+        return f"qBittorrent 未响应（{type(exc).__name__}），稍后重试"
+
+    text = str(exc).lower()
+    name = type(exc).__name__.lower()
+    if "404" in text or "notfound" in name or "not found" in text:
+        # /torrents/export 是 4.5 才有的；同一个 404 也可能是种子已被删掉，
+        # 两种都不该重试，说明里把两种可能都摆出来
+        return "qBittorrent 无 /torrents/export 接口（需 4.5+），或种子已不存在"
+    if "403" in text or "forbidden" in text or "unauthorized" in text or "401" in text:
+        return "qBittorrent 拒绝访问，检查账号权限或 API Key"
+
+    return f"导出种子失败: {exc}"
+
+
 class QBitTorrentClient:
     def __init__(
         self,
@@ -86,6 +110,8 @@ class QBitTorrentClient:
             settings.qbittorrent_verify_cert if verify_cert is None else verify_cert
         )
         self.client: qbittorrentapi.Client | None = None
+        # 最近一次 export_torrent 的失败原因，成功时为空字符串
+        self.last_export_error = ""
 
     # ------------------------------------------------------------------
     def login_qb(self) -> bool:
@@ -449,8 +475,17 @@ class QBitTorrentClient:
         没有 DHT，靠磁链拿不到 metadata，必须是带 tracker 的完整 .torrent。
 
         qb 4.5+ 才有 /torrents/export；旧版返回 404，此时只能放弃转移。
+
+        失败原因写进 last_export_error，供调用方给出准确的说明 —— 单看
+        None 分不清「版本不够」和「qb 当时没响应」，而这两者的处置完全
+        不同：前者得升级 qb，后者等下一轮重试就行。
         """
-        if not torrent_hash or not self._ensure_client():
+        self.last_export_error = ""
+        if not torrent_hash:
+            self.last_export_error = "缺少种子 hash"
+            return None
+        if not self._ensure_client():
+            self.last_export_error = "连接 qBittorrent 失败"
             return None
 
         try:
@@ -458,11 +493,13 @@ class QBitTorrentClient:
             _report_ok()
         except Exception as exc:
             logger.warning(f"导出 qBittorrent 种子 {torrent_hash} 失败: {exc}")
+            self.last_export_error = _export_error_reason(exc)
             self._on_error(exc, "导出种子")
             return None
 
         if not content:
             logger.warning(f"qBittorrent 导出的种子 {torrent_hash} 内容为空")
+            self.last_export_error = "qBittorrent 返回的种子内容为空"
             return None
         return bytes(content)
 
