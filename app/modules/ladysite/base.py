@@ -336,7 +336,9 @@ def _is_flaresolverr(base: str) -> bool:
             root = base[: -len("/v1")] if base.endswith("/v1") else base
             response = client.get(root)
             body = (response.text or "").lower()
-            is_flare = "flaresolverr" in body
+            # TRAWL 等兼容实现不会自称 flaresolverr，但同样只认 POST /v1，
+            # 认名字会把它们误判成 GET /html 风格，故一并放行。
+            is_flare = any(k in body for k in ("flaresolverr", "trawl", "is ready"))
     except Exception:
         pass
 
