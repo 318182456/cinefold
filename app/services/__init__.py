@@ -969,6 +969,11 @@ def translate_codes(limit: int = 50) -> int:
     if not translate.is_available():
         return 0
 
+    # 先把存量的拒绝说明清成空串，这样它们在本轮就重新算作「缺译文」，
+    # 跟着一起重翻。放在这里而不是启动时：45000 条的库每次开机全表扫一遍
+    # 不值得，而这个任务本来就是干翻译的
+    purge_refused_translations()
+
     with session_scope() as session:
         rows = session.scalars(
             select(Code)
@@ -1038,6 +1043,40 @@ def translate_codes(limit: int = 50) -> int:
     return count
 
 
+def purge_refused_translations() -> int:
+    """清掉之前被当成译文存进库的拒绝说明。
+
+    修掉 translateai 的识别之前，网关那句「The prompt could not be
+    submitted...」会连着 200 一起被写进 cn_title，卡片上就顶着这句英文。
+    存量得清一遍，否则它既显示在页面上，又因为 cn_title 非空而永远不会
+    被定时任务重翻。清成空串即可 —— 下一轮 translate_codes 会自然重试。
+    """
+    from app.modules.translate.translateai import looks_like_refusal
+
+    cleared = 0
+    with session_scope() as session:
+        rows = session.scalars(
+            select(Code).where(Code.cn_title.isnot(None), Code.cn_title != "")
+        ).all()
+        for row in rows:
+            # 原文一并传进去，长度比那关才有判断依据
+            if looks_like_refusal(row.cn_title, row.title or ""):
+                row.cn_title = ""
+                cleared += 1
+
+    if cleared:
+        logger.info(f"已清掉 {cleared} 条被当成译文存下的拒绝说明")
+    return cleared
+
+
+def _only_ai_translator() -> bool:
+    """当前是否只有 AI 这一档翻译可用（没有百度/Google 兜底）。"""
+    from app.modules.translate.translateai import TranslateAI
+
+    translators = translate.get_translators()
+    return len(translators) == 1 and isinstance(translators[0], TranslateAI)
+
+
 def translate_code_title(code: str) -> dict:
     """手动翻译单个番号的标题。
 
@@ -1046,6 +1085,7 @@ def translate_code_title(code: str) -> dict:
     卡片就一直挂着那句烂译文，用户没有任何办法要求重译。这里不看 cn_title
     有没有值，一律重新翻一遍并覆盖。
     """
+    from app.modules.translate.translateai import looks_like_refusal
     from app.utils import get_true_code
 
     row_code = get_true_code(code) or code
@@ -1072,8 +1112,27 @@ def translate_code_title(code: str) -> dict:
         logger.debug(f"[{row_code}] 手动翻译失败: {exc}")
         translated = ""
 
-    # 翻译失败时保留原有译文：覆盖成空串等于把卡片上已有的中文标题弄丢了
     if not translated:
+        # 旧译文本身就是被误存下来的拒绝说明时，清掉它 —— 留着只是让卡片
+        # 继续顶着那句英文，还会因为 cn_title 非空而躲过定时任务的重翻
+        if old and looks_like_refusal(old, title):
+            with session_scope() as session:
+                row = session.get(Code, row_code)
+                if row is not None:
+                    row.cn_title = ""
+
+        # 翻译失败时保留其余的原有译文：覆盖成空串等于把卡片上已经有的中文
+        # 标题弄丢了。
+        #
+        # 只配了 AI 一档翻译时，露骨片名会被网关按关键词直接拒掉（见
+        # translateai 里的说明），没有别的服务可降级，重译多少次都是这个
+        # 结果。得说清楚是「这条翻不了」而不是「服务挂了」，免得用户对着
+        # 同一张卡片反复点。
+        if _only_ai_translator():
+            return {
+                "error": "翻译服务拒绝了这个标题（含敏感词），"
+                         "再配一个百度/Google 翻译即可绕过",
+            }
         return {"error": "翻译服务没有返回结果，原有标题保持不变"}
 
     with session_scope() as session:

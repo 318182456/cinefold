@@ -81,3 +81,145 @@ class TestManualTranslate:
         res = services.translate_code_title("MT-006")
         assert res.get("error") is None
         assert res["changed"] is False
+
+
+# 网关实测返回的原文（gemini-2.5-flash-lite，HTTP 200、finish_reason=stop）
+REFUSAL = (
+    "The prompt could not be submitted. The prompt contains sensitive words "
+    "that violate Google's [Generative AI Prohibited Use policy]"
+    "(https://policies.google.com/terms/generative-ai/use-policy). "
+    "Try rephrasing the prompt."
+)
+JA_TITLE = "【VR】僕の彼女がゴミ部屋で監禁され肉体奉仕を強要されアクメ漬けになるまで"
+
+
+class TestRefusalDetection:
+    """AI 网关的拒绝说明不能被当成译文。
+
+    它连着 HTTP 200 一起回来，没有 refusal 字段、finish_reason 还是 stop，
+    内容也非空 —— 上层看不出任何异常，那句英文就被存进 cn_title 显示在卡片上。
+    """
+
+    def test_real_refusal_is_rejected(self):
+        from app.modules.translate.translateai import looks_like_refusal
+
+        assert looks_like_refusal(REFUSAL, JA_TITLE) is True
+
+    def test_normal_translations_survive(self):
+        """正常译文一条都不能被误杀。"""
+        from app.modules.translate.translateai import looks_like_refusal
+
+        for good in [
+            "我的女友在垃圾屋被监禁强迫肉体服侍直到高潮不断",
+            "配送途中",
+            "炮友收藏集 像朋友一样相处很开心的炮友",
+            "みお",
+        ]:
+            assert looks_like_refusal(good, JA_TITLE) is False, good
+
+    def test_short_title_not_killed_by_length_ratio(self):
+        """短原文配短译文，别被长度比误伤。"""
+        from app.modules.translate.translateai import looks_like_refusal
+
+        assert looks_like_refusal("配送途中", "配送途中") is False
+
+    def test_client_returns_empty_on_refusal(self, monkeypatch):
+        """识别出拒绝后 translate() 要返回空串，好让工厂降级到下一家。"""
+        from app.modules.translate import translateai
+
+        class _Resp:
+            status_code = 200
+
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return {
+                    "choices": [
+                        {"message": {"role": "assistant", "content": REFUSAL},
+                         "finish_reason": "stop"}
+                    ]
+                }
+
+        class _Client:
+            def __init__(self, *a, **kw):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def post(self, *a, **kw):
+                return _Resp()
+
+        monkeypatch.setattr(translateai.httpx, "Client", _Client)
+        client = translateai.TranslateAI(url="http://x/v1", model="m", api_key="k")
+        assert client.translate(JA_TITLE) == ""
+
+    def test_structured_refusal_field(self, monkeypatch):
+        """有的网关把拒绝放在 message.refusal，content 是空的。"""
+        from app.modules.translate import translateai
+
+        class _Resp:
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return {"choices": [{"message": {"refusal": "no"}, "finish_reason": "stop"}]}
+
+        class _Client:
+            def __init__(self, *a, **kw):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def post(self, *a, **kw):
+                return _Resp()
+
+        monkeypatch.setattr(translateai.httpx, "Client", _Client)
+        client = translateai.TranslateAI(url="http://x/v1", model="m", api_key="k")
+        assert client.translate(JA_TITLE) == ""
+
+
+class TestPurgeStoredRefusals:
+    def test_purge_clears_only_refusals(self):
+        """存量的拒绝说明清成空串，正常译文不动。"""
+        from app import services
+        from app.database.base import DBBase
+        from app.database.models import Code
+        from app.database.session import engine, session_scope
+
+        DBBase.metadata.create_all(engine)
+        with session_scope() as session:
+            session.merge(Code(code="RF-001", title=JA_TITLE, cn_title=REFUSAL))
+            session.merge(Code(code="RF-002", title="配送途中", cn_title="配送途中"))
+
+        assert services.purge_refused_translations() >= 1
+        with session_scope() as session:
+            assert session.get(Code, "RF-001").cn_title == ""
+            assert session.get(Code, "RF-002").cn_title == "配送途中"
+
+    def test_manual_retry_clears_stored_refusal(self, monkeypatch):
+        """重译失败时，旧的拒绝说明也要清掉，别继续顶在卡片上。"""
+        from app import services
+        from app.database.base import DBBase
+        from app.database.models import Code
+        from app.database.session import engine, session_scope
+
+        DBBase.metadata.create_all(engine)
+        with session_scope() as session:
+            session.merge(Code(code="RF-003", title=JA_TITLE, cn_title=REFUSAL))
+
+        monkeypatch.setattr(services.translate, "is_available", lambda: True)
+        monkeypatch.setattr(services, "translate_title", lambda t: "")
+
+        res = services.translate_code_title("RF-003")
+        assert res.get("error")
+        with session_scope() as session:
+            assert session.get(Code, "RF-003").cn_title == ""
