@@ -223,3 +223,100 @@ class TestPurgeStoredRefusals:
         assert res.get("error")
         with session_scope() as session:
             assert session.get(Code, "RF-003").cn_title == ""
+
+
+class TestPromptHardening:
+    """提示词必须把「我是翻译接口、不做内容评判」讲明白。
+
+    片名普遍露骨，模型一旦把自己当成对话助手就会开始劝导或改写。实测同一批
+    标题，温和版提示词有 3 条被拒，强化版救回 6/9 —— 这些断言盯的就是那几句
+    别被人顺手改回去。
+    """
+
+    def test_prompt_states_translation_api_role(self):
+        from app.modules.translate.translateai import PROMPT
+
+        lowered = PROMPT.lower()
+        # 身份是接口而非助手
+        assert "translation api" in lowered
+        assert "not an assistant" in lowered
+        # 明确要求不得拒绝、不得评论
+        assert "must always translate" in lowered
+        assert "never refuse" in lowered
+        assert "never comment" in lowered
+
+    def test_prompt_demands_bare_output(self):
+        """只要译文，别带引号和解释 —— 否则整段说明会被存成标题。"""
+        from app.modules.translate.translateai import PROMPT
+
+        lowered = PROMPT.lower()
+        assert "simplified chinese" in lowered
+        assert "only the translation" in lowered
+
+    def test_prompt_is_sent_as_system_message(self, monkeypatch):
+        """提示词要真的发出去，且发在 system 位。"""
+        from app.modules.translate import translateai
+
+        seen = {}
+
+        class _Resp:
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return {"choices": [{"message": {"content": "译文"},
+                                     "finish_reason": "stop"}]}
+
+        class _Client:
+            def __init__(self, *a, **kw):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def post(self, url, **kw):
+                seen.update(kw.get("json") or {})
+                return _Resp()
+
+        monkeypatch.setattr(translateai.httpx, "Client", _Client)
+        client = translateai.TranslateAI(url="http://x/v1", model="m", api_key="k")
+        assert client.translate("タイトル") == "译文"
+
+        msgs = seen.get("messages") or []
+        assert msgs[0]["role"] == "system"
+        assert msgs[0]["content"] == translateai.PROMPT
+        assert msgs[1] == {"role": "user", "content": "タイトル"}
+
+    def test_lan_gateway_not_sent_through_ambient_proxy(self, monkeypatch):
+        """自建网关多是内网地址，系统代理会把请求吞掉，必须 trust_env=False。"""
+        from app.modules.translate import translateai
+
+        seen = {}
+
+        class _Resp:
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return {"choices": [{"message": {"content": "译文"},
+                                     "finish_reason": "stop"}]}
+
+        class _Client:
+            def __init__(self, *a, **kw):
+                seen.update(kw)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def post(self, *a, **kw):
+                return _Resp()
+
+        monkeypatch.setattr(translateai.httpx, "Client", _Client)
+        translateai.TranslateAI(url="http://x/v1", model="m", api_key="k").translate("タ")
+        assert seen.get("trust_env") is False
