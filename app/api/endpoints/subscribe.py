@@ -460,3 +460,25 @@ def translate_rank_title(current_user: str = Depends(get_current_user)):
     from app.scheduler import push_job
     push_job("translate_titles")
     return ResponseEntity.ok(message="翻译任务已触发")
+
+
+@router.post("/codes/translate/one")
+def translate_one_title(body: SubscribeRequest, current_user: str = Depends(get_current_user)):
+    """手动翻译单个番号的标题，无视已有译文强制重译。
+
+    上面那个批量任务只翻 cn_title 为空的，译文落库后就再也不重来。机翻
+    偶尔会把标题译得没法看，用户得有个办法当场要求重译一遍。
+    """
+    from app import services
+
+    result = services.translate_code_title(body.code)
+    if result.get("error"):
+        return ResponseEntity.fail(result["error"], code=400)
+
+    # 译文没变化时也照样返回成功：调用确实完成了，只是这次翻出来跟上次一样
+    message = (
+        f"已翻译 {result['code']}"
+        if result.get("changed")
+        else f"{result['code']} 的译文与原来一致"
+    )
+    return ResponseEntity.ok(result, message=message)

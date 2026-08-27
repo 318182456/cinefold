@@ -1038,6 +1038,54 @@ def translate_codes(limit: int = 50) -> int:
     return count
 
 
+def translate_code_title(code: str) -> dict:
+    """手动翻译单个番号的标题。
+
+    定时任务只翻 cn_title 为空的（见 translate_codes），所以译文一旦落库
+    就再也不会被碰 —— 机翻把标题译坏、或当时翻译服务只有降级的那一档可用，
+    卡片就一直挂着那句烂译文，用户没有任何办法要求重译。这里不看 cn_title
+    有没有值，一律重新翻一遍并覆盖。
+    """
+    from app.utils import get_true_code
+
+    row_code = get_true_code(code) or code
+    if not row_code:
+        return {"error": "番号为空"}
+
+    if not translate.is_available():
+        return {"error": "没有可用的翻译服务，请先在配置里填好翻译接口"}
+
+    with session_scope() as session:
+        row = session.get(Code, row_code)
+        if row is None:
+            return {"error": f"{row_code} 不在库中"}
+        title = (row.title or "").strip()
+        old = (row.cn_title or "").strip()
+
+    # 原文都没有就无从翻译。这种番号通常是详情还没补全，指望重译不如去补详情
+    if not title:
+        return {"error": f"{row_code} 没有原始标题可翻译，请先重抓详情"}
+
+    try:
+        translated = (translate_title(title) or "").strip()
+    except Exception as exc:
+        logger.debug(f"[{row_code}] 手动翻译失败: {exc}")
+        translated = ""
+
+    # 翻译失败时保留原有译文：覆盖成空串等于把卡片上已有的中文标题弄丢了
+    if not translated:
+        return {"error": "翻译服务没有返回结果，原有标题保持不变"}
+
+    with session_scope() as session:
+        row = session.get(Code, row_code)
+        if row is None:
+            return {"error": f"{row_code} 不在库中"}
+        row.cn_title = translated
+
+    logger.info(f"[{row_code}] 已手动翻译标题")
+    return {"code": row_code, "cn_title": translated, "changed": translated != old}
+
+
 # ======================================================================
 # 数据补全
 # ======================================================================

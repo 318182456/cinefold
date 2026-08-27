@@ -98,6 +98,8 @@ export const getReleaseToday = () => http.get('/codes/release_today')
 export const getRecommend = (limit = 15, page = 1) =>
   http.get('/codes/recommend', { params: { limit, page } })
 export const translateTitles = () => http.post('/codes/translate')
+// 手动重译单个番号。定时任务只翻没有译文的，机翻译坏了得能当场重来一次
+export const translateCodeTitle = (code) => http.post('/codes/translate/one', { code })
 
 // ---------------------------------------------------------------- 数据源
 export const listDataSources = () => http.get('/datasources')

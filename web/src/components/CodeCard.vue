@@ -1,6 +1,14 @@
 <script setup>
 import { computed, ref } from 'vue'
-import { codeCover, subscribeCode, cancelCode, downloadCode, refetchCover, resetCode } from '@/api'
+import {
+  codeCover,
+  subscribeCode,
+  cancelCode,
+  downloadCode,
+  refetchCover,
+  resetCode,
+  translateCodeTitle,
+} from '@/api'
 import { useToast } from '@/composables/useToast'
 import { useConfigStore } from '@/stores/config'
 import { parseCasts } from '@/utils/cast'
@@ -112,6 +120,27 @@ async function download() {
     toast.error(err.message)
   } finally {
     busy.value = false
+  }
+}
+
+const translating = ref(false)
+
+// 定时任务只翻没有译文的番号，所以机翻一旦把标题译坏就再也不会自己重来。
+// 这个按钮强制重译一遍，译好的标题直接写回卡片，不用刷新整页
+async function translateTitle() {
+  translating.value = true
+  try {
+    const data = (await translateCodeTitle(props.item.code)).data || {}
+    if (data.cn_title) {
+      props.item.cn_title = data.cn_title
+    }
+    toast.success(
+      data.changed === false ? `${props.item.code} 的译文与原来一致` : `已翻译 ${props.item.code}`,
+    )
+  } catch (err) {
+    toast.error(err.message)
+  } finally {
+    translating.value = false
   }
 }
 
@@ -243,6 +272,14 @@ async function reset() {
           @click.stop="refetch"
         >
           {{ refetching ? '重抓中…' : '重抓' }}
+        </button>
+        <button
+          class="btn-ghost px-2.5 py-1 text-xs"
+          :disabled="translating"
+          title="重新翻译标题，覆盖现有译文"
+          @click.stop="translateTitle"
+        >
+          {{ translating ? '翻译中…' : '翻译' }}
         </button>
         <button
           class="btn-ghost px-2.5 py-1 text-xs"
