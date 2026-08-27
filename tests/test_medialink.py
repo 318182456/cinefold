@@ -189,6 +189,42 @@ def test_delete_clears_history_so_resubscribe_works(linked, monkeypatch):
         assert session.get(History, "c" * 40) is None
 
 
+def test_history_cleared_when_torrent_already_gone(linked, monkeypatch):
+    """种子早已不在下载器里时，History 照样要清掉。
+
+    现场踩到的就是这个：种子被手动删过，联动删除时 delete_torrent 返回空表
+    （qb 对不存在的 hash 直接 `if not hit: return []`），于是 torrents_deleted
+    是空的，一行 History 都没清 —— 文件、刮削附属、目录全删干净了，只剩
+    History 留着，这个番号从此再也下不下来，重下一律报「已下载过，跳过」。
+
+    日志长这样：
+        qBittorrent 中已无这些种子，跳过: 710b3148..., 732b39f8...
+        联动删除完成 —— 种子 0，文件 1，刮削附属 5，目录 1
+    """
+    source, link = linked
+    medialink.register_scrape("ABS-001", str(source))
+    with session_scope() as session:
+        session.add(History(hash="g" * 40, code="ABS-001", save_path=str(source)))
+
+    class GoneClient:
+        """种子已不在下载器里 —— 照 qb 的真实行为返回空表。"""
+
+        def delete_torrent(self, hashes, delete_files=False):
+            return []
+
+    import app.modules.downloadclient as dc
+    monkeypatch.setattr(dc, "list_configured_clients", lambda: ["qbittorrent"])
+    monkeypatch.setattr(dc, "get_download_client", lambda name="": GoneClient())
+
+    result = medialink.handle_media_deleted(link_path=str(link))
+
+    # 下载器确实什么都没删，这个如实反映
+    assert result.torrents_deleted == []
+    # 但关联已经结束，History 必须清掉，否则重新订阅会被跳过
+    with session_scope() as session:
+        assert session.get(History, "g" * 40) is None
+
+
 def test_delete_without_record_does_nothing(linked, tmp_path):
     """找不到关联记录时绝不能删任何东西。"""
     source, link = linked

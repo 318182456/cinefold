@@ -954,10 +954,15 @@ def translate_codes(limit: int = 50) -> int:
         return 0
 
     from concurrent.futures import ThreadPoolExecutor
-    from itertools import count as _count
 
-    # 翻译服务挂掉时每条都要撞一次超时，连续失败到阈值就本轮收工
-    failures = _count()
+    # 翻译服务挂掉时每条都要撞一次超时，连续失败到阈值就本轮收工。
+    #
+    # 必须是「连续」而不是「累计」：原先用 itertools.count 只增不减，成功
+    # 的翻译不清零，于是零散失败攒够阈值也会误判服务不可用 —— 日志里出现
+    # 「翻译连续失败，本轮提前结束」和「已翻译 4 个标题」同时打印，自相矛盾，
+    # 而且把本来能翻的剩余条目全丢了。
+    _streak = {"n": 0}
+    _streak_lock = threading.Lock()
     give_up = threading.Event()
 
     def run(item: tuple[str, str]) -> tuple[str, str]:
@@ -970,11 +975,16 @@ def translate_codes(limit: int = 50) -> int:
             logger.debug(f"[{code}] 翻译失败: {exc}")
             translated = ""
 
-        if translated:
-            return code, translated
-        if next(failures) >= TRANSLATE_FAILURE_LIMIT:
-            give_up.set()
-        return code, ""
+        # 多线程共用这个连击数，读改写要上锁
+        with _streak_lock:
+            if translated:
+                _streak["n"] = 0
+            else:
+                _streak["n"] += 1
+                if _streak["n"] >= TRANSLATE_FAILURE_LIMIT:
+                    give_up.set()
+
+        return code, translated if translated else ""
 
     # 翻译接口单次 1~5 秒，串行 50 条要好几分钟
     workers = min(TRANSLATE_WORKERS, len(pending))

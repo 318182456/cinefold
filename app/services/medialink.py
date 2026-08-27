@@ -1295,9 +1295,19 @@ def handle_media_deleted(
                 session.delete(hold)
                 logger.info(f"[{result.code}] 删除已执行，撤销扣留观察: {path}")
         # 历史记录一并清掉，否则订阅任务会认为该番号已下载而跳过。
-        # 只清真删掉的种子 —— 合集种子还在做种，它的 History 行得留着，
+        #
+        # 依据是「本次的删除计划」而不是 result.torrents_deleted：后者记的是
+        # 下载器实际删掉的数量，种子早已不在下载器时 delete_torrent 返回空表
+        # （见 qbittorrent.delete_torrent 的 `if not hit: return []`），于是
+        # 一行 History 都清不掉 —— 文件、刮削附属、目录全删干净了，只剩
+        # History 留着，这个番号从此再也下不下来，重下一律报「已下载过，跳过」。
+        #
+        # 种子在不在下载器里，跟「这个 hash 与该番号的关联是否结束」是两件事。
+        # 计划里的 hash 无论下载器现状如何，关联都已经结束，行就该清掉。
+        #
+        # 合集种子（hashes_to_keep）不在这个集合里，它的 History 行照旧留着 ——
         # 那是「这个 hash 存在于下载器」的凭据，删了会让后续对账反复补查
-        for h in result.torrents_deleted:
+        for h in hashes_to_delete:
             row = session.get(History, h)
             if row is not None:
                 session.delete(row)

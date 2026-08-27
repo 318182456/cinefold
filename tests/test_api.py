@@ -1464,3 +1464,66 @@ class TestRousiTokenCache:
         assert len(logins) == 2
 
         Rousi.reset_token_cache()
+
+
+class TestTranslateStreak:
+    """翻译的「连续失败」必须真的是连续，不能是累计。
+
+    原先用 itertools.count 只增不减，成功的翻译不清零。于是零散失败攒够
+    阈值也会误判服务不可用 —— 现场日志里「翻译连续失败，本轮提前结束」和
+    「已翻译 4 个标题」同时出现，自相矛盾，且把本来能翻的剩余条目全丢了。
+    """
+
+    def _seed(self, n):
+        from app.database.base import DBBase
+        from app.database.models import Code
+        from app.database.session import engine, session_scope
+
+        DBBase.metadata.create_all(engine)
+        with session_scope() as session:
+            for i in range(n):
+                session.merge(Code(code=f"TRN-{i:03d}", title=f"日文タイトル{i}",
+                                   cn_title=""))
+
+    def test_interleaved_failures_do_not_give_up(self, monkeypatch):
+        """一次失败一次成功交替出现时，绝不能提前收工。"""
+        from app import services
+
+        self._seed(20)
+        monkeypatch.setattr(services.translate, "is_available", lambda: True)
+
+        calls = {"n": 0}
+
+        def flaky(title):
+            calls["n"] += 1
+            # 奇数次失败、偶数次成功 —— 从未连续失败到阈值
+            return "" if calls["n"] % 2 else f"译-{title}"
+
+        monkeypatch.setattr(services, "translate_title", flaky)
+        # 单线程跑，让交替顺序可预期
+        monkeypatch.setattr(services, "TRANSLATE_WORKERS", 1)
+
+        count = services.translate_codes(limit=20)
+        # 一半成功，且没有因为累计失败而中断
+        assert count == 10
+        assert calls["n"] == 20
+
+    def test_real_consecutive_failures_give_up(self, monkeypatch):
+        """真的连续失败到阈值时要收工，别把剩下的全撞一遍超时。"""
+        from app import services
+
+        self._seed(30)
+        monkeypatch.setattr(services.translate, "is_available", lambda: True)
+
+        calls = {"n": 0}
+
+        def always_fail(title):
+            calls["n"] += 1
+            return ""
+
+        monkeypatch.setattr(services, "translate_title", always_fail)
+        monkeypatch.setattr(services, "TRANSLATE_WORKERS", 1)
+
+        assert services.translate_codes(limit=30) == 0
+        # 撞到阈值就停，不该把 30 条全试一遍
+        assert calls["n"] <= services.TRANSLATE_FAILURE_LIMIT + 1
