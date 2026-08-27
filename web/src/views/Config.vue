@@ -279,14 +279,10 @@ const GROUPS = [
       },
       {
         title: 'Rousi',
-        hint: '填了账号密码会自动登录续期，Token 可留空',
+        hint: '只需 API Key，不会过期也无需续期',
         fields: [
-          { k: 'rousi_username', label: '用户名' },
-          { k: 'rousi_password', label: '密码', t: 'password' },
-          { k: 'rousi_token', label: 'Token', t: 'password',
-            hint: '手动填时到期需自行更新' },
-          { k: 'rousi_passkey', label: 'Passkey', t: 'password',
-            hint: '取自 announce 地址中间那段' },
+          { k: 'rousi_apikey', label: 'API Key', t: 'password',
+            hint: '站点「个人 API Key」页签发，需授予「读取账户资料」「读取与搜索种子」「下载种子」三项权限' },
         ],
       },
       {

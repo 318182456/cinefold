@@ -330,7 +330,7 @@ def tool_check_config(_: dict) -> dict:
     }
     sources = {
         "mteam": bool(settings.mteam_api_key),
-        "rousi": bool(settings.rousi_password or settings.rousi_token),
+        "rousi": bool(settings.rousi_apikey),
         "ptt": bool(settings.ptt_cookie),
         "nicept": bool(settings.nicept_cookie),
         "bt": bool(settings.bt_url),

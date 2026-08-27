@@ -28,7 +28,7 @@ SENSITIVE_KEYS = {
     "emby_api_key", "plex_token", "jellyfin_api_key",
     "qbittorrent_password", "qbittorrent_apikey",
     "transmission_password", "thunder_authorization",
-    "rousi_password", "rousi_token", "rousi_passkey",
+    "rousi_apikey",
     "ptt_cookie", "nicept_cookie",
     "mteam_api_key", "wechat_corp_secret", "wechat_token",
     "wechat_encoding_aes_key", "telegram_bot_token", "secret_key",
@@ -210,10 +210,10 @@ class Settings:
     # --- PT 站点 ---
     # Rousi 新站是前后端分离架构，用 Bearer token 而非 Cookie。
     # 填了用户名密码就会自动登录续期，token 可留空。
-    rousi_username: str = ""
-    rousi_password: str = ""
-    rousi_token: str = ""
-    rousi_passkey: str = ""
+    # 站点签发的个人 API Key，Rousi 唯一的凭据。同一把也能给 MoviePilot /
+    # PT-depiler 等工具用，需授予「读取账户资料」「读取与搜索种子」「下载种子」。
+    # 账号密码登录换 JWT 与 Tracker Passkey 已废弃，站点侧不再需要
+    rousi_apikey: str = ""
     ptt_cookie: str = ""
     nicept_cookie: str = ""
     mteam_api_key: str = ""
@@ -491,10 +491,7 @@ def load_settings() -> Settings:
         docker_host=_env("DOCKER_HOST_URL", "unix:///var/run/docker.sock"),
         docker_container_qbittorrent=_env("DOCKER_CONTAINER_QBITTORRENT"),
 
-        rousi_username=_env("ROUSI_USERNAME"),
-        rousi_password=_env("ROUSI_PASSWORD"),
-        rousi_token=_env("ROUSI_TOKEN"),
-        rousi_passkey=_env("ROUSI_PASSKEY"),
+        rousi_apikey=_env("ROUSI_APIKEY"),
         ptt_cookie=_env("PTT_COOKIE"),
         nicept_cookie=_env("NICEPT_COOKIE"),
         mteam_api_key=_env("MTEAM_API_KEY"),

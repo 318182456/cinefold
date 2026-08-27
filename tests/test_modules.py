@@ -224,7 +224,7 @@ class TestFactories:
 
         assert MTeam(api_key="").search("ABP-984") == []
         assert PTT(cookie="").search("ABP-984") == []
-        assert Rousi(token="").search("ABP-984") == []
+        assert Rousi(apikey="").search("ABP-984") == []
 
 
 class TestConfig:

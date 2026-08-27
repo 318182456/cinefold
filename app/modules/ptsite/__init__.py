@@ -116,7 +116,7 @@ def get_sites() -> list[PTSite]:
     if settings.mteam_api_key:
         from app.modules.ptsite.mteam import MTeam
         sites.append(MTeam())
-    if settings.rousi_token or (settings.rousi_username and settings.rousi_password):
+    if settings.rousi_apikey:
         from app.modules.ptsite.rousi import Rousi
         sites.append(Rousi())
     if settings.ptt_cookie:

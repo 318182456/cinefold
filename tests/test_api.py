@@ -1411,61 +1411,6 @@ class TestNexusBreaker:
         NexusSite.reset_breakers()
 
 
-class TestRousiTokenCache:
-    """token 缓存在类上，避免每次搜索都重新登录。"""
-
-    def test_login_once_across_instances(self, monkeypatch):
-        from app.modules.ptsite.rousi import Rousi
-
-        Rousi.reset_token_cache()
-        logins = []
-
-        def _login(self):
-            logins.append(1)
-            # 不带 exp 的 token，_is_expiring 解不出时视为有效
-            return "fake.token.value"
-
-        monkeypatch.setattr(Rousi, "_login", _login)
-        monkeypatch.setattr(
-            Rousi, "__init__",
-            lambda self, **kw: self.__dict__.update(
-                host="h", passkey="", username="u", password="p",
-                proxy=None, _token="",
-            ),
-        )
-
-        assert Rousi().token == "fake.token.value"
-        assert Rousi().token == "fake.token.value"
-        assert Rousi().token == "fake.token.value"
-        assert len(logins) == 1
-
-        Rousi.reset_token_cache()
-
-    def test_reset_forces_relogin(self, monkeypatch):
-        from app.modules.ptsite.rousi import Rousi
-
-        Rousi.reset_token_cache()
-        logins = []
-        monkeypatch.setattr(
-            Rousi, "_login",
-            lambda self: logins.append(1) or "fake.token.value",
-        )
-        monkeypatch.setattr(
-            Rousi, "__init__",
-            lambda self, **kw: self.__dict__.update(
-                host="h", passkey="", username="u", password="p",
-                proxy=None, _token="",
-            ),
-        )
-
-        Rousi().token
-        Rousi.reset_token_cache()
-        Rousi().token
-        assert len(logins) == 2
-
-        Rousi.reset_token_cache()
-
-
 class TestTranslateStreak:
     """翻译的「连续失败」必须真的是连续，不能是累计。
 

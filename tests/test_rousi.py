@@ -1,9 +1,9 @@
 """Rousi API 客户端测试。
 
-新站是前后端分离架构，与 NexusPHP 系站点行为不同。
+新站是前后端分离架构，与 NexusPHP 系站点行为不同，且只认个人 API Key ——
+账号密码登录、JWT 续期、Tracker Passkey 都已去掉。
 """
 import sys
-import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -43,52 +43,36 @@ SEARCH_PAYLOAD = {
 }
 
 
-@pytest.fixture(autouse=True)
-def clear_token_cache():
-    """token 缓存在类上，不清掉会跨用例串味。"""
-    from app.modules.ptsite.rousi import Rousi
-
-    Rousi.reset_token_cache()
-    yield
-    Rousi.reset_token_cache()
-
-
 @pytest.fixture
 def site():
     from app.modules.ptsite.rousi import Rousi
-    return Rousi(token="tok", passkey="pk", host="https://rousi.pro")
-
-
-def _jwt(exp: float) -> str:
-    """构造一个只带 exp 的假 JWT。"""
-    import base64
-    import json
-
-    payload = base64.urlsafe_b64encode(
-        json.dumps({"exp": exp}).encode()
-    ).decode().rstrip("=")
-    return f"header.{payload}.sig"
+    return Rousi(apikey="AKEY", host="https://rousi.pro")
 
 
 class TestConfig:
-    def test_disabled_without_credentials(self):
+    def test_disabled_without_apikey(self):
         from app.modules.ptsite.rousi import Rousi
-        assert Rousi(token="").enabled is False
-        assert Rousi(token="").search("ABP-984") == []
+        assert Rousi(apikey="").enabled is False
+        assert Rousi(apikey="").search("ABP-984") == []
 
-    def test_enabled_with_username_password(self):
+    def test_enabled_with_apikey(self):
         from app.modules.ptsite.rousi import Rousi
-        assert Rousi(token="", username="u", password="p").enabled is True
+        assert Rousi(apikey="AKEY").enabled is True
+
+    def test_apikey_whitespace_stripped(self):
+        """从网页复制 Key 很容易带上首尾空白，带进 header 会鉴权失败。"""
+        from app.modules.ptsite.rousi import Rousi
+        assert Rousi(apikey="  AKEY\n").apikey == "AKEY"
 
     def test_host_override(self, monkeypatch):
         from app.modules.ptsite.rousi import Rousi
 
-        assert Rousi(token="t").host == "https://rousi.pro"
+        assert Rousi(apikey="t").host == "https://rousi.pro"
         monkeypatch.setenv("ROUSI_HOST", "https://new.example.com/")
-        assert Rousi(token="t").host == "https://new.example.com"
+        assert Rousi(apikey="t").host == "https://new.example.com"
 
     def test_bearer_header(self, site):
-        assert site._headers()["Authorization"] == "Bearer tok"
+        assert site._headers()["Authorization"] == "Bearer AKEY"
 
 
 class TestSearch:
@@ -136,88 +120,29 @@ class TestSearch:
         assert site.search("ABP-554") == []
 
 
-class TestAutoLogin:
-    def test_valid_token_not_refreshed(self, monkeypatch):
-        """token 还没到期就不该触发登录。"""
-        from app.modules.ptsite.rousi import Rousi
-
-        called = {"login": False}
-
-        def spy(self):
-            called["login"] = True
-            return "new"
-
-        monkeypatch.setattr(Rousi, "_login", spy)
-        site = Rousi(token=_jwt(time.time() + 86400), username="u", password="p")
-        assert site.token.startswith("header.")
-        assert called["login"] is False
-
-    def test_expired_token_triggers_login(self, monkeypatch):
-        from app.modules.ptsite.rousi import Rousi
-
-        monkeypatch.setattr(Rousi, "_login", lambda self: "fresh-token")
-        site = Rousi(token=_jwt(time.time() - 10), username="u", password="p")
-        assert site.token == "fresh-token"
-
-    def test_no_credentials_keeps_stale_token(self, monkeypatch):
-        """只配了 token 时不做登录，原样返回让调用方看到 401。"""
-        from app.modules.ptsite.rousi import Rousi
-
-        stale = _jwt(time.time() - 10)
-        site = Rousi(token=stale)
-        assert site.token == stale
-
-    def test_login_extracts_token(self, monkeypatch):
-        from app.modules.ptsite.rousi import Rousi
-
-        def fake_post(self, url, **kwargs):
-            assert kwargs["json"]["identifier"] == "u"
-            return httpx.Response(
-                200,
-                json={"code": 0, "data": {"token": "tok-from-login"}},
-                request=httpx.Request("POST", url),
-            )
-
-        monkeypatch.setattr(httpx.Client, "post", fake_post)
-        site = Rousi(token="", username="u", password="p")
-        assert site.token == "tok-from-login"
-
-    def test_login_failure_returns_empty(self, monkeypatch):
-        from app.modules.ptsite.rousi import Rousi
-
-        def fake_post(self, url, **kwargs):
-            return httpx.Response(
-                401, json={"code": 102, "message": "用户名或密码错误"},
-                request=httpx.Request("POST", url),
-            )
-
-        monkeypatch.setattr(httpx.Client, "post", fake_post)
-        assert Rousi(token="", username="u", password="bad").token == ""
-
-    def test_malformed_token_treated_as_valid(self):
-        """非 JWT 格式的 token 无法判断有效期，不应反复触发登录。"""
-        from app.modules.ptsite.rousi import Rousi
-
-        assert Rousi._is_expiring("not-a-jwt") is False
-
-
 class TestDownloadUrl:
-    def test_uses_passkey_when_available(self, site):
+    def test_apikey_goes_in_path_not_query(self, site):
+        """站点的上游下载协议把 Key 放在路径里，不是查询参数。"""
         url = site._build_download_url(9204, "abc")
-        assert "/api/torrent/9204/download" in url
-        assert "passkey=pk" in url
+        assert url == "https://rousi.pro/api/torrent/download/AKEY/9204"
+        assert "passkey=" not in url
+        assert "?" not in url
 
-    def test_falls_back_to_magnet(self):
+    def test_falls_back_to_magnet_without_apikey(self):
         from app.modules.ptsite.rousi import Rousi
 
-        site = Rousi(token="t", passkey="")
+        site = Rousi(apikey="")
         url = site._build_download_url(9204, "aabbcc")
         assert url == "magnet:?xt=urn:btih:aabbcc"
+
+    def test_empty_without_apikey_and_hash(self):
+        from app.modules.ptsite.rousi import Rousi
+        assert Rousi(apikey="")._build_download_url(9204, "") == ""
 
     def test_magnet_not_downloaded_as_file(self):
         from app.modules.ptsite.rousi import Rousi
         from app.schemas.torrent import Torrent
 
-        site = Rousi(token="t", passkey="")
+        site = Rousi(apikey="")
         torrent = Torrent(download_url="magnet:?xt=urn:btih:x")
         assert site.download_seed(torrent) is None
