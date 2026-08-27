@@ -443,3 +443,73 @@ class TestGoogleBillingRefusal:
             {"data": {"translations": [{"translatedText": "配送途中"}]}},
         )
         assert g.translate("配送途中") == "配送途中"
+
+
+class TestListingCacheInvalidation:
+    """改了标题必须清掉榜单/厂牌的列表快照。
+
+    那两份缓存存的是 enrich_codes 的完整结果（整行详情，cn_title 也在里面），
+    TTL 30 / 60 分钟。不清的话库里已经是中文、列表页却还在发旧 JSON ——
+    表现就是「点完翻译卡片变中文，一刷新又变回日文」。
+    """
+
+    def _seed_with_cache(self, code="LC-001", cn=""):
+        import json
+        from app import services
+        from app.database.base import DBBase
+        from app.database.models import Code
+        from app.database.session import engine, session_scope
+
+        DBBase.metadata.create_all(engine)
+        with session_scope() as session:
+            session.merge(Code(code=code, title=JA_TITLE, cn_title=cn))
+        # 模拟列表页访问过一次，快照里是翻译前的样子
+        services.set_rank_cache(
+            "rank", "daily", json.dumps([{"code": code, "cn_title": cn}])
+        )
+        services.set_rank_cache(
+            "brand", "prestige", json.dumps([{"code": code, "cn_title": cn}])
+        )
+
+    def test_manual_translate_drops_snapshot(self, monkeypatch):
+        from app import services
+
+        self._seed_with_cache()
+        monkeypatch.setattr(services.translate, "is_available", lambda: True)
+        monkeypatch.setattr(services, "translate_title", lambda t: "新译文")
+
+        assert services.translate_code_title("LC-001").get("error") is None
+        # 两个 namespace 都得清，否则厂牌页仍旧
+        assert services.get_rank_cache("rank", "daily", ttl=1800) is None
+        assert services.get_rank_cache("brand", "prestige", ttl=3600) is None
+
+    def test_batch_translate_drops_snapshot(self, monkeypatch):
+        from app import services
+
+        self._seed_with_cache(code="LC-002")
+        monkeypatch.setattr(services.translate, "is_available", lambda: True)
+        monkeypatch.setattr(services, "translate_title", lambda t: "批量译文")
+        monkeypatch.setattr(services, "TRANSLATE_WORKERS", 1)
+
+        assert services.translate_codes(limit=10) >= 1
+        assert services.get_rank_cache("rank", "daily", ttl=1800) is None
+
+    def test_purge_drops_snapshot(self):
+        """清掉存量拒绝说明后，列表快照同样得失效。"""
+        from app import services
+
+        self._seed_with_cache(code="LC-003", cn=REFUSAL)
+        assert services.purge_refused_translations() >= 1
+        assert services.get_rank_cache("rank", "daily", ttl=1800) is None
+
+    def test_no_translation_leaves_cache_alone(self, monkeypatch):
+        """翻译失败又没有旧拒绝说明可清时，别白清缓存。"""
+        from app import services
+
+        self._seed_with_cache(code="LC-004", cn="原有正常译文")
+        monkeypatch.setattr(services.translate, "is_available", lambda: True)
+        monkeypatch.setattr(services, "translate_title", lambda t: "")
+
+        assert services.translate_code_title("LC-004").get("error")
+        # 什么都没改，快照该留着 —— 否则每次失败都要让榜单重抓一遍
+        assert services.get_rank_cache("rank", "daily", ttl=1800) is not None

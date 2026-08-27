@@ -1039,6 +1039,8 @@ def translate_codes(limit: int = 50) -> int:
                 count += 1
 
     if count:
+        # 同上：列表快照里存的是旧标题，不清则定时任务翻好了页面也看不到
+        drop_listing_cache()
         logger.info(f"已翻译 {count} 个标题")
     return count
 
@@ -1065,6 +1067,7 @@ def purge_refused_translations() -> int:
                 cleared += 1
 
     if cleared:
+        drop_listing_cache()
         logger.info(f"已清掉 {cleared} 条被当成译文存下的拒绝说明")
     return cleared
 
@@ -1120,6 +1123,7 @@ def translate_code_title(code: str) -> dict:
                 row = session.get(Code, row_code)
                 if row is not None:
                     row.cn_title = ""
+            drop_listing_cache()
 
         # 翻译失败时保留其余的原有译文：覆盖成空串等于把卡片上已经有的中文
         # 标题弄丢了。
@@ -1140,6 +1144,10 @@ def translate_code_title(code: str) -> dict:
         if row is None:
             return {"error": f"{row_code} 不在库中"}
         row.cn_title = translated
+
+    # 榜单/厂牌列表缓存的是整行详情的 JSON 快照，不清的话列表页会继续显示
+    # 翻译前的旧标题 —— 点完翻译卡片变中文、一刷新又变回日文
+    drop_listing_cache()
 
     logger.info(f"[{row_code}] 已手动翻译标题")
     return {"code": row_code, "cn_title": translated, "changed": translated != old}
@@ -1735,6 +1743,41 @@ def drop_media_exists_cache(code: str = "") -> bool:
     with session_scope() as session:
         removed = session.execute(
             delete(Cache).where(Cache.namespace == "media")
+        ).rowcount or 0
+    return hit or removed > 0
+
+
+def drop_listing_cache() -> bool:
+    """清掉榜单/厂牌那两份列表快照。
+
+    它们缓存的是 enrich_codes 的完整结果（整行详情，cn_title 也在里面），
+    TTL 分别 30 / 60 分钟。所以改了某个番号的标题之后，列表页还会拿着旧快照
+    继续显示改之前的值 —— 手动翻译完点刷新又变回日文，就是这个原因：库里已经
+    是中文，前端拿到的是缓存里那份旧 JSON。
+
+    快照本身可重建（大不了重抓一次榜单），所以宁可清掉重来，不做精细的
+    「只改快照里那一条」—— 那需要反序列化每个 key 再回写，还要处理并发覆盖，
+    收益远不及风险。
+
+    Redis 与数据库两边都要清：set_rank_cache 只在 Redis 写失败时才落库。
+    """
+    from app.core import redis as redis_cache
+    from app.database.models import Cache
+
+    hit = False
+    try:
+        client = redis_cache.get_client()
+        if client is not None:
+            for ns in ("rank", "brand"):
+                for k in client.scan_iter(match=_cache_key(ns, "*"), count=500):
+                    client.delete(k)
+                    hit = True
+    except Exception as exc:
+        logger.debug(f"清 Redis 列表缓存失败: {exc}")
+
+    with session_scope() as session:
+        removed = session.execute(
+            delete(Cache).where(Cache.namespace.in_(("rank", "brand")))
         ).rowcount or 0
     return hit or removed > 0
 
