@@ -320,3 +320,58 @@ class TestPromptHardening:
         monkeypatch.setattr(translateai.httpx, "Client", _Client)
         translateai.TranslateAI(url="http://x/v1", model="m", api_key="k").translate("タ")
         assert seen.get("trust_env") is False
+
+
+class TestSilentTruncation:
+    """网关的输出侧过滤会把译文从中间砍断，且伪装成正常结束。
+
+    这是比拒绝更阴的一种失败：finish_reason 还是 stop、usage 的
+    completion_tokens 与返回字数完全对得上（模型确实"只生成了那么多"），
+    长度比也落在正常译文的区间内 —— 没有任何字段能把它和完整译文分开。
+
+    所以不能靠检测兜住它，只能换一个不做这种过滤的模型（Gemini 会，
+    Claude 不会）。这条用例守的是：真出现半截译文时，别自作聪明地
+    "修补"或猜测，宁可当失败处理。
+    """
+
+    def test_truncated_output_is_not_repaired(self, monkeypatch):
+        """半截译文不做拼接猜测 —— 悄悄译残比翻不出来更糟，它看着是对的。"""
+        from app.modules.translate import translateai
+
+        # 实测 gemini-2.5-flash-lite 对这个标题的返回：从"我的女友在"就断了
+        half = "【VR】我的女友在"
+
+        class _Resp:
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return {
+                    "choices": [{"message": {"content": half}, "finish_reason": "stop"}],
+                    "usage": {"completion_tokens": 6, "total_tokens": 50},
+                }
+
+        class _Client:
+            def __init__(self, *a, **kw):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def post(self, *a, **kw):
+                return _Resp()
+
+        monkeypatch.setattr(translateai.httpx, "Client", _Client)
+        client = translateai.TranslateAI(url="http://x/v1", model="m", api_key="k")
+        # 原样返回，不拼接、不补全、不重试拼凑
+        assert client.translate(JA_TITLE) == half
+
+    def test_refusal_still_beats_truncation_check(self):
+        """拒绝说明仍要被拦下 —— 别因为放过截断就把拒绝也放过去了。"""
+        from app.modules.translate.translateai import looks_like_refusal
+
+        assert looks_like_refusal(REFUSAL, JA_TITLE) is True
+        assert looks_like_refusal("【VR】我的女友在", JA_TITLE) is False
