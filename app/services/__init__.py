@@ -1464,6 +1464,147 @@ def get_rank_cache(namespace: str, key: str, ttl: int = 0) -> str | None:
         return row.content
 
 
+def reset_code_for_redownload(code: str, dry_run: bool = True) -> dict:
+    """把一个番号恢复到「可以重新下载」的状态。
+
+    用于文件已经删干净、却怎么都下不下来的番号。三处残留任一存在都会把它
+    拦在门外，而且拦得很安静 —— 日志只说「已存在」，不说卡在哪：
+
+    1) 媒体库判定缓存。is_exist_server 的结果写进 Redis 时一直没设过期
+       （已修，但存量 key 还在），值是 1 就一直认为它已入库。
+       _split_existing 拿这个结果在 subscribe_code 之前就把番号筛掉，
+       连带 _drop_vanished_history 那套自愈也不会跑。
+    2) History 残留。种子早已不在下载器时 delete_torrent 返回空表，
+       联动删除便漏清了这些行（已修，同样有存量）。_is_downloaded 查到
+       就报「已下载过，跳过」。
+    3) 卡住的状态。Code.status 停在 DOWNLOADING/DOWNLOADED/COMPLETED 时，
+       订阅任务不会重新搜种。
+
+    只清「下载器里确实已经没有」的 History 行 —— 种子还在做种的行是有效
+    关联，删了会让后续对账反复补查。下载器连不上时一行都不动：此时无法
+    判断种子死活，宁可这次白跑也不要误删。这与 _drop_vanished_history
+    的口径一致。
+
+    dry_run 为真时只报告会清什么，不落库。
+    """
+    from app.database.models import Code, CodeStatus, History
+
+    code = (code or "").strip().upper()
+    if not code:
+        return {"code": "", "error": "番号为空"}
+
+    result = {
+        "code": code,
+        "dry_run": dry_run,
+        "cache_cleared": False,
+        "history_removed": [],
+        "history_kept": [],
+        "status_before": None,
+        "status_reset": False,
+        "downloader_unavailable": False,
+    }
+
+    with session_scope() as session:
+        row = session.get(Code, code)
+        if row is not None:
+            result["status_before"] = row.status
+        hashes = list(session.scalars(
+            select(History.hash).where(History.code == code)
+        ).all())
+
+    # 哪些种子确实已经不在下载器里
+    gone, alive = hashes, []
+    if hashes:
+        client = downloadclient.get_download_client()
+        if client is None:
+            result["downloader_unavailable"] = True
+            gone, alive = [], hashes
+        else:
+            try:
+                states = client.monitor_torrent(hashes)
+                live = {s.get("hash", "").lower() for s in states}
+                gone = [h for h in hashes if h.lower() not in live]
+                alive = [h for h in hashes if h.lower() in live]
+            except Exception as exc:
+                logger.warning(f"[{code}] 查询下载器失败，保留全部下载记录: {exc}")
+                result["downloader_unavailable"] = True
+                gone, alive = [], hashes
+
+    result["history_removed"] = gone
+    result["history_kept"] = alive
+
+    stuck = (
+        result["status_before"] is not None
+        and result["status_before"] not in (CodeStatus.NONE, CodeStatus.SUBSCRIBED)
+    )
+    result["status_reset"] = stuck
+
+    if dry_run:
+        result["cache_cleared"] = True   # 预览：这一步一定会做
+        return result
+
+    # 1) 媒体库判定缓存
+    result["cache_cleared"] = drop_media_exists_cache(code)
+
+    with session_scope() as session:
+        # 2) History 残留
+        if gone:
+            session.execute(delete(History).where(History.hash.in_(gone)))
+        # 3) 卡住的状态 —— 退回未订阅，由用户自己决定要不要再订
+        if stuck:
+            row = session.get(Code, code)
+            if row is not None:
+                row.status = CodeStatus.NONE
+                row.update_time = datetime.now()
+
+    logger.info(
+        f"[{code}] 已重置为可重新下载 —— 缓存"
+        f"{'已清' if result['cache_cleared'] else '未清'}，"
+        f"下载记录清 {len(gone)} 条"
+        f"{f'（保留 {len(alive)} 条仍在做种）' if alive else ''}，"
+        f"状态{'已重置' if stuck else '无需重置'}"
+    )
+    return result
+
+
+def drop_media_exists_cache(code: str = "") -> bool:
+    """清掉「番号是否已入库」的判定缓存。code 留空清全部。
+
+    Redis 与数据库两边都要清：set_rank_cache 只在 Redis 写失败时才落库，
+    两处都可能有值。返回是否真的清掉了什么。
+    """
+    from app.core import redis as redis_cache
+    from app.database.models import Cache
+
+    hit = False
+    if code:
+        key = code.strip().upper()
+        try:
+            hit = redis_cache.delete(_cache_key("media", key)) > 0
+        except Exception as exc:
+            logger.debug(f"清 Redis 媒体缓存失败: {exc}")
+        with session_scope() as session:
+            removed = session.execute(
+                delete(Cache).where(Cache.namespace == "media", Cache.key == key)
+            ).rowcount or 0
+        return hit or removed > 0
+
+    # 全量：Redis 没有按前缀删的原子操作，用 scan 逐个删
+    try:
+        client = redis_cache.get_client()
+        if client is not None:
+            for k in client.scan_iter(match=_cache_key("media", "*"), count=500):
+                client.delete(k)
+                hit = True
+    except Exception as exc:
+        logger.debug(f"清 Redis 媒体缓存失败: {exc}")
+    with session_scope() as session:
+        removed = session.execute(
+            delete(Cache).where(Cache.namespace == "media")
+        ).rowcount or 0
+    return hit or removed > 0
+
+
 def set_rank_cache(
     namespace: str, key: str, content: str, ttl: int = 0
 ) -> None:

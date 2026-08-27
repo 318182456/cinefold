@@ -84,6 +84,11 @@ export const cancelCode = (code) => http.post('/codes/cancel', { code })
 export const subscribeCodesBatch = (codes) => http.post('/codes/sub/batch', { codes })
 export const cancelCodesBatch = (codes) => http.post('/codes/cancel/batch', { codes })
 export const downloadCode = (payload) => http.post('/codes/download', payload)
+// 番号删干净了却一直报「已存在」时，清掉拦住它的三处残留：
+// 媒体库判定缓存、History 下载记录、卡住的状态。dry_run 时只回报会清什么
+export const resetCode = (code, dryRun = true) =>
+  http.post('/codes/reset', { code, dry_run: dryRun })
+export const clearMediaCache = () => http.post('/cache/media/clear')
 export const downloadAll = () => http.post('/codes/download/all')
 export const getReleaseToday = () => http.get('/codes/release_today')
 export const getRecommend = (limit = 15, page = 1) =>

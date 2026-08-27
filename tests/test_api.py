@@ -1585,3 +1585,89 @@ class TestRedisCacheTTL:
         )
         services.set_rank_cache("rank", "daily", "[]")
         assert seen["ttl"] is None
+
+
+class TestResetCode:
+    """重置番号：清掉拦住「删干净了却下不下来」的三处残留。"""
+
+    def _seed(self, code="RST-001", status=2, hashes=("h1" * 20,)):
+        from app.database.base import DBBase
+        from app.database.models import Code, History
+        from app.database.session import engine, session_scope
+
+        DBBase.metadata.create_all(engine)
+        with session_scope() as session:
+            session.merge(Code(code=code, status=status))
+            for h in hashes:
+                session.merge(History(hash=h, code=code))
+
+    def test_dry_run_changes_nothing(self, monkeypatch):
+        from app import services
+        from app.database.models import History
+        from app.database.session import session_scope
+
+        self._seed()
+        monkeypatch.setattr(services.downloadclient, "get_download_client",
+                            lambda name="": type("C", (), {
+                                "monitor_torrent": lambda s, h=None: []})())
+
+        out = services.reset_code_for_redownload("RST-001", dry_run=True)
+        assert out["history_removed"] == ["h1" * 20]
+        # 预览不能落库
+        with session_scope() as session:
+            assert session.get(History, "h1" * 20) is not None
+
+    def test_clears_gone_history_and_status(self, monkeypatch):
+        from app import services
+        from app.database.models import Code, CodeStatus, History
+        from app.database.session import session_scope
+
+        self._seed()
+        monkeypatch.setattr(services.downloadclient, "get_download_client",
+                            lambda name="": type("C", (), {
+                                "monitor_torrent": lambda s, h=None: []})())
+        monkeypatch.setattr(services, "drop_media_exists_cache", lambda c="": True)
+
+        out = services.reset_code_for_redownload("RST-001", dry_run=False)
+        assert out["history_removed"] == ["h1" * 20]
+        with session_scope() as session:
+            assert session.get(History, "h1" * 20) is None
+            assert session.get(Code, "RST-001").status == CodeStatus.NONE
+
+    def test_keeps_history_of_live_torrents(self, monkeypatch):
+        """种子还在做种的记录不能删 —— 那是有效关联。"""
+        from app import services
+        from app.database.models import History
+        from app.database.session import session_scope
+
+        self._seed(hashes=("a" * 40, "b" * 40))
+        monkeypatch.setattr(
+            services.downloadclient, "get_download_client",
+            lambda name="": type("C", (), {
+                "monitor_torrent": lambda s, h=None: [{"hash": "a" * 40}]})(),
+        )
+        monkeypatch.setattr(services, "drop_media_exists_cache", lambda c="": True)
+
+        out = services.reset_code_for_redownload("RST-001", dry_run=False)
+        assert out["history_kept"] == ["a" * 40]
+        assert out["history_removed"] == ["b" * 40]
+        with session_scope() as session:
+            assert session.get(History, "a" * 40) is not None
+            assert session.get(History, "b" * 40) is None
+
+    def test_downloader_down_keeps_everything(self, monkeypatch):
+        """下载器连不上时一条都不删 —— 无法判断种子死活，宁可白跑。"""
+        from app import services
+        from app.database.models import History
+        from app.database.session import session_scope
+
+        self._seed()
+        monkeypatch.setattr(services.downloadclient, "get_download_client",
+                            lambda name="": None)
+        monkeypatch.setattr(services, "drop_media_exists_cache", lambda c="": True)
+
+        out = services.reset_code_for_redownload("RST-001", dry_run=False)
+        assert out["downloader_unavailable"] is True
+        assert out["history_removed"] == []
+        with session_scope() as session:
+            assert session.get(History, "h1" * 20) is not None

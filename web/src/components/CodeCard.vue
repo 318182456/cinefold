@@ -1,6 +1,6 @@
 <script setup>
 import { computed, ref } from 'vue'
-import { codeCover, subscribeCode, cancelCode, downloadCode, refetchCover } from '@/api'
+import { codeCover, subscribeCode, cancelCode, downloadCode, refetchCover, resetCode } from '@/api'
 import { useToast } from '@/composables/useToast'
 import { useConfigStore } from '@/stores/config'
 import { parseCasts } from '@/utils/cast'
@@ -114,6 +114,41 @@ async function download() {
     busy.value = false
   }
 }
+
+const resetting = ref(false)
+
+// 文件删干净了却一直报「已存在」时用这个。先预览再确认 —— 它会删下载记录
+// 并重置状态，看清了再动手
+async function reset() {
+  resetting.value = true
+  try {
+    const preview = (await resetCode(props.item.code, true)).data || {}
+    const lines = []
+    if (preview.cache_cleared) lines.push('· 清掉媒体库判定缓存')
+    const removed = (preview.history_removed || []).length
+    const kept = (preview.history_kept || []).length
+    if (removed) lines.push(`· 删掉 ${removed} 条下载记录（下载器里已无对应种子）`)
+    if (kept) lines.push(`· 保留 ${kept} 条（种子仍在做种，不动）`)
+    if (preview.status_reset) lines.push('· 重置订阅状态，使其可重新搜种')
+    if (preview.downloader_unavailable) {
+      lines.push('⚠ 下载器当前连不上，无法判断种子死活，下载记录一条都不会删')
+    }
+    if (!lines.length) lines.push('· 没有发现需要清理的残留')
+
+    const ok = window.confirm(
+      [`重置 ${props.item.code}，将执行：`, '', ...lines, '', '继续？'].join('\n'),
+    )
+    if (!ok) return
+
+    const res = await resetCode(props.item.code, false)
+    toast.success(res.message || `${props.item.code} 已可重新下载`)
+    emit('changed')
+  } catch (err) {
+    toast.error(err.message)
+  } finally {
+    resetting.value = false
+  }
+}
 </script>
 
 <template>
@@ -208,6 +243,14 @@ async function download() {
           @click.stop="refetch"
         >
           {{ refetching ? '重抓中…' : '重抓' }}
+        </button>
+        <button
+          class="btn-ghost px-2.5 py-1 text-xs"
+          :disabled="resetting"
+          title="文件已删却一直报「已存在」下不下来时，清掉拦住它的残留记录与缓存"
+          @click.stop="reset"
+        >
+          {{ resetting ? '重置中…' : '重置' }}
         </button>
       </div>
     </div>

@@ -140,6 +140,60 @@ def cancel(body: SubscribeRequest, current_user: str = Depends(get_current_user)
     return ResponseEntity.ok(message=f"已取消订阅 {code}")
 
 
+class ResetRequest(BaseModel):
+    code: str
+    # 默认只预览。这个操作会删下载记录并重置状态，先让用户看清再落库
+    dry_run: bool = True
+
+
+@router.post("/codes/reset")
+def reset_code(body: ResetRequest, current_user: str = Depends(get_current_user)):
+    """把番号恢复到「可以重新下载」的状态。
+
+    用于文件已经删干净、却一直报「已存在」下不下来的番号。三处残留任一
+    存在都会拦住它：媒体库判定缓存、History 下载记录、卡住的 Code.status。
+    这里一次清掉，具体见 services.reset_code_for_redownload。
+
+    只清下载器里确实已经没有的 History 行；种子还在做种的照旧保留。
+    """
+    from app import services
+
+    code = get_true_code(body.code) or body.code
+    if not code:
+        return ResponseEntity.fail("番号为空", code=400)
+
+    result = services.reset_code_for_redownload(code, dry_run=body.dry_run)
+    if result.get("error"):
+        return ResponseEntity.fail(result["error"], code=400)
+
+    if body.dry_run:
+        return ResponseEntity.ok(result, message="预览：以下内容将被清理")
+
+    if result.get("downloader_unavailable"):
+        return ResponseEntity.ok(
+            result,
+            message=(
+                f"{code} 已清缓存，但下载器连不上，"
+                f"保留了 {len(result['history_kept'])} 条下载记录未动"
+            ),
+        )
+
+    return ResponseEntity.ok(result, message=f"{code} 已可重新下载")
+
+
+@router.post("/cache/media/clear")
+def clear_media_cache(current_user: str = Depends(get_current_user)):
+    """清空「番号是否已入库」的全部判定缓存。
+
+    这个缓存曾经写进 Redis 时没设过期时间，存量 key 不会自己消失。
+    整库判定都不准时用它一次清干净，代价只是下次查询要重新问一遍媒体库。
+    """
+    from app import services
+
+    services.drop_media_exists_cache()
+    return ResponseEntity.ok(message="已清空媒体库判定缓存")
+
+
 class CodesRequest(BaseModel):
     codes: list[str] = []
 
