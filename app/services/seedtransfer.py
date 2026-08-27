@@ -12,6 +12,12 @@ metadata。加到 tr 时保存路径对齐 qb 的 save_path，再触发一次校
 
 文件全程不移动、不复制，两个下载器指向同一份文件。因此转移完成后从 qb
 删任务时绝不能删文件。
+
+候选范围刻意不受 QBITTORRENT_CATEGORY 约束：那个配置是给下载与状态同步用的，
+拿它当转移范围会把「早期没设分类、手动加进 qb、分类名大小写不同」的种子
+静默挡在候选之外。该转哪些一律由 SEED_TRANSFER_CATEGORIES / _TAGS 决定。
+
+只转 100% 且文件已就位的种子，见 _is_transferable 与 UNSAFE_STATES。
 """
 from __future__ import annotations
 
@@ -25,6 +31,41 @@ from app.core.config import get_settings
 # 密集操作，一次涌进去几百个会把磁盘打满，反而拖慢正在下载的任务。
 # 实际取 SEED_TRANSFER_BATCH_LIMIT，这里只是配置缺失时的兜底
 BATCH_LIMIT = 20
+
+
+# 进度到了 100% 也不代表可以交给 tr —— 这些状态下文件不在最终位置或压根不全，
+# tr 接过去只会校验失败然后从头下载：
+#   moving      qb 正在挪文件（改保存路径/完成后移动），路径是临时的
+#   checkingUP/checkingDL/checkingResumeData  qb 自己还在校验，别插一脚
+#   missingFiles  文件已被外部删掉，qb 的 progress 仍报 1.0
+#   allocating  刚分配空间，内容还没落盘
+# 状态名按 qb 的 WebAPI 取值，全小写比对以兼容不同版本的大小写差异
+UNSAFE_STATES = frozenset({
+    "moving",
+    "checkingup",
+    "checkingdl",
+    "checkingresumedata",
+    "missingfiles",
+    "allocating",
+})
+
+
+def _is_transferable(detail: dict) -> tuple[bool, str]:
+    """这个种子现在能不能转移。返回 (可以, 不可以的原因)。
+
+    只转 100% 完成的：下了一半就交给 tr，tr 校验后会把缺的部分自己补下，
+    等于把下载任务也一起搬过去了 —— 那不是转移做种的本意，而且两个下载器
+    会同时往同一份文件里写。
+    """
+    progress = detail.get("progress") or 0
+    if progress < 1.0:
+        return False, f"进度 {progress:.1%}，未下载完成"
+
+    state = (detail.get("state") or "").strip().lower()
+    if state in UNSAFE_STATES:
+        return False, f"状态 {detail.get('state')}，文件尚未就位"
+
+    return True, ""
 
 
 def _batch_limit() -> int:
@@ -102,6 +143,44 @@ def _split_setting(value: str) -> list[str]:
     return [item.strip() for item in (value or "").split(",") if item.strip()]
 
 
+def _all_completed(qb) -> list[dict]:
+    """qb 里全部已完成的任务，不受 QBITTORRENT_CATEGORY 限制。
+
+    必须绕开那个分类过滤：它是 qb 服务端做的精确匹配，早期没设分类时下的、
+    手动加进 qb 的、分类名大小写不同的种子会被直接挡在候选之外 —— 既不算
+    成功也不算失败，静默消失，看起来就是「这些种子怎么一直不转移」。
+
+    该转哪些由 SEED_TRANSFER_CATEGORIES / SEED_TRANSFER_TAGS 决定（白名单，
+    留空=全转），这才是本该管这件事的开关。
+
+    老下载器或测试替身的 monitor_torrent 可能没有 all_categories 形参，
+    TypeError 时退回无参调用，至少还能按原分类转移。
+
+    只留 100% 且状态就位的：completed 就是 progress >= 1.0，下了一半的进不来。
+    正在挪文件/校验中的这里也一并挡掉（见 UNSAFE_STATES），用行里现成的
+    state 判断，不额外打接口。transfer_hashes 还会按详情再核一次 ——
+    扫描到真正转移之间隔着几十个种子的处理时间，状态可能已经变了。
+    """
+    try:
+        rows = qb.monitor_torrent(all_categories=True)
+    except TypeError:
+        logger.debug("[转移做种] 下载器不支持 all_categories，退回默认分类范围")
+        rows = qb.monitor_torrent()
+
+    out = []
+    for row in rows:
+        if not row.get("completed"):
+            continue
+        state = (row.get("state") or "").strip().lower()
+        if state in UNSAFE_STATES:
+            logger.debug(
+                f"[转移做种] {row.get('hash')} 状态 {row.get('state')}，文件未就位，暂不转移"
+            )
+            continue
+        out.append(row)
+    return out
+
+
 def transfer_hashes(hashes: list[str], delete_source: bool | None = None) -> TransferResult:
     """把指定的 qb 种子转移到 tr 做种。
 
@@ -133,9 +212,10 @@ def transfer_hashes(hashes: list[str], delete_source: bool | None = None) -> Tra
             result.failed.append({"hash": torrent_hash, "reason": "qBittorrent 中找不到该任务"})
             continue
 
-        if detail.get("progress", 0) < 1.0:
+        transferable, why = _is_transferable(detail)
+        if not transferable:
             result.skipped.append(torrent_hash)
-            logger.debug(f"[转移做种] {torrent_hash} 尚未下载完成，跳过")
+            logger.debug(f"[转移做种] {torrent_hash} 跳过：{why}")
             continue
 
         content = qb.export_torrent(torrent_hash)
@@ -238,7 +318,7 @@ def run_auto_transfer() -> int:
         return 0
 
     try:
-        rows = qb.monitor_torrent()
+        rows = _all_completed(qb)
     except Exception as exc:
         logger.warning(f"[转移做种] 读取 qBittorrent 任务列表失败: {exc}")
         return 0
@@ -249,8 +329,6 @@ def run_auto_transfer() -> int:
 
     candidates: list[str] = []
     for row in rows:
-        if not row.get("completed"):
-            continue
         torrent_hash = row.get("hash") or ""
         if not torrent_hash:
             continue
@@ -299,15 +377,13 @@ def list_candidates(limit: int | None = None) -> list[dict]:
     tags = _split_setting(settings.seed_transfer_tags)
 
     try:
-        rows = qb.monitor_torrent()
+        rows = _all_completed(qb)
     except Exception as exc:
         logger.warning(f"[转移做种] 读取 qBittorrent 任务列表失败: {exc}")
         return []
 
     out: list[dict] = []
     for row in rows:
-        if not row.get("completed"):
-            continue
         torrent_hash = row.get("hash") or ""
         if not torrent_hash:
             continue

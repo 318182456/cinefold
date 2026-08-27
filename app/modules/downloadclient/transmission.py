@@ -218,7 +218,11 @@ class TransmissionClient:
             logger.warning(f"[{code}] Transmission 设置标签失败 {torrent_hash}: {exc}")
 
     # ------------------------------------------------------------------
-    def monitor_torrent(self, hashes: Sequence[str] | None = None) -> list[dict]:
+    def monitor_torrent(
+        self, hashes: Sequence[str] | None = None, all_categories: bool = False
+    ) -> list[dict]:
+        # all_categories 收下但不用：Transmission 不按分类过滤，本来就是全量
+
         if not self._ensure_client():
             return []
 

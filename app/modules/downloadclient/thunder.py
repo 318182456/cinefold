@@ -120,7 +120,11 @@ class Thunder:
         """文件在网盘上，本地路径反查无从谈起。"""
         return {}
 
-    def monitor_torrent(self, hashes: Sequence[str] | None = None) -> list[dict]:
+    def monitor_torrent(
+        self, hashes: Sequence[str] | None = None, all_categories: bool = False
+    ) -> list[dict]:
+        # all_categories 收下但不用：迅雷不按分类过滤，本来就是全量
+
         if not self.authorization:
             return []
         try:

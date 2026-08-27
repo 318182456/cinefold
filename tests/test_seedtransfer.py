@@ -16,16 +16,36 @@ from app.services import seedtransfer
 
 
 class FakeQB:
-    """假 qBittorrent。记录调用，不碰网络。"""
+    """假 qBittorrent。记录调用，不碰网络。
 
-    def __init__(self, details=None, export=b"torrent-bytes", rows=None):
+    monitor_torrent 必须复刻真实的分类过滤：真客户端默认按
+    QBITTORRENT_CATEGORY 过滤（qb 服务端精确匹配），只有 all_categories=True
+    才拉全量。早期这个替身无条件返回 rows，把分类过滤整个抹平了，
+    结果「候选扫描漏掉别的分类」这个 bug 一直测不出来。
+    """
+
+    def __init__(self, details=None, export=b"torrent-bytes", rows=None,
+                 category=""):
         self.details = details or {}
         self.export = export
         self.rows = rows or []
         self.deleted = []
+        # 对应 QBITTORRENT_CATEGORY；留空表示 qb 侧不过滤
+        self.category = category
+        self.monitor_calls = []
 
-    def monitor_torrent(self, hashes=None):
-        return list(self.rows)
+    def monitor_torrent(self, hashes=None, all_categories=False):
+        self.monitor_calls.append({"all_categories": all_categories})
+        rows = list(self.rows)
+        if not all_categories and self.category:
+            rows = [
+                r for r in rows
+                if (self.details.get(r.get("hash"), {}).get("category") or "")
+                == self.category
+            ]
+        if hashes:
+            rows = [r for r in rows if r.get("hash") in set(hashes)]
+        return rows
 
     def get_torrent_detail(self, torrent_hash):
         return self.details.get(torrent_hash)
@@ -614,3 +634,181 @@ class TestTransferOnComplete:
 
         assert services.sync_download_status() == 1
         assert handed == [[torrent_hash]]
+
+
+def _settings(monkeypatch, **overrides):
+    """打一套转移做种的配置。只写关心的项，其余取安全默认值。"""
+    fields = {
+        "seed_transfer_enabled": True,
+        "seed_transfer_categories": "",
+        "seed_transfer_tags": "",
+        "seed_transfer_delete_source": False,
+        "seed_transfer_label": "cinefold-transfer",
+        "transmission_label": "",
+        "seed_transfer_path_map": "",
+        "seed_transfer_batch_limit": 20,
+    }
+    fields.update(overrides)
+    monkeypatch.setattr(
+        seedtransfer, "get_settings", lambda: type("S", (), fields)()
+    )
+
+
+class TestCategoryScope:
+    """候选扫描不能被 QBITTORRENT_CATEGORY 挡住。
+
+    这是「qb 里剩下一堆已完成种子一直不转移」的成因：候选来自
+    monitor_torrent，而它默认只返回 QBITTORRENT_CATEGORY 那一个分类的任务。
+    别的分类（早期没设分类时下的、手动加的、大小写不同的）连候选都进不去，
+    既不算成功也不算失败，日志里什么都看不到。
+
+    该转哪些只该由 SEED_TRANSFER_CATEGORIES 决定 —— 那是白名单，留空=全转。
+    """
+
+    # 真实现场：qb 里 6 个 100% 做种的任务，分类各不相同
+    ROWS = [
+        ("h1", "Minions.&.Monsters.2026", "电影"),
+        ("h2", "moon-042", "日本AV"),
+        ("h3", "猫和老鼠", "动画片"),
+        ("h4", "AI短剧-《高三爱情故事》", "短视频"),
+        ("h5", "Toy Story 5 2026", "电影"),
+        ("h6", "Marc Dorcel- Russian Instiute", "欧美"),
+    ]
+
+    def _qb(self):
+        rows, details = [], {}
+        for h, name, cat in self.ROWS:
+            rows.append({
+                "hash": h, "name": name, "completed": True,
+                "save_path": f"/volume3/h_video/Download/{cat}",
+            })
+            details[h] = _detail(
+                torrent_hash=h, save_path=f"/volume3/h_video/Download/{cat}",
+                category=cat,
+            )
+            details[h]["name"] = name
+        # QBITTORRENT_CATEGORY='日本AV' —— 现场配置
+        return FakeQB(details=details, rows=rows, category="日本AV")
+
+    def test_scan_ignores_qb_category(self, wired, monkeypatch):
+        """扫描要拉全量，不受 QBITTORRENT_CATEGORY 限制。"""
+        qb, tr = wired(self._qb(), FakeTR())
+        _settings(monkeypatch, seed_transfer_enabled=True,
+                  seed_transfer_categories="", seed_transfer_tags="")
+
+        assert seedtransfer.run_auto_transfer() == len(self.ROWS)
+        # 关键断言：必须显式要求全量，否则又退回只看一个分类
+        assert qb.monitor_calls[0]["all_categories"] is True
+
+    def test_whitelist_decides_what_transfers(self, wired, monkeypatch):
+        """限定分类填 4 个，就该转中其中 3 个（PMV 现场没有），排除 电影/动画片。"""
+        qb, tr = wired(self._qb(), FakeTR())
+        _settings(monkeypatch, seed_transfer_enabled=True,
+                  seed_transfer_categories="日本AV,短视频,欧美,PMV",
+                  seed_transfer_tags="")
+
+        assert seedtransfer.run_auto_transfer() == 3
+        moved = {a["code"] for a in tr.added}
+        assert "moon-042" in moved
+        assert "AI短剧-《高三爱情故事》" in moved
+        assert "Marc Dorcel- Russian Instiute" in moved
+        # 白名单外的一个都不能动
+        assert not any("Toy Story" in c or "猫和老鼠" in c for c in moved)
+
+    def test_list_candidates_ignores_qb_category(self, monkeypatch):
+        """前端候选列表同样要看到别的分类，否则用户以为没得转。"""
+        qb = self._qb()
+        monkeypatch.setattr(seedtransfer, "_clients", lambda: (qb, FakeTR()))
+        monkeypatch.setattr(seedtransfer, "is_available", lambda: (True, ""))
+        _settings(monkeypatch, seed_transfer_categories="日本AV,短视频,欧美,PMV",
+                  seed_transfer_tags="")
+
+        got = seedtransfer.list_candidates()
+        assert len(got) == 3
+        assert qb.monitor_calls[0]["all_categories"] is True
+
+    def test_falls_back_when_client_lacks_param(self, wired, monkeypatch):
+        """下载器没有 all_categories 形参时退回旧调用，不能整个转移崩掉。"""
+        class OldQB(FakeQB):
+            def monitor_torrent(self, hashes=None):   # 没有 all_categories
+                return list(self.rows)
+
+        qb, tr = wired(OldQB(details=self._qb().details,
+                             rows=self._qb().rows), FakeTR())
+        _settings(monkeypatch, seed_transfer_enabled=True,
+                  seed_transfer_categories="", seed_transfer_tags="")
+
+        assert seedtransfer.run_auto_transfer() == len(self.ROWS)
+
+
+class TestOnlyComplete:
+    """只转 100% 的，下载一半的绝不能转。
+
+    下了一半就交给 tr，tr 校验后会把缺的部分自己补下 —— 等于把下载任务
+    也搬过去了，而且两个下载器会同时往同一份文件里写。
+    """
+
+    def _wire(self, monkeypatch, progress, state="stalledUP"):
+        detail = _detail("X1", progress=progress)
+        detail["state"] = state
+        qb = FakeQB(details={"X1": detail},
+                    rows=[{"hash": "X1", "name": "片", "completed": progress >= 1.0,
+                           "state": state, "save_path": "/dl"}])
+        tr = FakeTR()
+        monkeypatch.setattr(seedtransfer, "_clients", lambda: (qb, tr))
+        monkeypatch.setattr(seedtransfer, "is_available", lambda: (True, ""))
+        _settings(monkeypatch)
+        return qb, tr
+
+    @pytest.mark.parametrize("progress", [0.0, 0.5, 0.87, 0.999, 0.9999])
+    def test_partial_never_transferred(self, monkeypatch, progress):
+        """未满 100% 一律跳过，tr 一个都收不到。"""
+        qb, tr = self._wire(monkeypatch, progress)
+        result = seedtransfer.transfer_hashes(["X1"])
+        assert result.transferred == []
+        assert result.skipped == ["X1"]
+        assert tr.added == []
+
+    def test_partial_not_a_candidate(self, monkeypatch):
+        """下一半的连候选都不该进 —— 前端列表里也不该出现。"""
+        qb, tr = self._wire(monkeypatch, 0.5)
+        assert seedtransfer.run_auto_transfer() == 0
+        assert seedtransfer.list_candidates() == []
+
+    def test_complete_transfers(self, monkeypatch):
+        """100% 且状态正常的照常转移。"""
+        qb, tr = self._wire(monkeypatch, 1.0)
+        result = seedtransfer.transfer_hashes(["X1"])
+        assert result.transferred == ["X1"]
+        assert len(tr.added) == 1
+
+    @pytest.mark.parametrize("state", [
+        "moving", "checkingUP", "checkingDL", "missingFiles", "allocating",
+    ])
+    def test_unsafe_state_skipped_even_at_100(self, monkeypatch, state):
+        """进度 100% 但文件正在挪/正在校验/已丢失时不能转。
+
+        这些状态下 progress 都报 1.0，可文件不在最终位置或压根不全，
+        tr 接过去只会校验失败然后从头下载。
+        """
+        qb, tr = self._wire(monkeypatch, 1.0, state=state)
+        result = seedtransfer.transfer_hashes(["X1"])
+        assert result.transferred == []
+        assert result.skipped == ["X1"]
+        assert tr.added == []
+        # 候选扫描也要挡住，不然列表里晃一下又消失
+        assert seedtransfer.list_candidates() == []
+
+    def test_bad_completed_flag_still_guarded(self, monkeypatch):
+        """行里 completed 标错成 True 时，仍靠详情里的 progress 兜住。"""
+        detail = _detail("X1", progress=0.5)
+        qb = FakeQB(details={"X1": detail},
+                    rows=[{"hash": "X1", "name": "片", "completed": True,
+                           "state": "downloading", "save_path": "/dl"}])
+        tr = FakeTR()
+        monkeypatch.setattr(seedtransfer, "_clients", lambda: (qb, tr))
+        monkeypatch.setattr(seedtransfer, "is_available", lambda: (True, ""))
+        _settings(monkeypatch)
+
+        assert seedtransfer.run_auto_transfer() == 0
+        assert tr.added == []

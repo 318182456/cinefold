@@ -289,10 +289,23 @@ class QBitTorrentClient:
             return None
 
     # ------------------------------------------------------------------
-    def monitor_torrent(self, hashes: Sequence[str] | None = None) -> list[dict]:
+    def monitor_torrent(
+        self,
+        hashes: Sequence[str] | None = None,
+        all_categories: bool = False,
+    ) -> list[dict]:
         """查询任务状态。
 
         返回 [{hash, name, progress, state, save_path, completed}]
+
+        默认只看 QBITTORRENT_CATEGORY 那一个分类 —— 状态同步是围着本程序
+        下的任务转的，别的分类不该被算进来。
+
+        all_categories=True 时不带分类条件，返回 qb 里的全部任务。转移做种
+        要用这个：分类过滤是 qb 服务端做的精确匹配，早期没设分类时下的、
+        手动加的、分类名大小写不同的种子会被直接挡在候选之外，既不算成功
+        也不算失败，静默消失。该转哪些交给 SEED_TRANSFER_CATEGORIES 判断，
+        那才是白名单语义（留空=全转）。
         """
         if not self._ensure_client():
             return []
@@ -301,7 +314,7 @@ class QBitTorrentClient:
             filter_hashes = list(hashes) if hashes else None
             torrents = self.client.torrents_info(
                 torrent_hashes=filter_hashes,
-                category=self.category or None,
+                category=None if all_categories else (self.category or None),
             )
             _report_ok()
             return [
