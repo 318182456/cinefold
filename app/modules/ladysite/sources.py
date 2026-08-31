@@ -124,9 +124,12 @@ SOURCES: tuple[dict, ...] = (
     {"key": "subtitlecat", "name": "SubtitleCat（字幕）",
      "host": "https://www.subtitlecat.com", "kind": "subtitle",
      "parser": "", "bypass_first": False, "interval": 2.0},
+    # 不给默认地址：此前那个默认值指向一个压根不存在的仓库，兜底源因此
+    # 从一开始就在空转（每次取都是 404，日志只落在 debug 级，看不出来）。
+    # 与其再猜一个仓库名，不如让「没配地址」显式地等于「没启用」。
+    # 可以填多个，用逗号或换行分隔，见 modules/subtitle/github.py
     {"key": "subtitlegh", "name": "GitHub 字幕库",
-     "host": "https://raw.githubusercontent.com/CnSubtitles/subtitles/main",
-     "kind": "subtitle",
+     "host": "", "kind": "subtitle",
      "parser": "", "bypass_first": False, "interval": 0.5},
 )
 

@@ -973,3 +973,106 @@ def test_javsub_in_subtitle_sites_and_build():
     assert site is not None
     assert site.name == "javsub"
 
+
+# ----------------------------------------------------------------------
+# GitHub 字幕仓库：多地址
+# ----------------------------------------------------------------------
+def test_parse_hosts_splits_and_normalizes():
+    """地址是人在页面上手填的，格式上挑剔只会让人配不对却不知道为什么。"""
+    from app.modules.subtitle.github import parse_hosts
+
+    # 逗号、分号、换行都认
+    assert parse_hosts("https://a.com/x,https://b.com/y") == [
+        "https://a.com/x", "https://b.com/y",
+    ]
+    assert parse_hosts("https://a.com/x ; https://b.com/y") == [
+        "https://a.com/x", "https://b.com/y",
+    ]
+    assert parse_hosts("https://a.com/x\nhttps://b.com/y") == [
+        "https://a.com/x", "https://b.com/y",
+    ]
+    # 末尾斜杠要去掉，否则拼出来是 //SSNI-001.srt
+    assert parse_hosts("https://a.com/x/") == ["https://a.com/x"]
+    # 重复的按原顺序去重
+    assert parse_hosts("https://a.com/x,https://b.com/y,https://a.com/x") == [
+        "https://a.com/x", "https://b.com/y",
+    ]
+    # 空值不该变成一个空地址
+    assert parse_hosts("") == []
+    assert parse_hosts("   ") == []
+    assert parse_hosts(",,") == []
+
+
+def test_github_no_host_is_skipped():
+    """没配地址就等于这个源没启用 —— 不该拿默认值去撞一个不存在的仓库。"""
+    from app.modules.subtitle.github import GithubSubtitle
+
+    site = GithubSubtitle(host="")
+    # 内置默认值已清空，构造出来就没有可试的仓库
+    if site.hosts:
+        pytest.skip("数据源表里配了地址，这条用例测不到未配置的情形")
+    assert site.search("SSNI-001") is None
+
+
+def test_github_builds_one_client_per_repo():
+    """节流是按 host 记的，共用一个 client 会让不同仓库互相排队。"""
+    from app.modules.subtitle.github import GithubSubtitle
+
+    site = GithubSubtitle(host="https://a.com/x,https://b.com/y")
+    assert [c.host for c in site._clients] == [
+        "https://a.com/x", "https://b.com/y",
+    ]
+
+
+def test_github_falls_through_to_next_repo(monkeypatch):
+    """第一个仓库没有时要接着试第二个 —— 这是配多个的全部意义。"""
+    from app.modules.subtitle import github as gh
+
+    site = gh.GithubSubtitle(host="https://dead.com/x,https://live.com/y")
+    tried: list[str] = []
+
+    def fake_fetch(self, client, path):
+        tried.append(f"{client.host}{path}")
+        # 只有第二个仓库的平铺布局有货
+        if client.host == "https://live.com/y" and path == "/SSNI-001.srt":
+            return _LOCAL_ZH
+        return ""
+
+    monkeypatch.setattr(gh.GithubSubtitle, "_fetch", fake_fetch)
+
+    item = site.search("SSNI-001")
+    assert item is not None
+    assert item.suffix == ".srt"
+    assert "我们说过" in item.content
+    # 先把第一个仓库试完再换下一个，日志上才看得出是哪个仓库有货
+    assert tried[0].startswith("https://dead.com/x")
+    assert any(t.startswith("https://live.com/y") for t in tried)
+
+
+def test_github_tries_both_layouts(monkeypatch):
+    """平铺放不下时仓库常按厂牌前缀分目录。"""
+    from app.modules.subtitle import github as gh
+
+    site = gh.GithubSubtitle(host="https://a.com/x")
+
+    def fake_fetch(self, client, path):
+        # 只有按前缀分目录的布局有货
+        return _LOCAL_ZH if path == "/SSNI/SSNI-001.srt" else ""
+
+    monkeypatch.setattr(gh.GithubSubtitle, "_fetch", fake_fetch)
+
+    assert site.search("SSNI-001") is not None
+
+
+def test_github_converts_traditional(monkeypatch):
+    """仓库里的繁体同样转成简体，不再整条丢弃。"""
+    from app.modules.subtitle import github as gh
+
+    site = gh.GithubSubtitle(host="https://a.com/x")
+    monkeypatch.setattr(
+        gh.GithubSubtitle, "_fetch", lambda self, client, path: _LOCAL_TW
+    )
+
+    item = site.search("SSNI-001")
+    assert item is not None
+    assert "我们说过" in item.content
