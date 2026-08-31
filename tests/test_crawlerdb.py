@@ -61,6 +61,25 @@ class TestNormalizeCode:
         """认不出的一律丢弃。脏数据混进 Code 表比漏几条难收拾得多。"""
         assert importer._normalize_code(raw) == ""
 
+    @pytest.mark.parametrize("raw", [
+        "MD0329", "SATM034", "MDCN0001", "MDWP0034", "JDSY210",
+        "PM086", "NHAV042", "MCY0231",
+    ])
+    def test_no_hyphen_domestic_code_kept(self, raw):
+        """国产番号不带连字符，原样入库。
+
+        正则一度要求必须有连字符，把这批整个丢掉（实测一轮 18 条）。
+        源库 number 已经是对方归一化过的结果，这里不猜前缀边界去补
+        连字符 —— 拆错了番号就对不上其它源。
+        """
+        assert importer._normalize_code(raw) == raw
+
+    @pytest.mark.parametrize("raw", ["1234567", "A", "12", "AB1"])
+    def test_no_hyphen_still_needs_letters_and_digits(self, raw):
+        """放行无连字符不等于放行一切：纯数字和光杆字母仍要拦住，
+        否则这层兜底等于没有。"""
+        assert importer._normalize_code(raw) == ""
+
 
 class TestMovieRow:
     @pytest.fixture
