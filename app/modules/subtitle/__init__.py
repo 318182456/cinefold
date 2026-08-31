@@ -15,13 +15,15 @@ from loguru import logger
 from app.modules.subtitle.base import SubtitleItem
 from app.utils import get_true_code
 
-# 抓取顺序。subtitlecat 收录最全且无需登录，作主力；
+# 抓取顺序。本地字幕库排第一 —— 命中就不必跨境请求，且那里放的是
+# 人工挑过的字幕；subtitlecat 收录最全且无需登录，作网络主力；
 # GitHub 字幕仓库按番号命名、地址稳定，作它跑路时的兜底
-SUBTITLE_SITES: tuple[str, ...] = ("subtitlecat", "subtitlegh")
+SUBTITLE_SITES: tuple[str, ...] = ("subtitlelocal", "subtitlecat", "subtitlegh")
 
 # key → (模块, 类名)。与 ladysite 一样延迟导入，避免把 pyquery
 # 的解析开销拉进那些根本不抓字幕的调用路径
 _SITE_CLASSES: dict[str, tuple[str, str]] = {
+    "subtitlelocal": ("local", "LocalSubtitle"),
     "subtitlecat": ("subtitlecat", "SubtitleCat"),
     "subtitlegh": ("github", "GithubSubtitle"),
 }
@@ -35,10 +37,20 @@ def _build(key: str):
     module_name, class_name = entry
     try:
         module = import_module(f"app.modules.subtitle.{module_name}")
-        return getattr(module, class_name)()
+        site = getattr(module, class_name)()
     except Exception as exc:
         logger.debug(f"[字幕] 站点 {key} 初始化失败: {exc}")
         return None
+
+    # 本地源没配目录时自己退场。它不像网络源有内置默认地址，
+    # 没配就是没启用，不该每轮都建一个必然空手而归的实例。
+    #
+    # 只问本地源要 directory：网络源压根没有这个属性，
+    # 拿 getattr 一律去问会把它们全判成未配置
+    if key == "subtitlelocal" and site.directory is None:
+        logger.debug(f"[字幕] 站点 {key} 未配置本地目录，跳过")
+        return None
+    return site
 
 
 def search(code: str) -> SubtitleItem | None:

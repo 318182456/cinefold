@@ -10,6 +10,7 @@ from app.core.config import get_settings
 from app.database.models import MediaLink
 from app.database.session import session_scope
 from app.modules.subtitle.base import (
+    MIN_SUBTITLE_BYTES,
     SubtitleItem,
     decode_subtitle,
     is_simplified_chinese,
@@ -624,3 +625,198 @@ def test_as_simplified_still_rejects_japanese_and_english():
     assert as_simplified_chinese(SRT_JA) == ""
     assert as_simplified_chinese("Hello world, plain english subtitle") == ""
     assert as_simplified_chinese("") == ""
+
+
+# ----------------------------------------------------------------------
+# 本地字幕库
+# ----------------------------------------------------------------------
+def _srt(lines) -> str:
+    """按行造一段 SRT。"""
+    blocks = []
+    for i, text in enumerate(lines, 1):
+        stamp = f"00:0{i % 10}:01,000 --> 00:0{i % 10}:04,000"
+        blocks.append(f"{i}\n{stamp}\n{text}\n")
+    return "\n".join(blocks)
+
+
+_LOCAL_ZH = _srt([
+    "我们说过这个问题还没有解决",
+    "他来的时候对我说学校已经开门了",
+    "这个国家将要实现给认识的话请让边远地区",
+    "她的脸颊有点热，爱人在剧场里等着",
+])
+_LOCAL_TW = _srt([
+    "我們說過這個問題還沒有解決",
+    "他來的時候對我說學校已經開門了",
+    "這個國家將要實現給認識的話請讓邊遠地區",
+    "她的臉頰有點熱，愛人在劇場裡等著",
+])
+_LOCAL_JA = _srt([
+    "私はあなたのことが好きです",
+    "今日は学校に行きましたが誰もいませんでした",
+    "彼女は本を読んでいる時間が長いですね",
+    "明日の天気はどうなるか分かりません",
+])
+
+
+@pytest.fixture
+def subs_dir(tmp_path):
+    """造一个本地字幕库，文件名刻意带上真实世界的噪声。"""
+    d = tmp_path / "subs"
+    (d / "brand").mkdir(parents=True)
+    (d / "SSNI-497（迅雷）.srt").write_text(_LOCAL_ZH, encoding="utf-8")
+    (d / "brand" / "SONE-895 (1).ass").write_text(_LOCAL_ZH, encoding="utf-8")
+    (d / "MIDE-123.srt").write_text(_LOCAL_TW, encoding="utf-8")
+    (d / "ABP-984.srt").write_bytes(_LOCAL_ZH.encode("gb18030"))
+    (d / "JUL-555.srt").write_text(_LOCAL_JA, encoding="utf-8")
+    (d / "readme.txt").write_text("这不是字幕" * 50, encoding="utf-8")
+    return d
+
+
+def _local(directory):
+    from app.modules.subtitle.local import LocalSubtitle
+
+    return LocalSubtitle(str(directory))
+
+
+def test_local_matches_dirty_filenames(subs_dir):
+    """下载来的文件名常挂着来源噪声，番号仍要认得出。"""
+    site = _local(subs_dir)
+
+    assert site.search("SSNI-497").title == "SSNI-497（迅雷）.srt"
+    # 没有横杠、小写，都要归一化到同一个番号
+    assert site.search("ssni497") is not None
+    assert site.search("SSNI497") is not None
+    # 子目录里的也要扫到，且扩展名按原文件保留
+    item = site.search("SONE-895")
+    assert item is not None
+    assert item.suffix == ".ass"
+
+
+def test_local_falls_back_to_stripped_version(subs_dir):
+    """媒体库里是 SSNI-497-C，素材库里只有 SSNI-497，那是同一部片。"""
+    site = _local(subs_dir)
+
+    item = site.search("SSNI-497-C")
+    assert item is not None
+    assert item.title == "SSNI-497（迅雷）.srt"
+    # 落盘用的番号仍是媒体库那边的写法
+    assert item.code == "SSNI-497-C"
+
+
+def test_strip_version_peels_stacked_suffixes():
+    from app.modules.subtitle.local import _strip_version
+
+    assert _strip_version("SSNI-497-C") == "SSNI-497"
+    assert _strip_version("SSNI-497-UC") == "SSNI-497"
+    assert _strip_version("SSNI-497-CD1") == "SSNI-497"
+    assert _strip_version("SSNI-497-1080P") == "SSNI-497"
+    # 叠了两层也要还原
+    assert _strip_version("SSNI-497-UC-CD1") == "SSNI-497"
+    # 没有后缀时原样返回
+    assert _strip_version("SSNI-497") == "SSNI-497"
+
+
+def test_local_converts_traditional_and_decodes_gbk(subs_dir):
+    """本地文件的编码同样杂，繁体同样要转简。"""
+    site = _local(subs_dir)
+
+    assert "我们说过" in site.search("MIDE-123").content
+    assert "我们说过" in site.search("ABP-984").content
+
+
+def test_local_rejects_japanese_and_non_subtitles(subs_dir):
+    site = _local(subs_dir)
+
+    # 日文是「看不懂」，不是字形问题，转不出来
+    assert site.search("JUL-555") is None
+    # .txt 压根不进索引
+    assert all(".txt" not in str(p) for p in site._ensure_index().values())
+
+
+def test_local_accepts_short_subtitle(tmp_path):
+    """本地文件不套网络源那道 200 字节下限 —— 那是防站点空壳错误页的。"""
+    d = tmp_path / "subs"
+    d.mkdir()
+    # 只放一条：既要小于 200 字节，又要有 20 个以上汉字过语言判定
+    short = _srt(["我们说过这个问题还没解决他来时对我说开门了"])
+    # 写字节而不是 write_text：后者在 Windows 上会把换行换成 CRLF，
+    # 文件因此胖出十几字节，而这条用例本来就是卡在门槛边上的
+    target = d / "SSNI-497.srt"
+    target.write_bytes(short.encode("utf-8"))
+    # 前提：确实小于网络源那道下限，否则这条用例没在测它想测的东西
+    assert len(target.read_bytes()) < MIN_SUBTITLE_BYTES
+
+    assert _local(d).search("SSNI-497") is not None
+
+
+def test_local_rejects_empty_file(tmp_path):
+    d = tmp_path / "subs"
+    d.mkdir()
+    (d / "SSNI-497.srt").write_bytes(b"")
+
+    assert _local(d).search("SSNI-497") is None
+
+
+def test_local_indexes_directory_once(subs_dir, monkeypatch):
+    """目录里可能有几千个文件，一轮补漏只该扫一遍。"""
+    site = _local(subs_dir)
+    calls = []
+    original = site._build_index
+
+    def counted():
+        calls.append(1)
+        return original()
+
+    monkeypatch.setattr(site, "_build_index", counted)
+    site.search("SSNI-497")
+    site.search("MIDE-123")
+    site.search("SONE-895")
+
+    assert len(calls) == 1
+
+
+def test_local_missing_directory_is_not_an_error(tmp_path):
+    """目录没建、盘没挂上时安静跳过，不该让整轮补漏炸掉。"""
+    assert _local(tmp_path / "nope").search("SSNI-497") is None
+
+
+def test_local_unconfigured_source_is_skipped():
+    """没配目录时本地源自己退场，网络源不受影响。"""
+    from app.modules.subtitle import _build
+
+    settings = get_settings()
+    original = settings.subtitle_local_dir
+    settings.subtitle_local_dir = ""
+    try:
+        assert _build("subtitlelocal") is None
+        # 网络源没有 directory 属性，不该被这道检查连带判成未配置
+        assert _build("subtitlecat") is not None
+        assert _build("subtitlegh") is not None
+    finally:
+        settings.subtitle_local_dir = original
+
+
+def test_local_source_is_tried_first():
+    """本地命中就不必跨境请求，所以它必须排在网络源前面。"""
+    from app.modules.subtitle import SUBTITLE_SITES
+
+    assert SUBTITLE_SITES[0] == "subtitlelocal"
+    assert SUBTITLE_SITES.index("subtitlelocal") < SUBTITLE_SITES.index("subtitlecat")
+
+
+def test_local_hit_writes_beside_video(enabled, library, subs_dir):
+    """端到端：本地库命中后，字幕要落到影片旁边。"""
+    settings = get_settings()
+    original = settings.subtitle_local_dir
+    settings.subtitle_local_dir = str(subs_dir)
+    # 素材库里放一份与 library fixture 同番号的字幕
+    (subs_dir / "ABS-001.srt").write_text(_LOCAL_ZH, encoding="utf-8")
+    try:
+        assert service.fetch_for_code("ABS-001") == 1
+    finally:
+        settings.subtitle_local_dir = original
+
+    out = library.parent / f"{library.stem}.zh-CN.srt"
+    assert out.exists()
+    assert "我们说过" in out.read_text(encoding="utf-8")
