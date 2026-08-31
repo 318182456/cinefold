@@ -173,6 +173,8 @@ def cache_remote_codes(items: list[dict]) -> int:
 
     # 番号之外的字段才值得写库，status 之类的状态字段绝不能被远程数据带跑
     skip = {"code", "status", "create_time", "update_time"}
+    # 真正写进去的条数。统计"处理了几条"没有意义 —— 全是重复时也是满数，
+    # 看不出这一轮到底有没有新东西
     saved = 0
 
     with session_scope() as session:
@@ -182,19 +184,22 @@ def cache_remote_codes(items: list[dict]) -> int:
                 continue
 
             row = session.get(Code, code)
+            changed = False
             if row is None:
                 row = Code(code=code)
                 session.add(row)
+                changed = True
 
             for key, value in item.items():
                 if key in skip or not value:
                     continue
                 if hasattr(row, key) and not getattr(row, key):
                     setattr(row, key, value)
-            saved += 1
+                    changed = True
+            saved += changed
 
     if saved:
-        logger.info(f"已缓存 {saved} 个番号情报")
+        logger.debug(f"已缓存 {saved} 个番号情报")
     return saved
 
 

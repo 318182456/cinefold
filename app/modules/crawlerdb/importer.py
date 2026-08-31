@@ -29,6 +29,14 @@ DEFAULT_LIMIT = 5000
 # 每多少条提交一次。整批一个事务的话，中间一条坏数据会让全部回滚
 COMMIT_BATCH = 200
 
+# 增量水位存在 Cache 表的这个 namespace 下
+WATERMARK_NS = "crawlerdb"
+WATERMARK_KEY = "movie_since"
+
+# 水位往回退这么多分钟再查。对方入库和 update_time 落盘之间有时间差，
+# 卡着上次的时刻查会漏掉边界上那几条
+WATERMARK_LAG_MINUTES = 10
+
 # 番号形如 ABP-554 / SSIS-001 / FC2-4869095 / 032426-100（日期式）/
 # T-28579（单字母前缀）/ CARIBBEANCOM-010112-001（长前缀多段）。
 #
@@ -252,11 +260,75 @@ def fetch_movies(limit: int = 0, since: str = "") -> list[dict]:
     return list(merged.values())
 
 
-def import_movies(limit: int = 0, since: str = "") -> int:
-    """导入番号情报，返回落库条数。"""
+def _read_watermark() -> str:
+    """上次导入到哪个时间点。没有记录返回空串，即走全量。
+
+    读不出来（表还没建、库锁着）一律当没有：退化成全量导入是安全的，
+    重复导入本身是幂等的，而让整个任务因为读不到水位就失败不值得。
+    """
+    from sqlalchemy import select
+
+    from app.database.models import Cache
+    from app.database.session import session_scope
+
+    try:
+        with session_scope() as session:
+            row = session.scalar(
+                select(Cache).where(
+                    Cache.namespace == WATERMARK_NS, Cache.key == WATERMARK_KEY
+                )
+            )
+            return (row.content or "") if row else ""
+    except Exception as exc:
+        logger.debug(f"[爬虫库] 读增量水位失败，这轮走全量: {exc}")
+        return ""
+
+
+def _write_watermark(value: str) -> None:
+    """记下这轮导入到哪。写失败只记日志 —— 数据已经入库了，
+    水位没写上顶多下轮多跑一次全量，不该反过来让任务报错。"""
+    from datetime import datetime
+
+    from sqlalchemy import select
+
+    from app.database.models import Cache
+    from app.database.session import session_scope
+
+    try:
+        with session_scope() as session:
+            row = session.scalar(
+                select(Cache).where(
+                    Cache.namespace == WATERMARK_NS, Cache.key == WATERMARK_KEY
+                )
+            )
+            if row is None:
+                session.add(
+                    Cache(namespace=WATERMARK_NS, key=WATERMARK_KEY, content=value)
+                )
+            else:
+                row.content = value
+                row.create_time = datetime.now()
+    except Exception as exc:
+        logger.debug(f"[爬虫库] 写增量水位失败: {exc}")
+
+
+def import_movies(limit: int = 0, since: str = "", full: bool = False) -> int:
+    """导入番号情报，返回落库条数。
+
+    默认走增量：只取上次导入之后变动的行。首次或 full=True 时全量。
+    """
+    from datetime import datetime, timedelta
+
     from app import services
 
     limit = limit or get_settings().crawler_db_limit or DEFAULT_LIMIT
+
+    # 记在查询之前：查询期间对方可能又写入了新行，用查完的时刻当水位
+    # 会把那几条永远漏掉
+    started = datetime.now()
+
+    if not since and not full:
+        since = _read_watermark()
 
     items = fetch_movies(limit=limit, since=since)
     if not items:
@@ -284,7 +356,15 @@ def import_movies(limit: int = 0, since: str = "") -> int:
 
     if failed:
         logger.warning(f"[爬虫库] movie 有 {failed} 条未能入库")
-    logger.info(f"[爬虫库] movie 读到 {len(items)} 条，落库 {saved} 条")
+
+    # 有批次失败就不推进水位：推了的话那些条下轮不会再被查到，等于永久丢失。
+    # 重复导入是幂等的（只补空字段），代价只是多跑一遍
+    if not failed:
+        watermark = (started - timedelta(minutes=WATERMARK_LAG_MINUTES))
+        _write_watermark(watermark.strftime("%Y-%m-%d %H:%M:%S"))
+
+    scope = "全量" if not since else "增量"
+    logger.info(f"[爬虫库] movie {scope}读到 {len(items)} 条，落库 {saved} 条")
     return saved
 
 
@@ -339,20 +419,27 @@ def import_casts(limit: int = 0) -> int:
     for start in range(0, len(items), COMMIT_BATCH):
         batch = items[start:start + COMMIT_BATCH]
         try:
+            changed = 0
             with session_scope() as session:
                 for item in batch:
                     name = item["name"]
                     row = session.get(Actor, name)
+                    touched = False
                     if row is None:
                         row = Actor(name=name)
                         session.add(row)
+                        touched = True
 
                     for key, value in item.items():
                         if key == "name" or not value:
                             continue
                         if hasattr(row, key) and not getattr(row, key):
                             setattr(row, key, value)
-            saved += len(batch)
+                            touched = True
+                    changed += touched
+            # 只算真正写进去的：演员表每轮全量查，报"处理了 1323 条"
+            # 每次都一样，看不出这轮有没有新人
+            saved += changed
         except Exception as exc:
             failed += len(batch)
             logger.warning(f"[爬虫库] 演员第 {start // COMMIT_BATCH + 1} 批落库失败: {exc}")
@@ -364,9 +451,13 @@ def import_casts(limit: int = 0) -> int:
 
 
 # ----------------------------------------------------------------------
-def import_all(limit: int = 0, since: str = "") -> int:
-    """导入番号和演员，返回总条数。"""
-    total = import_movies(limit=limit, since=since)
+def import_all(limit: int = 0, since: str = "", full: bool = False) -> int:
+    """导入番号和演员，返回总条数。
+
+    番号走增量（按 update_time 水位），演员每次全量 —— 只有一千多条，
+    查一次不到一秒，为它单独维护一个水位不划算。
+    """
+    total = import_movies(limit=limit, since=since, full=full)
     try:
         total += import_casts(limit=limit)
     except CrawlerDBError as exc:

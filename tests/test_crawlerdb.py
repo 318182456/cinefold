@@ -208,7 +208,8 @@ class TestImportSemantics:
 
     def test_cast_failure_keeps_movie_result(self, monkeypatch):
         """演员导入失败不该让已经成功的番号导入白跑。"""
-        monkeypatch.setattr(importer, "import_movies", lambda limit=0, since="": 7)
+        monkeypatch.setattr(importer, "import_movies",
+                            lambda limit=0, since="", full=False: 7)
 
         def _boom(limit=0):
             raise importer.CrawlerDBError("模拟失败")
@@ -355,3 +356,80 @@ class TestBatchCommit:
         monkeypatch.setattr(services, "cache_remote_codes", _flaky)
         # 第 2 批的 200 条丢了，第 1、3 批的 250 条还在
         assert importer.import_movies() == 250
+
+
+class TestWatermark:
+    """增量水位：记录上次导入到哪，下次只查之后变动的行。
+
+    比记录每个番号好在源头就少查 —— SQL 只返回变动的几条，
+    而不是拉回 3428 条再本地逐个比对。
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clean(self, monkeypatch):
+        store = {}
+        monkeypatch.setattr(importer, "_read_watermark", lambda: store.get("v", ""))
+        monkeypatch.setattr(importer, "_write_watermark",
+                            lambda v: store.__setitem__("v", v))
+        return store
+
+    def test_first_run_is_full(self, monkeypatch, _clean):
+        """没有水位记录时走全量。"""
+        seen = {}
+        monkeypatch.setattr(importer, "fetch_movies",
+                            lambda limit=0, since="": seen.setdefault("since", since) or [])
+        importer.import_movies()
+        assert seen["since"] == ""
+
+    def test_second_run_uses_watermark(self, monkeypatch, _clean):
+        from app import services
+        monkeypatch.setattr(importer, "fetch_movies",
+                            lambda limit=0, since="": [{"code": "ABP-554"}])
+        monkeypatch.setattr(services, "cache_remote_codes", lambda b: len(b))
+
+        importer.import_movies()
+        assert _clean["v"]          # 第一轮写下了水位
+
+        seen = {}
+        monkeypatch.setattr(importer, "fetch_movies",
+                            lambda limit=0, since="": seen.setdefault("since", since) or [])
+        importer.import_movies()
+        assert seen["since"] == _clean["v"]
+
+    def test_full_flag_ignores_watermark(self, monkeypatch, _clean):
+        """full=True 时无视水位，用于重新拉一遍。"""
+        _clean["v"] = "2026-01-01 00:00:00"
+        seen = {}
+        monkeypatch.setattr(importer, "fetch_movies",
+                            lambda limit=0, since="": seen.setdefault("since", since) or [])
+        importer.import_movies(full=True)
+        assert seen["since"] == ""
+
+    def test_failure_does_not_advance(self, monkeypatch, _clean):
+        """有批次失败就不推进水位 —— 推了的话那些条下轮查不到，永久丢失。"""
+        from app import services
+        monkeypatch.setattr(importer, "fetch_movies",
+                            lambda limit=0, since="": [{"code": "ABP-554"}])
+
+        def _boom(batch):
+            raise RuntimeError("模拟失败")
+
+        monkeypatch.setattr(services, "cache_remote_codes", _boom)
+        importer.import_movies()
+        assert "v" not in _clean
+
+    def test_watermark_lags_behind(self, monkeypatch, _clean):
+        """水位往回退几分钟：对方入库和 update_time 落盘有时间差，
+        卡着上次的时刻查会漏掉边界上那几条。"""
+        from datetime import datetime
+
+        from app import services
+        monkeypatch.setattr(importer, "fetch_movies",
+                            lambda limit=0, since="": [{"code": "ABP-554"}])
+        monkeypatch.setattr(services, "cache_remote_codes", lambda b: len(b))
+
+        before = datetime.now()
+        importer.import_movies()
+        written = datetime.strptime(_clean["v"], "%Y-%m-%d %H:%M:%S")
+        gap = (before - written).total_seconds() / 60
+        assert 9 <= gap <= 11
