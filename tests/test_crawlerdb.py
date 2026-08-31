@@ -252,3 +252,106 @@ class TestDSNMasked:
         )
         safe = settings.to_safe_dict()
         assert "secret" not in str(safe.get("crawler_db_dsn", ""))
+
+
+class TestDuplicateCodes:
+    """源库同一番号可能有多行（id 不同 number 相同，实测 OLM-332E）。
+
+    落库端按主键逐条 session.get，查不到同批未提交的行，重复番号会变成
+    两条 INSERT，commit 时撞 code_pkey 让整批回滚 —— 实测丢过 973 条。
+    """
+
+    def test_merged_not_duplicated(self, monkeypatch):
+        rows = [
+            {**MOVIE_ROW, "number": "OLM-332E", "series": None},
+            {**MOVIE_ROW, "number": "OLM-332E", "series": "系列名"},
+        ]
+        monkeypatch.setattr(importer, "_query", lambda *a, **k: rows)
+        items = importer.fetch_movies()
+        assert len(items) == 1
+
+    def test_merge_fills_gaps(self, monkeypatch):
+        """同番号的几行往往互补，只取第一条会平白丢字段。"""
+        rows = [
+            {**MOVIE_ROW, "number": "OLM-332E", "series": None, "producer": "A"},
+            {**MOVIE_ROW, "number": "OLM-332E", "series": "系列名", "producer": "B"},
+        ]
+        monkeypatch.setattr(importer, "_query", lambda *a, **k: rows)
+        item = importer.fetch_movies()[0]
+        assert item["series"] == "系列名"   # 第一条缺，用第二条补上
+        assert item["producer"] == "A"      # 第一条有，不被覆盖
+
+    def test_casts_deduped_too(self, monkeypatch):
+        """本地 Actor 主键是 name，源表主键是 id，同名会撞 actor_pkey。"""
+        rows = [
+            {"name": "伊藤舞雪", "cn_name": None, "photo": "a.jpg"},
+            {"name": "伊藤舞雪", "cn_name": "伊藤舞雪", "photo": None},
+        ]
+        monkeypatch.setattr(importer, "_query", lambda *a, **k: rows)
+        items = importer.fetch_casts()
+        assert len(items) == 1
+        assert items[0]["photo"] == "a.jpg"
+        assert items[0]["name_2"] == "伊藤舞雪"
+
+
+class TestCodeFormats:
+    """正则卡太严会误杀正经番号 —— 实测被丢掉 42 行。"""
+
+    @pytest.mark.parametrize("code", [
+        "T-28579",                  # 单字母前缀
+        "N-1234",
+        "CARIBBEANCOM-010112-001",  # 长前缀多段
+        "032426-100",               # 日期式
+        "HEYZO-3807",
+        "FC2-4869095",
+        "OLM-332E",                 # 尾部字母
+        "259LUXU-1234",
+    ])
+    def test_accepted(self, code):
+        assert importer._normalize_code(code) == code
+
+    def test_underscore_normalized_to_hyphen(self):
+        """下划线统一成横线，跟本地番号写法一致。"""
+        assert importer._normalize_code("1PONDO-012345_678") == "1PONDO-012345-678"
+
+    @pytest.mark.parametrize("code", [
+        "", "不是番号", "https://example.com/x", "12345",
+    ])
+    def test_still_rejected(self, code):
+        """放宽不等于全收，明显的脏数据仍要挡住。"""
+        assert importer._normalize_code(code) == ""
+
+
+class TestBatchCommit:
+    """整批一个事务的话，中间一条坏数据会让全部回滚。"""
+
+    def test_split_into_batches(self, monkeypatch):
+        from app import services
+
+        items = [{"code": f"ABP-{i:04d}", "title": "x"} for i in range(450)]
+        monkeypatch.setattr(importer, "fetch_movies", lambda limit=0, since="": items)
+
+        sizes = []
+        monkeypatch.setattr(services, "cache_remote_codes",
+                            lambda batch: sizes.append(len(batch)) or len(batch))
+        assert importer.import_movies() == 450
+        assert sizes == [200, 200, 50]
+
+    def test_one_bad_batch_does_not_lose_the_rest(self, monkeypatch):
+        """坏数据只连累同批的那几百条，其余照常入库。"""
+        from app import services
+
+        items = [{"code": f"ABP-{i:04d}", "title": "x"} for i in range(450)]
+        monkeypatch.setattr(importer, "fetch_movies", lambda limit=0, since="": items)
+
+        calls = {"n": 0}
+
+        def _flaky(batch):
+            calls["n"] += 1
+            if calls["n"] == 2:
+                raise RuntimeError("模拟约束冲突")
+            return len(batch)
+
+        monkeypatch.setattr(services, "cache_remote_codes", _flaky)
+        # 第 2 批的 200 条丢了，第 1、3 批的 250 条还在
+        assert importer.import_movies() == 250

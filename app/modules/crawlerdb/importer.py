@@ -26,9 +26,16 @@ from app.core.config import get_settings
 # 单次任务最多导入多少条，防止首次全量把库和日志刷爆。0 表示不限
 DEFAULT_LIMIT = 5000
 
-# 番号形如 ABP-554 / SSIS-001 / FC2-4869095。
-# movie.number 实测已经是这个格式（Immortal 侧归一化过），这里只做兜底校验
-CODE_RE = re.compile(r"^[A-Z0-9]{2,10}(?:-[A-Z0-9]+){1,3}$")
+# 每多少条提交一次。整批一个事务的话，中间一条坏数据会让全部回滚
+COMMIT_BATCH = 200
+
+# 番号形如 ABP-554 / SSIS-001 / FC2-4869095 / 032426-100（日期式）/
+# T-28579（单字母前缀）/ CARIBBEANCOM-010112-001（长前缀多段）。
+#
+# movie.number 实测已经是规范格式（Immortal 侧归一化过），这里只做兜底：
+# 拦掉明显不是番号的脏数据，而不是替对方做格式判断 —— 卡太严会把
+# 单字母前缀和长前缀的正经番号一起丢掉（实测被误杀 42 行）。
+CODE_RE = re.compile(r"^[A-Z0-9]{1,16}(?:-[A-Z0-9_]+){1,3}$")
 
 # movie 列 → 本地 Code 列。按实测样本确定，几处容易取错的：
 #
@@ -207,8 +214,16 @@ def fetch_movies(limit: int = 0, since: str = "") -> list[dict]:
         sql += " LIMIT %s"
         params.append(limit)
 
-    items: list[dict] = []
+    # 番号去重：源库同一个番号可能有多行（id 不同、number 相同，实测存在，
+    # 如 OLM-332E）。落库端按主键逐条 session.get 查不到同批未提交的行，
+    # 重复番号会变成两条 INSERT，commit 时撞 code_pkey 让整批回滚。
+    #
+    # 合并而不是只留一条：同番号的几行往往互补（一行有封面没系列，
+    # 另一行反过来），只取第一条会平白丢掉后面那些字段
+    merged: dict[str, dict] = {}
     dropped = 0
+    duplicated = 0
+
     for row in _query(sql, params):
         item = _row_to_item(row, MOVIE_FIELDS)
         code = _normalize_code(item.get("code"))
@@ -216,13 +231,25 @@ def fetch_movies(limit: int = 0, since: str = "") -> list[dict]:
             dropped += 1
             continue
         item["code"] = code
-        items.append(item)
+
+        exist = merged.get(code)
+        if exist is None:
+            merged[code] = item
+            continue
+
+        duplicated += 1
+        # 先到的优先（按 id 升序，即先入库的那条），后来的只补空缺
+        for key, value in item.items():
+            exist.setdefault(key, value)
 
     if dropped:
         # 丢掉多少要说出来。静默跳过的话，「导入 0 条」和
         # 「番号列取错了」看起来一模一样
         logger.warning(f"[爬虫库] {dropped} 行番号格式不合法，已跳过")
-    return items
+    if duplicated:
+        logger.info(f"[爬虫库] 合并了 {duplicated} 行重复番号")
+
+    return list(merged.values())
 
 
 def import_movies(limit: int = 0, since: str = "") -> int:
@@ -236,9 +263,27 @@ def import_movies(limit: int = 0, since: str = "") -> int:
         logger.info("[爬虫库] 没有可导入的番号")
         return 0
 
-    # 复用 cache_remote_codes：只补空字段、不动 status。前者保住本地已翻译的
-    # cn_title 和刮削过的数据，后者保证导入不会让番号自动进下载流程
-    saved = services.cache_remote_codes(items)
+    # 分批提交。cache_remote_codes 一个事务写完整批，中间任何一条出问题
+    # （字段超长、编码异常等）都会让整批回滚 —— 实测撞过一次主键冲突，
+    # 973 条全部丢失。切小之后坏数据只连累同批的几百条，其余照常入库
+    saved = 0
+    failed = 0
+    for start in range(0, len(items), COMMIT_BATCH):
+        batch = items[start:start + COMMIT_BATCH]
+        try:
+            # 复用 cache_remote_codes：只补空字段、不动 status。前者保住
+            # 本地已翻译的 cn_title 和刮削过的数据，后者保证导入不会让
+            # 番号自动进下载流程
+            saved += services.cache_remote_codes(batch)
+        except Exception as exc:
+            failed += len(batch)
+            logger.warning(
+                f"[爬虫库] 第 {start // COMMIT_BATCH + 1} 批落库失败"
+                f"（{len(batch)} 条）: {exc}"
+            )
+
+    if failed:
+        logger.warning(f"[爬虫库] movie 有 {failed} 条未能入库")
     logger.info(f"[爬虫库] movie 读到 {len(items)} 条，落库 {saved} 条")
     return saved
 
@@ -256,13 +301,22 @@ def fetch_casts(limit: int = 0) -> list[dict]:
         sql += " LIMIT %s"
         params.append(limit)
 
-    items: list[dict] = []
+    # 与番号同理：源表主键是 id，同名演员可能有多行，而本地主键是 name。
+    # 不去重会在 commit 时撞 actor_pkey
+    merged: dict[str, dict] = {}
     for row in _query(sql, params):
         item = _row_to_item(row, CAST_FIELDS)
         # name 是本地主键，没有就整条丢掉
-        if item.get("name"):
-            items.append(item)
-    return items
+        name = item.get("name")
+        if not name:
+            continue
+        exist = merged.get(name)
+        if exist is None:
+            merged[name] = item
+        else:
+            for key, value in item.items():
+                exist.setdefault(key, value)
+    return list(merged.values())
 
 
 def import_casts(limit: int = 0) -> int:
@@ -279,22 +333,32 @@ def import_casts(limit: int = 0) -> int:
         logger.info("[爬虫库] 没有可导入的演员")
         return 0
 
+    # 与番号同样分批：一条坏数据不该连累整批
     saved = 0
-    with session_scope() as session:
-        for item in items:
-            name = item["name"]
-            row = session.get(Actor, name)
-            if row is None:
-                row = Actor(name=name)
-                session.add(row)
+    failed = 0
+    for start in range(0, len(items), COMMIT_BATCH):
+        batch = items[start:start + COMMIT_BATCH]
+        try:
+            with session_scope() as session:
+                for item in batch:
+                    name = item["name"]
+                    row = session.get(Actor, name)
+                    if row is None:
+                        row = Actor(name=name)
+                        session.add(row)
 
-            for key, value in item.items():
-                if key == "name" or not value:
-                    continue
-                if hasattr(row, key) and not getattr(row, key):
-                    setattr(row, key, value)
-            saved += 1
+                    for key, value in item.items():
+                        if key == "name" or not value:
+                            continue
+                        if hasattr(row, key) and not getattr(row, key):
+                            setattr(row, key, value)
+            saved += len(batch)
+        except Exception as exc:
+            failed += len(batch)
+            logger.warning(f"[爬虫库] 演员第 {start // COMMIT_BATCH + 1} 批落库失败: {exc}")
 
+    if failed:
+        logger.warning(f"[爬虫库] cast 有 {failed} 条未能入库")
     logger.info(f"[爬虫库] cast 读到 {len(items)} 条，落库 {saved} 条")
     return saved
 
