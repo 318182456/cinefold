@@ -37,6 +37,11 @@ const batching = ref(false)
 const batchConfirm = ref('')
 
 const pickedCount = computed(() => picked.value.size)
+// 选中记录的体积合计。孤儿一览按 link_path 选，同一份数据被选中多条时
+// 仍要去重，否则报出的"可腾出空间"会虚高
+const pickedSize = computed(() =>
+  sumSize(items.value.filter((i) => picked.value.has(i.link_path))),
+)
 const allPicked = computed(
   () => items.value.length > 0 && items.value.every((i) => picked.value.has(i.link_path)),
 )
@@ -101,11 +106,44 @@ const grouped = computed(() => {
     // 部分命中要能看出来 —— 分类目录各放一份时，只有一处有字幕就该补
     subtitled: links.filter((l) => l.has_subtitle).length,
     liveCount: links.filter((l) => l.link_exists).length,
+    // 这一组占多少磁盘。同 inode 的多条链接共享一份数据，去重后再加，
+    // 否则分类目录各放一份会把体积算成好几倍
+    size: sumSize(links),
   }))
 })
 
 function fileName(path) {
   return (path || '').split(/[\\/]/).pop() || path
+}
+
+// 字节数转可读体积。影片动辄几个 G，主力单位是 GB
+function formatSize(bytes) {
+  if (bytes === null || bytes === undefined) return ''
+  if (!bytes) return '0 B'
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  let value = bytes
+  let unit = 0
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024
+    unit += 1
+  }
+  return `${value.toFixed(value >= 10 || unit === 0 ? 0 : 1)} ${units[unit]}`
+}
+
+// 一组链接实际占用的字节数。硬链接共享 inode，同一份数据在多个分类目录
+// 里各有一条记录，直接相加会算成好几倍 —— 按 inode 去重后再累加。
+// inode 缺失时（跨文件系统）退回按源文件路径去重
+function sumSize(links) {
+  const seen = new Set()
+  let total = 0
+  links.forEach((l) => {
+    if (l.size === null || l.size === undefined) return
+    const key = l.inode ? `${l.device}:${l.inode}` : `p:${l.source_path}`
+    if (seen.has(key)) return
+    seen.add(key)
+    total += l.size
+  })
+  return total
 }
 
 function shortTime(value) {
@@ -200,9 +238,19 @@ async function loadStats() {
 async function loadMissing() {
   missingLoading.value = true
   try {
-    missing.value = (await getMediaLinkStats(true)).missing
+    const data = await getMediaLinkStats(true)
+    missing.value = data.missing
+    // 占用总量也出自这一趟探测。前三个数由 loadStats 先填好，
+    // 这里只补上慢的那两个，别把已显示的覆盖成 undefined
+    if (stats.value) {
+      stats.value.size_bytes = data.size_bytes
+      stats.value.size_files = data.size_files
+    } else {
+      stats.value = data
+    }
   } catch {
     missing.value = null
+    if (stats.value) stats.value.size_bytes = null
   } finally {
     missingLoading.value = false
   }
@@ -452,7 +500,7 @@ onMounted(() => {
 <template>
   <div class="space-y-4">
     <!-- 概览 -->
-    <div class="grid gap-3 sm:grid-cols-4">
+    <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
       <div class="card">
         <p class="text-xs text-gray-500">关联总数</p>
         <p class="mt-1 text-xl font-semibold text-gray-200">{{ stats?.total ?? '—' }}</p>
@@ -460,6 +508,25 @@ onMounted(() => {
       <div class="card">
         <p class="text-xs text-gray-500">涉及番号</p>
         <p class="mt-1 text-xl font-semibold text-gray-200">{{ stats?.codes ?? '—' }}</p>
+      </div>
+      <div class="card">
+        <p class="text-xs text-gray-500">占用空间</p>
+        <!-- 与「文件已丢失」同一批磁盘探测得出，一起显示占位 -->
+        <p v-if="missingLoading" class="mt-1 text-xl font-semibold text-gray-500">检测中…</p>
+        <p
+          v-else-if="stats?.size_bytes === null || stats?.size_bytes === undefined"
+          class="mt-1 text-xl font-semibold text-gray-200"
+        >
+          —
+        </p>
+        <p
+          v-else
+          class="mt-1 text-xl font-semibold text-gray-200"
+          :title="`按 inode 去重后的实际占用，已统计 ${stats.size_files} 个文件。`
+            + '硬链接与源文件共享同一份数据，不重复计算'"
+        >
+          {{ formatSize(stats.size_bytes) }}
+        </p>
       </div>
       <div class="card">
         <p class="text-xs text-gray-500">文件已丢失</p>
@@ -578,7 +645,11 @@ onMounted(() => {
         <button class="btn-ghost px-3 py-1 text-xs" @click="togglePickAll">
           {{ allPicked ? '取消本页全选' : '本页全选' }}
         </button>
-        <span class="text-xs tabular-nums text-gray-500">已选 {{ pickedCount }}</span>
+        <span class="text-xs tabular-nums text-gray-500">
+          已选 {{ pickedCount }}
+          <!-- 删掉能腾出多少空间。批量删除前最想确认的就是这个数 -->
+          <span v-if="pickedSize" class="text-gray-400">· {{ formatSize(pickedSize) }}</span>
+        </span>
         <button
           v-if="pickedCount"
           class="btn-ghost px-3 py-1 text-xs"
@@ -625,6 +696,13 @@ onMounted(() => {
             </span>
             <span v-if="item.torrent_gone" class="badge bg-amber-950/60 text-amber-300">
               种子已删
+            </span>
+            <span
+              v-if="item.size !== null && item.size !== undefined"
+              class="badge bg-gray-800 text-gray-400"
+              title="媒体库侧文件大小"
+            >
+              {{ formatSize(item.size) }}
             </span>
             <button
               class="btn-ghost ml-auto px-2 py-0.5 text-[11px] text-red-400 hover:bg-red-950/40"
@@ -709,6 +787,16 @@ onMounted(() => {
           <span class="badge bg-gray-800 text-gray-400">
             {{ group.links.length }} 条链接
           </span>
+          <!-- 这一组占多少空间。多条链接指向同一份数据时只算一次 -->
+          <span
+            v-if="group.size"
+            class="badge bg-gray-800 text-gray-400"
+            :title="group.links.length > 1
+              ? '去重后的实际占用：多条硬链接指向同一份数据，只算一次'
+              : '文件大小'"
+          >
+            {{ formatSize(group.size) }}
+          </span>
           <span
             v-if="group.links[0].torrent_count"
             class="badge bg-gray-800 text-gray-400"
@@ -766,8 +854,16 @@ onMounted(() => {
               :title="link.link_exists ? '硬链接存在' : '硬链接已丢失'"
             />
             <div class="min-w-0 flex-1">
-              <p class="truncate text-xs text-gray-300" :title="link.link_path">
-                {{ fileName(link.link_path) }}
+              <p class="flex items-baseline gap-2 text-xs text-gray-300">
+                <span class="truncate" :title="link.link_path">
+                  {{ fileName(link.link_path) }}
+                </span>
+                <span
+                  v-if="link.size !== null && link.size !== undefined"
+                  class="shrink-0 font-mono text-[11px] text-gray-500"
+                >
+                  {{ formatSize(link.size) }}
+                </span>
               </p>
               <p class="truncate text-[11px] text-gray-600" :title="link.link_path">
                 {{ link.link_path }}

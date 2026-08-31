@@ -88,6 +88,31 @@ def _invalidate(*paths: str) -> None:
     for path in paths:
         _exists_cache.pop(path, None)
         _subtitle_cache.pop(path, None)
+        _size_cache.pop(path, None)
+
+
+# 文件大小的探测缓存。与 exists 同为一次 stat，同一挂载点上代价一样，
+# 沿用同样的 TTL。影片体积在入库后就不会变了，缓存足够安全
+_size_cache: dict[str, tuple[float, int | None]] = {}
+
+
+def _size(path: str) -> int | None:
+    """文件字节数。取不到（不存在、跨容器挂载缺失）返回 None，
+    与 0 字节区分开 —— 前者是"不知道"，后者是"确实是空文件"。"""
+    try:
+        return Path(path).stat().st_size
+    except OSError:
+        return None
+
+
+def _size_cached(path: str) -> int | None:
+    now = time.monotonic()
+    hit = _size_cache.get(path)
+    if hit is not None and now - hit[0] < _EXISTS_TTL:
+        return hit[1]
+    value = _size(path)
+    _size_cache[path] = (now, value)
+    return value
 
 
 # 字幕探测要列一次目录，比 exists 贵，但同样是"看一眼磁盘"，沿用同样的
@@ -148,11 +173,76 @@ def _missing_links(force: bool = False) -> set[str]:
     return missing
 
 
+# 占用总量的缓存。与 _missing_links 一样是全表探测，同等代价同等 TTL
+_total_size_cache: tuple[float, dict] | None = None
+
+
+def _total_size(force: bool = False) -> dict:
+    """媒体库里这些关联实际占了多少磁盘。
+
+    硬链接与源文件共享同一份数据，两边各 stat 一次再相加会把每部片子
+    算成两倍。真正占用的是"有多少个不同的 inode"，所以按 (device, inode)
+    去重后再累加 —— 同一部片子在分类目录里放了三份链接，也只算一次。
+
+    inode 取不到时（跨文件系统、Windows 上 st_ino 为 0）退回按路径去重：
+    宁可少算不重复算，页面上的数只用于估个量级。
+    """
+    global _total_size_cache
+
+    now = time.monotonic()
+    if (
+        not force and _total_size_cache is not None
+        and now - _total_size_cache[0] < _STATS_TTL
+    ):
+        return _total_size_cache[1]
+
+    with session_scope() as session:
+        rows = session.execute(
+            select(
+                MediaLink.link_path, MediaLink.source_path,
+                MediaLink.inode, MediaLink.device,
+            )
+        ).all()
+
+    # 只探一侧：共享 inode 的两个路径大小相同，链接不在就问源文件。
+    # 按 inode 去重后再探，同一份数据的多条链接只 stat 一次
+    probe: dict[tuple, str] = {}
+    for link, source, inode, device in rows:
+        key = (device, inode) if inode else ("path", link)
+        if key in probe:
+            continue
+        path = link if _exists_cached(link) else source
+        if path:
+            probe[key] = path
+
+    paths = list({p for p in probe.values()})
+    with ThreadPoolExecutor(max_workers=_PROBE_WORKERS) as pool:
+        probed = dict(zip(paths, pool.map(_size_cached, paths)))
+
+    total = 0
+    counted = 0
+    for path in probe.values():
+        size = probed.get(path)
+        if size is None:
+            continue
+        total += size
+        counted += 1
+
+    result = {
+        "bytes": total,
+        # 实际算进去的文件数。与关联总数的差额就是探不到大小的那些
+        "files": counted,
+    }
+    _total_size_cache = (now, result)
+    return result
+
+
 def _drop_stats_cache() -> None:
     """失效全部扫描缓存。删过文件或记录之后必须调，否则页面还显示旧结论。"""
-    global _missing_cache, _orphan_cache
+    global _missing_cache, _orphan_cache, _total_size_cache
     _missing_cache = None
     _orphan_cache = None
+    _total_size_cache = None
 
 
 def _attach_holds(items: list[dict], grace: int) -> None:
@@ -253,6 +343,19 @@ def list_medialinks(
             with ThreadPoolExecutor(max_workers=_PROBE_WORKERS) as pool:
                 subtitled = dict(zip(live, pool.map(_has_subtitle_cached, live)))
 
+        # 体积同样是一次 stat，并发探。硬链接与源文件共享 inode，
+        # 大小必然相同，所以只探还在的那一侧就够：链接没了就问源文件，
+        # 两边都没了才算未知。省掉一半往返
+        probe = [
+            r.link_path if _exists_cached(r.link_path) else r.source_path
+            for r in rows
+        ]
+        sizes: dict[str, int | None] = {}
+        targets = list({p for p in probe if p})
+        if targets:
+            with ThreadPoolExecutor(max_workers=_PROBE_WORKERS) as pool:
+                sizes = dict(zip(targets, pool.map(_size_cached, targets)))
+
         page_items = [{
             "link_path": r.link_path,
             "code": r.code,
@@ -263,7 +366,9 @@ def list_medialinks(
             "link_exists": _exists_cached(r.link_path),
             "source_exists": _exists_cached(r.source_path),
             "has_subtitle": subtitled.get(r.link_path, False),
-        } for r in rows]
+            # 字节数。null 表示两侧文件都不在了，探不出来
+            "size": sizes.get(probe[idx]),
+        } for idx, r in enumerate(rows)]
 
     # 种子数与文件名别名都按番号批量查，避免每行一次查询
     codes = {i["code"] for i in page_items}
@@ -397,11 +502,11 @@ def recover_medialinks(
 def medialink_stats(
     check_missing: bool = True, current_user: str = Depends(get_current_user)
 ):
-    """概览：关联总数、番号数、失效数。
+    """概览：关联总数、番号数、失效数、占用总量。
 
-    总数与番号数直接由数据库聚合，不碰磁盘。失效数要逐个探测文件，
-    库大或挂在 NAS 上时明显更慢，走缓存；check_missing=false 可以完全跳过，
-    此时 missing 返回 null。
+    总数与番号数直接由数据库聚合，不碰磁盘。失效数与占用总量要逐个探测
+    文件，库大或挂在 NAS 上时明显更慢，走缓存；check_missing=false 可以
+    完全跳过，此时 missing 与 size 返回 null。
     """
     with session_scope() as session:
         total = session.scalar(select(func.count()).select_from(MediaLink)) or 0
@@ -410,10 +515,15 @@ def medialink_stats(
         ) or 0
 
     missing = len(_missing_links()) if check_missing else None
+    # 与失效数同批探测，共用 _size_cached 的结果，不额外增加一轮 IO
+    size = _total_size() if check_missing else None
     return ResponseEntity.ok({
         "total": total,
         "codes": codes,
         "missing": missing,
+        # 去重后的实际占用。null 表示这次跳过了探测
+        "size_bytes": size["bytes"] if size else None,
+        "size_files": size["files"] if size else None,
         "delete_enabled": get_settings().medialink_delete_enabled,
     })
 

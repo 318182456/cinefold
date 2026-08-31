@@ -1390,3 +1390,59 @@ def test_attach_holds_zero_left_when_grace_passed(clean_holds):
     _attach_holds(items, grace=1800)
 
     assert items[0]["pending_delete"]["seconds_left"] == 0
+
+
+def test_total_size_dedupes_hardlinks(tmp_path):
+    """占用总量按 inode 去重：多条链接指向同一份数据只算一次。
+
+    硬链接与源文件共享 inode，两侧各 stat 一次再相加会把每部片子算成
+    两倍；同一部片子在多个分类目录里各放一条链接则会翻更多倍。
+    这个页面的数是给人判断"占了多少盘"用的，翻倍就没有意义了。
+    """
+    from app.api.endpoints import medialink as api
+
+    source = tmp_path / "src.mp4"
+    source.write_bytes(b"x" * 3000)
+    library = tmp_path / "lib"
+    library.mkdir()
+    # 同一份数据两条硬链接
+    first = library / "one.mp4"
+    second = library / "two.mp4"
+    os.link(source, first)
+    os.link(source, second)
+    # 另一部独立的片子
+    other_src = tmp_path / "other.mp4"
+    other_src.write_bytes(b"y" * 500)
+    other_link = library / "other.mp4"
+    os.link(other_src, other_link)
+
+    st, st_other = first.stat(), other_link.stat()
+    paths = [str(first), str(second), str(other_link)]
+    with session_scope() as session:
+        for path, src, stat in (
+            (str(first), str(source), st),
+            (str(second), str(source), st),
+            (str(other_link), str(other_src), st_other),
+        ):
+            session.merge(MediaLink(
+                link_path=path,
+                code="SIZE-" + Path(path).stem,
+                source_path=src,
+                inode=stat.st_ino or None,
+                device=stat.st_dev or None,
+            ))
+
+    try:
+        api._drop_stats_cache()
+        api._size_cache.clear()
+        result = api._total_size(force=True)
+        # 3500 而不是 6500（重复计一条链接）或 7000（两侧都算）
+        assert result["bytes"] == 3500
+        assert result["files"] == 2
+    finally:
+        api._drop_stats_cache()
+        with session_scope() as session:
+            for path in paths:
+                row = session.get(MediaLink, path)
+                if row is not None:
+                    session.delete(row)

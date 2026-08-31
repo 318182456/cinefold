@@ -143,6 +143,14 @@ def _norm(path: str) -> str:
     return str(Path(path)).replace("\\", "/").casefold()
 
 
+def _file_size(path: str) -> int | None:
+    """文件字节数。取不到返回 None，与 0 字节的空文件区分开。"""
+    try:
+        return Path(path).stat().st_size
+    except OSError:
+        return None
+
+
 def scan_orphans(refresh_gone_time: bool = True) -> list[dict]:
     """扫出「下载侧已删、媒体库侧仍在」的关联。
 
@@ -249,6 +257,10 @@ def scan_orphans(refresh_gone_time: bool = True) -> list[dict]:
             "code": row["code"],
             "source_path": source_path,
             "inode": row["inode"],
+            # 媒体库侧的体积。这一览里 link_path 必然还在（上面已筛过），
+            # 直接 stat 它即可，不用再判存在性。
+            # 「删了能腾出多少空间」是处置孤儿时最想知道的一件事
+            "size": _file_size(link_path),
             "source_gone": source_gone,
             "torrent_gone": torrent_gone,
             "torrent_hashes": known,
