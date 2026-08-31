@@ -26,7 +26,7 @@ from datetime import datetime
 from pathlib import Path
 
 from loguru import logger
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.core.config import get_settings
 from app.database.models import Code, CodeStatus, History, MediaLink, PendingDelete
@@ -228,6 +228,81 @@ def mark_completed(code: str, session=None) -> bool:
         return _apply(own)
 
 
+def _probe_size(path: str) -> int | None:
+    """文件字节数。取不到返回 None —— 与 0（真的是空文件）区分开。"""
+    try:
+        return Path(path).stat().st_size
+    except OSError:
+        return None
+
+
+def refresh_sizes(limit: int = 500, force: bool = False) -> dict:
+    """回填 media_link 的大小与字幕状态。
+
+    存量记录（升级上来的）这两列是空的，页面要排序筛选就得有值。
+    每轮只处理 limit 条没探过的，由对账任务反复调用，慢慢把库填满 ——
+    一次全量扫几千条挂在 NAS 上会把对账拖成分钟级。
+
+    force 为真时连已探过的也重新探一遍，用于文件真被换掉之后的手工校准。
+
+    大小只探还在的那一侧：硬链接与源文件共享 inode，大小必然相同。
+    两侧都没了就留空，不写 0 —— 那会让它排在"最小"里，而它其实是未知。
+    """
+    from app.services.subtitle import has_subtitle
+
+    with session_scope() as session:
+        stmt = select(MediaLink)
+        if not force:
+            # 只挑没探过的。已经有值的不重复走磁盘
+            stmt = stmt.where(MediaLink.size_probe_time.is_(None))
+        rows = list(session.scalars(stmt.limit(limit)).all())
+
+        if not rows:
+            return {"probed": 0, "sized": 0, "remaining": 0}
+
+        now = datetime.now()
+        sized = 0
+        # 同 inode 的多条链接共享一份数据，大小只探一次
+        by_key: dict[tuple, int | None] = {}
+        for row in rows:
+            key = (row.device, row.inode) if row.inode else ("path", row.link_path)
+            if key not in by_key:
+                target = (
+                    row.link_path if Path(row.link_path).exists()
+                    else row.source_path
+                )
+                by_key[key] = _probe_size(target)
+            size = by_key[key]
+
+            row.size = size
+            row.size_probe_time = now
+            if size is not None:
+                sized += 1
+
+            # 字幕：文件不在就没有字幕可言，不必列目录
+            try:
+                row.has_subtitle = (
+                    has_subtitle(row.link_path)
+                    if Path(row.link_path).exists() else False
+                )
+            except OSError:
+                row.has_subtitle = False
+
+        # 先 flush 再统计：刚写上的 size_probe_time 要算进去，
+        # 否则这一批会被重复计入"剩余未探"
+        session.flush()
+        remaining = session.scalar(
+            select(func.count()).select_from(MediaLink)
+            .where(MediaLink.size_probe_time.is_(None))
+        ) or 0
+
+    logger.info(
+        f"媒体关联体积回填 {len(rows)} 条（取到大小 {sized} 条），"
+        f"剩余未探 {remaining} 条"
+    )
+    return {"probed": len(rows), "sized": sized, "remaining": remaining}
+
+
 def register_scrape(
     code: str, source_path: str, link_path: str = ""
 ) -> list[str]:
@@ -263,6 +338,11 @@ def register_scrape(
     if not unique:
         return []
 
+    # 登记时顺手把大小记下来。这里本来就已经 stat 过源文件（inode 就是
+    # 那次取的），多读一个 st_size 不要钱 —— 比事后回填省一整轮扫盘
+    size = _probe_size(source_path)
+    probed_at = datetime.now() if size is not None else None
+
     with session_scope() as session:
         for path in unique:
             # 同一 link_path 重复刮削时覆盖，保持 source_path 为最新
@@ -272,6 +352,10 @@ def register_scrape(
                 existing.source_path = source_path
                 existing.inode = inode
                 existing.device = device
+                # 探到了才写。探不到时保留旧值，别把已知的大小抹成空
+                if size is not None:
+                    existing.size = size
+                    existing.size_probe_time = probed_at
             else:
                 session.add(MediaLink(
                     link_path=path,
@@ -279,6 +363,8 @@ def register_scrape(
                     source_path=source_path,
                     inode=inode,
                     device=device,
+                    size=size,
+                    size_probe_time=probed_at,
                 ))
 
     logger.info(f"[{code}] 已登记 {len(unique)} 条硬链接关联")

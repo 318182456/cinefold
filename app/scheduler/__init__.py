@@ -256,6 +256,27 @@ def sync_watch_dirs() -> int:
     return len(results)
 
 
+def refresh_link_sizes() -> int:
+    """回填媒体关联的文件大小与字幕状态。
+
+    这两列不入库就没法排序筛选（大小得 stat、字幕得列目录，都下推不成
+    SQL）。新登记的记录在登记时就带上了值，这个任务管的是存量 ——
+    升级上来的库里全是空的。
+
+    每轮只探一批，把回填摊到多轮里。库大又挂在 NAS 上时，一次全量能跑
+    到分钟级，摊开跑对页面响应更友好；探完一轮就不再重复探。
+    """
+    from app.services.medialink import refresh_sizes
+
+    try:
+        result = refresh_sizes()
+    except Exception as exc:
+        logger.exception(f"[任务] 媒体关联体积回填失败: {exc}")
+        return 0
+
+    return result.get("probed", 0)
+
+
 def scan_orphans() -> int:
     """扫描「下载侧已删、媒体库侧仍在」的关联。
 
@@ -410,6 +431,11 @@ INTERVAL_JOBS: dict[str, dict] = {
     # 时间戳，一小时的精度对这个用途完全够，而每轮要拉下载器全量种子清单
     "scan_orphans": {
         "func": scan_orphans, "name": "孤儿关联扫描", "minutes": 60,
+    },
+    # 存量记录的体积/字幕回填。每轮一批，探完就不再动 ——
+    # 全填满之后这个任务基本是空转，留着是为了接住新增的漏网记录
+    "refresh_link_sizes": {
+        "func": refresh_link_sizes, "name": "媒体关联体积回填", "minutes": 30,
     },
     # 开关（SEED_TRANSFER_ENABLED）关着时直接返回，不打下载器接口
     "transfer_seeds": {

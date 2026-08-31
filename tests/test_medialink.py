@@ -1434,8 +1434,10 @@ def test_total_size_dedupes_hardlinks(tmp_path):
 
     try:
         api._drop_stats_cache()
-        api._size_cache.clear()
-        result = api._total_size(force=True)
+        api._exists_cache.clear()
+        # 大小落库后才能聚合，先跑一轮回填
+        medialink.refresh_sizes(force=True)
+        result = api._total_size()
         # 3500 而不是 6500（重复计一条链接）或 7000（两侧都算）
         assert result["bytes"] == 3500
         assert result["files"] == 2
@@ -1443,6 +1445,61 @@ def test_total_size_dedupes_hardlinks(tmp_path):
         api._drop_stats_cache()
         with session_scope() as session:
             for path in paths:
+                row = session.get(MediaLink, path)
+                if row is not None:
+                    session.delete(row)
+
+
+def test_sort_and_filter_by_size(tmp_path):
+    """按大小排序与筛选。都下推成 SQL，不再全表扫盘。"""
+    from app.api import create_app
+    from app.api.endpoints import get_current_user
+    from app.api.endpoints import medialink as api
+    from fastapi.testclient import TestClient
+
+    library = tmp_path / "lib"
+    library.mkdir()
+    # 三部片子，体积递增
+    made = []
+    for name, kb in (("SORT-A", 1), ("SORT-B", 100), ("SORT-C", 3000)):
+        video = library / f"{name}.mp4"
+        video.write_bytes(b"x" * (kb * 1024))
+        made.append(str(video))
+        with session_scope() as session:
+            session.merge(MediaLink(
+                link_path=str(video), code=name, source_path=str(video),
+                inode=None, device=None,
+            ))
+
+    api._drop_stats_cache()
+    api._exists_cache.clear()
+    medialink.refresh_sizes(force=True)
+
+    app = create_app()
+    app.dependency_overrides[get_current_user] = lambda: "tester"
+    client = TestClient(app)
+
+    def codes(**params):
+        payload = client.get("/api/v1/medialinks", params={
+            "keyword": "SORT-", **params,
+        }).json()
+        assert payload["code"] == 200, payload
+        return [i["code"] for i in payload["data"]["items"]]
+
+    try:
+        assert codes(sort="size_desc") == ["SORT-C", "SORT-B", "SORT-A"]
+        assert codes(sort="size_asc") == ["SORT-A", "SORT-B", "SORT-C"]
+        # 番号排序两个方向
+        assert codes(sort="code_asc") == ["SORT-A", "SORT-B", "SORT-C"]
+        assert codes(sort="code_desc") == ["SORT-C", "SORT-B", "SORT-A"]
+        # 体积下限：只剩最大的那部（3000KB ≈ 0.00286 GB）
+        assert codes(min_gb=0.002) == ["SORT-C"]
+        # 上限：把最大的排除掉
+        assert set(codes(max_gb=0.002)) == {"SORT-A", "SORT-B"}
+    finally:
+        api._drop_stats_cache()
+        with session_scope() as session:
+            for path in made:
                 row = session.get(MediaLink, path)
                 if row is not None:
                     session.delete(row)

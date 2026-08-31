@@ -88,31 +88,7 @@ def _invalidate(*paths: str) -> None:
     for path in paths:
         _exists_cache.pop(path, None)
         _subtitle_cache.pop(path, None)
-        _size_cache.pop(path, None)
 
-
-# 文件大小的探测缓存。与 exists 同为一次 stat，同一挂载点上代价一样，
-# 沿用同样的 TTL。影片体积在入库后就不会变了，缓存足够安全
-_size_cache: dict[str, tuple[float, int | None]] = {}
-
-
-def _size(path: str) -> int | None:
-    """文件字节数。取不到（不存在、跨容器挂载缺失）返回 None，
-    与 0 字节区分开 —— 前者是"不知道"，后者是"确实是空文件"。"""
-    try:
-        return Path(path).stat().st_size
-    except OSError:
-        return None
-
-
-def _size_cached(path: str) -> int | None:
-    now = time.monotonic()
-    hit = _size_cache.get(path)
-    if hit is not None and now - hit[0] < _EXISTS_TTL:
-        return hit[1]
-    value = _size(path)
-    _size_cache[path] = (now, value)
-    return value
 
 
 # 字幕探测要列一次目录，比 exists 贵，但同样是"看一眼磁盘"，沿用同样的
@@ -173,76 +149,48 @@ def _missing_links(force: bool = False) -> set[str]:
     return missing
 
 
-# 占用总量的缓存。与 _missing_links 一样是全表探测，同等代价同等 TTL
-_total_size_cache: tuple[float, dict] | None = None
-
-
-def _total_size(force: bool = False) -> dict:
+def _total_size() -> dict:
     """媒体库里这些关联实际占了多少磁盘。
 
-    硬链接与源文件共享同一份数据，两边各 stat 一次再相加会把每部片子
-    算成两倍。真正占用的是"有多少个不同的 inode"，所以按 (device, inode)
-    去重后再累加 —— 同一部片子在分类目录里放了三份链接，也只算一次。
+    大小已落库，这里是纯 SQL 聚合，不碰磁盘。
 
-    inode 取不到时（跨文件系统、Windows 上 st_ino 为 0）退回按路径去重：
-    宁可少算不重复算，页面上的数只用于估个量级。
+    硬链接与源文件共享同一份数据，同一部片子在分类目录里放了三份链接，
+    三条记录的 size 都是同一个值 —— 直接 SUM 会算成三倍。所以按
+    (device, inode) 去重后再累加，每份数据只算一次。
+
+    inode 取不到时（跨文件系统、Windows 上 st_ino 为 0）退回按 link_path
+    去重：宁可少算不重复算，这个数只用于估量级。
     """
-    global _total_size_cache
-
-    now = time.monotonic()
-    if (
-        not force and _total_size_cache is not None
-        and now - _total_size_cache[0] < _STATS_TTL
-    ):
-        return _total_size_cache[1]
-
     with session_scope() as session:
         rows = session.execute(
             select(
-                MediaLink.link_path, MediaLink.source_path,
-                MediaLink.inode, MediaLink.device,
-            )
+                MediaLink.link_path, MediaLink.inode,
+                MediaLink.device, MediaLink.size,
+            ).where(MediaLink.size.is_not(None))
         ).all()
 
-    # 只探一侧：共享 inode 的两个路径大小相同，链接不在就问源文件。
-    # 按 inode 去重后再探，同一份数据的多条链接只 stat 一次
-    probe: dict[tuple, str] = {}
-    for link, source, inode, device in rows:
-        key = (device, inode) if inode else ("path", link)
-        if key in probe:
-            continue
-        path = link if _exists_cached(link) else source
-        if path:
-            probe[key] = path
-
-    paths = list({p for p in probe.values()})
-    with ThreadPoolExecutor(max_workers=_PROBE_WORKERS) as pool:
-        probed = dict(zip(paths, pool.map(_size_cached, paths)))
-
+    seen: set = set()
     total = 0
-    counted = 0
-    for path in probe.values():
-        size = probed.get(path)
-        if size is None:
+    for link, inode, device, size in rows:
+        key = (device, inode) if inode else ("path", link)
+        if key in seen:
             continue
+        seen.add(key)
         total += size
-        counted += 1
 
-    result = {
+    return {
         "bytes": total,
-        # 实际算进去的文件数。与关联总数的差额就是探不到大小的那些
-        "files": counted,
+        # 去重后实际算进去的文件数。与关联总数的差额是共享 inode 的
+        # 重复链接，加上还没探过大小的那些
+        "files": len(seen),
     }
-    _total_size_cache = (now, result)
-    return result
 
 
 def _drop_stats_cache() -> None:
     """失效全部扫描缓存。删过文件或记录之后必须调，否则页面还显示旧结论。"""
-    global _missing_cache, _orphan_cache, _total_size_cache
+    global _missing_cache, _orphan_cache
     _missing_cache = None
     _orphan_cache = None
-    _total_size_cache = None
 
 
 def _attach_holds(items: list[dict], grace: int) -> None:
@@ -282,10 +230,46 @@ def _attach_holds(items: list[dict], grace: int) -> None:
         }
 
 
+def _backfill_rows(session, rows: list) -> None:
+    """给当前页里还没探过的记录就地补上大小与字幕，并写回库。
+
+    存量记录升级上来时这两列为空，等定时任务回填要等到下一轮。页面上
+    该显示的东西不该受回填进度影响，所以看到空值就顺手探一次 ——
+    只探眼前这一页，探完写库，翻回来时已是现成的。
+    """
+    now = datetime.now()
+    # 同 inode 的多条链接共享一份数据，大小只探一次
+    by_key: dict[tuple, int | None] = {}
+    live = [r.link_path for r in rows if _exists_cached(r.link_path)]
+    subtitled: dict[str, bool] = {}
+    if live:
+        with ThreadPoolExecutor(max_workers=_PROBE_WORKERS) as pool:
+            subtitled = dict(zip(live, pool.map(_has_subtitle_cached, live)))
+
+    for row in rows:
+        key = (row.device, row.inode) if row.inode else ("path", row.link_path)
+        if key not in by_key:
+            target = (
+                row.link_path if _exists_cached(row.link_path)
+                else row.source_path
+            )
+            try:
+                by_key[key] = Path(target).stat().st_size
+            except OSError:
+                by_key[key] = None
+        row.size = by_key[key]
+        row.size_probe_time = now
+        row.has_subtitle = subtitled.get(row.link_path, False)
+
+
 @router.get("")
 def list_medialinks(
     keyword: str = "",
     missing_only: bool = False,
+    sort: str = "time",
+    min_gb: float = 0,
+    max_gb: float = 0,
+    subtitle: str = "",
     page: int = 1,
     size: int = 50,
     current_user: str = Depends(get_current_user),
@@ -294,9 +278,19 @@ def list_medialinks(
 
     missing_only 只看文件已不存在的记录 —— 手工删过文件但没走 webhook 时，
     库里会留下这类孤儿记录。这一项需要全表探测文件是否存在，走缓存路径。
+
+    sort 取 time / time_asc / code_asc / code_desc / size_desc / size_asc，
+    默认 time（登记时间倒序，最新在前）。
+    min_gb、max_gb 按体积筛，0 表示这一侧不限。
+    subtitle 取 with（只看有字幕）/ without（只看缺字幕），空表示不筛。
+
+    按番号排序能下推成 SQL，走的还是原来的分页快路径。按大小则不行 ——
+    大小不存库，只能问磁盘 —— 这种情况下改走全表体积索引（同样带缓存），
+    在内存里排完再切页。
     """
     page = max(1, page)
     size = min(max(1, size), 200)
+    want_subtitle = subtitle if subtitle in ("with", "without") else ""
 
     with session_scope() as session:
         stmt = select(MediaLink)
@@ -321,40 +315,65 @@ def list_medialinks(
                     "items": [], "total": 0, "page": page, "size": size,
                     "delete_enabled": get_settings().medialink_delete_enabled,
                     "library_path": get_settings().medialink_library_path,
+                    "sort": sort, "subtitle": want_subtitle,
                 })
             stmt = stmt.where(MediaLink.link_path.in_(stale))
+
+        # 体积筛选。大小已落库，直接下推成 SQL 条件。
+        # 探不到大小的（size 为空）一律排除：留着会混在「大于 5G」里，
+        # 而它究竟多大根本不知道
+        if min_gb > 0:
+            stmt = stmt.where(MediaLink.size >= int(min_gb * 1024 ** 3))
+        if max_gb > 0:
+            stmt = stmt.where(MediaLink.size <= int(max_gb * 1024 ** 3))
+
+        # 字幕筛选。同样已落库。空值（没探过）不算有字幕，
+        # 但也不该混进「缺字幕」—— 那是「不知道」，不是「没有」
+        if want_subtitle == "with":
+            stmt = stmt.where(MediaLink.has_subtitle.is_(True))
+        elif want_subtitle == "without":
+            stmt = stmt.where(MediaLink.has_subtitle.is_(False))
 
         total = session.scalar(
             select(func.count()).select_from(stmt.subquery())
         ) or 0
 
+        # 排序全部下推成 SQL。次序键始终带上 link_path 兜底，否则同番号
+        # 多条链接的相对次序在翻页间不稳定，会重复或漏行
+        if sort == "code_asc":
+            order = (MediaLink.code.asc(), MediaLink.link_path)
+        elif sort == "code_desc":
+            order = (MediaLink.code.desc(), MediaLink.link_path)
+        elif sort == "time_asc":
+            order = (MediaLink.create_time.asc(), MediaLink.link_path)
+        elif sort == "size_desc":
+            # 大小为空的排最后：不知道多大的不该占据「最大」的位置
+            order = (
+                MediaLink.size.is_(None), MediaLink.size.desc(),
+                MediaLink.code, MediaLink.link_path,
+            )
+        elif sort == "size_asc":
+            order = (
+                MediaLink.size.is_(None), MediaLink.size.asc(),
+                MediaLink.code, MediaLink.link_path,
+            )
+        else:
+            order = (MediaLink.create_time.desc(), MediaLink.link_path)
+
         # 分页下推到 SQL：只有当前页的记录会被取出来做存在性探测
         rows = list(session.scalars(
-            stmt.order_by(MediaLink.create_time.desc(), MediaLink.link_path)
+            stmt.order_by(*order)
             .offset((page - 1) * size)
             .limit(size)
         ).all())
 
-        # 字幕探测要逐条列目录，串行跑一页 50 条在 NAS 上能等好几秒。
-        # 与存在性探测同理，并发压下往返时间。文件已不在的不必探
-        live = [r.link_path for r in rows if _exists_cached(r.link_path)]
-        subtitled: dict[str, bool] = {}
-        if live:
-            with ThreadPoolExecutor(max_workers=_PROBE_WORKERS) as pool:
-                subtitled = dict(zip(live, pool.map(_has_subtitle_cached, live)))
-
-        # 体积同样是一次 stat，并发探。硬链接与源文件共享 inode，
-        # 大小必然相同，所以只探还在的那一侧就够：链接没了就问源文件，
-        # 两边都没了才算未知。省掉一半往返
-        probe = [
-            r.link_path if _exists_cached(r.link_path) else r.source_path
-            for r in rows
-        ]
-        sizes: dict[str, int | None] = {}
-        targets = list({p for p in probe if p})
-        if targets:
-            with ThreadPoolExecutor(max_workers=_PROBE_WORKERS) as pool:
-                sizes = dict(zip(targets, pool.map(_size_cached, targets)))
+        # 大小与字幕已落库，正常情况下不再探盘。但存量记录这两列是空的，
+        # 回填要等定时任务轮到 —— 让用户对着空白等半小时不合理。
+        # 所以当前页里没有值的就地补探一次并写回库，只探这一页，
+        # 下次翻回来就已经有值了
+        stale = [r for r in rows if r.size_probe_time is None]
+        if stale:
+            _backfill_rows(session, stale)
 
         page_items = [{
             "link_path": r.link_path,
@@ -365,10 +384,11 @@ def list_medialinks(
             "create_time": r.create_time.isoformat() if r.create_time else "",
             "link_exists": _exists_cached(r.link_path),
             "source_exists": _exists_cached(r.source_path),
-            "has_subtitle": subtitled.get(r.link_path, False),
-            # 字节数。null 表示两侧文件都不在了，探不出来
-            "size": sizes.get(probe[idx]),
-        } for idx, r in enumerate(rows)]
+            # null 表示还没探过，与「确认没有字幕」是两回事
+            "has_subtitle": r.has_subtitle,
+            # 字节数。null 表示还没探过或两侧文件都不在
+            "size": r.size,
+        } for r in rows]
 
     # 种子数与文件名别名都按番号批量查，避免每行一次查询
     codes = {i["code"] for i in page_items}
@@ -404,6 +424,8 @@ def list_medialinks(
         # 页面要据此提示"联动删除未启用，删除只会演练"
         "delete_enabled": settings.medialink_delete_enabled,
         "library_path": settings.medialink_library_path,
+        "sort": sort,
+        "subtitle": want_subtitle,
     })
 
 
@@ -504,26 +526,34 @@ def medialink_stats(
 ):
     """概览：关联总数、番号数、失效数、占用总量。
 
-    总数与番号数直接由数据库聚合，不碰磁盘。失效数与占用总量要逐个探测
-    文件，库大或挂在 NAS 上时明显更慢，走缓存；check_missing=false 可以
-    完全跳过，此时 missing 与 size 返回 null。
+    总数、番号数与占用总量都是纯 SQL 聚合，不碰磁盘 —— 大小已落库。
+    只有失效数仍要逐个探测文件是否还在，库大或挂在 NAS 上时明显更慢，
+    走缓存；check_missing=false 可以跳过，此时 missing 返回 null。
     """
     with session_scope() as session:
         total = session.scalar(select(func.count()).select_from(MediaLink)) or 0
         codes = session.scalar(
             select(func.count(func.distinct(MediaLink.code)))
         ) or 0
+        # 存量记录升级上来时这两列是空的，回填是渐进的，
+        # 页面要能说清「总量还不完整」
+        pending = session.scalar(
+            select(func.count()).select_from(MediaLink)
+            .where(MediaLink.size_probe_time.is_(None))
+        ) or 0
 
     missing = len(_missing_links()) if check_missing else None
-    # 与失效数同批探测，共用 _size_cached 的结果，不额外增加一轮 IO
-    size = _total_size() if check_missing else None
+    # 纯 SQL，无需跟着 check_missing 一起跳过
+    size = _total_size()
     return ResponseEntity.ok({
         "total": total,
         "codes": codes,
         "missing": missing,
-        # 去重后的实际占用。null 表示这次跳过了探测
-        "size_bytes": size["bytes"] if size else None,
-        "size_files": size["files"] if size else None,
+        # 去重后的实际占用
+        "size_bytes": size["bytes"],
+        "size_files": size["files"],
+        # 还没探过大小的记录数。回填没跑完时前端据此提示
+        "size_pending": pending,
         "delete_enabled": get_settings().medialink_delete_enabled,
     })
 
@@ -737,6 +767,29 @@ def drop_record(
 
     _drop_stats_cache()
     return ResponseEntity.ok(message="已删除记录")
+
+
+@router.post("/refresh-sizes")
+def refresh_link_sizes(
+    limit: int = 500, force: bool = False,
+    current_user: str = Depends(get_current_user),
+):
+    """回填文件大小与字幕状态。
+
+    定时任务每半小时跑一批，这里是手动催一把的入口 —— 刚升级上来不想
+    等回填慢慢跑完时用。force 连已探过的也重探，用于文件被换掉后校准。
+    """
+    from app.services.medialink import refresh_sizes
+
+    result = refresh_sizes(limit=min(max(1, limit), 5000), force=force)
+    _drop_stats_cache()
+    return ResponseEntity.ok(
+        result,
+        message=(
+            f"已探测 {result['probed']} 条，"
+            f"剩余 {result['remaining']} 条未探"
+        ),
+    )
 
 
 @router.post("/prune")

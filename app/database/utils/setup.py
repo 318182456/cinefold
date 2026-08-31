@@ -85,6 +85,12 @@ def update_database() -> None:
         # 首次对账扫到消失时才补上 —— 存量记录的真实消失时间早已无从考证，
         # 写个当前时间反而是假数据
         ("media_link", "source_gone_time", "TIMESTAMP"),
+        # 文件大小与字幕状态。存量行为空，等于「还没探过」，
+        # 由对账任务与页面访问顺带回填 —— 不写默认 0，那会让
+        # 「不知道多大」和「真的是空文件」分不开
+        ("media_link", "size", "BIGINT"),
+        ("media_link", "size_probe_time", "TIMESTAMP"),
+        ("media_link", "has_subtitle", "BOOLEAN"),
     ]
     for table, column, column_type in migrations:
         check_and_create_column(engine, table, column, column_type)
@@ -100,6 +106,8 @@ def update_database() -> None:
         ("actor", "update_time"),
         # 监控目录对账时按规则捞扣留记录
         ("pending_delete", "watch_id"),
+        # 硬链接页面按大小排序/筛选，下推成 SQL 后要走索引
+        ("media_link", "size"),
     ]
     for table, column in indexes:
         check_and_create_index(engine, table, column)

@@ -19,6 +19,11 @@ const size = ref(20)
 const SIZE_OPTIONS = [20, 50, 100]
 const keyword = ref('')
 const missingOnly = ref(false)
+// 排序与体积/字幕筛选。都由后端下推成 SQL，翻页不碰磁盘
+const sort = ref('time')
+const minGb = ref('')
+const maxGb = ref('')
+const subtitleFilter = ref('')
 const loading = ref(false)
 
 // 视图模式：all = 全部关联，orphan = 下载侧已删但媒体库仍在的那批。
@@ -174,6 +179,11 @@ async function load() {
       : await listMediaLinks({
           keyword: keyword.value.trim(),
           missing_only: missingOnly.value,
+          sort: sort.value,
+          // 空字符串不传，交给后端的 0（不限）默认值
+          min_gb: Number(minGb.value) || 0,
+          max_gb: Number(maxGb.value) || 0,
+          subtitle: subtitleFilter.value,
           page: page.value,
           size: size.value,
         })
@@ -245,6 +255,7 @@ async function loadMissing() {
     if (stats.value) {
       stats.value.size_bytes = data.size_bytes
       stats.value.size_files = data.size_files
+      stats.value.size_pending = data.size_pending
     } else {
       stats.value = data
     }
@@ -273,6 +284,29 @@ function toggleMissing() {
   page.value = 1
   load()
 }
+
+// 排序或筛选变了都要回到第一页：还停在第 5 页很可能已经越界，
+// 看到的会是空列表
+function applyFilters() {
+  page.value = 1
+  clearPicked()
+  load()
+}
+
+function resetFilters() {
+  sort.value = 'time'
+  minGb.value = ''
+  maxGb.value = ''
+  subtitleFilter.value = ''
+  missingOnly.value = false
+  applyFilters()
+}
+
+// 有没有正在生效的筛选。决定「清除筛选」按钮是否出现
+const filtering = computed(() =>
+  sort.value !== 'time' || !!minGb.value || !!maxGb.value
+  || !!subtitleFilter.value || missingOnly.value,
+)
 
 function go(next) {
   if (next < 1 || next > pages.value || next === page.value) return
@@ -511,10 +545,10 @@ onMounted(() => {
       </div>
       <div class="card">
         <p class="text-xs text-gray-500">占用空间</p>
-        <!-- 与「文件已丢失」同一批磁盘探测得出，一起显示占位 -->
-        <p v-if="missingLoading" class="mt-1 text-xl font-semibold text-gray-500">检测中…</p>
+        <!-- 大小已落库，这个数由纯 SQL 聚合得出，跟着第一批一起到，
+             不必等磁盘探测 -->
         <p
-          v-else-if="stats?.size_bytes === null || stats?.size_bytes === undefined"
+          v-if="stats?.size_bytes === null || stats?.size_bytes === undefined"
           class="mt-1 text-xl font-semibold text-gray-200"
         >
           —
@@ -526,6 +560,10 @@ onMounted(() => {
             + '硬链接与源文件共享同一份数据，不重复计算'"
         >
           {{ formatSize(stats.size_bytes) }}
+        </p>
+        <!-- 存量记录的回填还没跑完，总量是不完整的，得说清楚 -->
+        <p v-if="stats?.size_pending" class="mt-0.5 text-[11px] text-amber-500">
+          还有 {{ stats.size_pending }} 条未统计
         </p>
       </div>
       <div class="card">
@@ -569,6 +607,69 @@ onMounted(() => {
         @keyup.enter="search"
       />
       <button class="btn-ghost px-3 py-1.5 text-xs" @click="search">搜索</button>
+
+      <!-- 排序与筛选。孤儿一览是另一套数据源，这些不适用 -->
+      <template v-if="!isOrphan">
+        <select
+          v-model="sort"
+          class="input w-auto py-1.5 text-xs"
+          title="排序方式"
+          @change="applyFilters"
+        >
+          <option value="time">最近登记</option>
+          <option value="time_asc">最早登记</option>
+          <option value="size_desc">体积从大到小</option>
+          <option value="size_asc">体积从小到大</option>
+          <option value="code_asc">番号 A→Z</option>
+          <option value="code_desc">番号 Z→A</option>
+        </select>
+
+        <!-- 体积区间。单位固定 GB，填一侧就是单边限制 -->
+        <div class="flex items-center gap-1 text-xs text-gray-500">
+          <input
+            v-model="minGb"
+            type="number"
+            min="0"
+            step="0.5"
+            class="input w-16 py-1.5 text-xs"
+            placeholder="最小"
+            @keyup.enter="applyFilters"
+          />
+          <span>–</span>
+          <input
+            v-model="maxGb"
+            type="number"
+            min="0"
+            step="0.5"
+            class="input w-16 py-1.5 text-xs"
+            placeholder="最大"
+            @keyup.enter="applyFilters"
+          />
+          <span>GB</span>
+          <button class="btn-ghost px-2 py-1 text-xs" @click="applyFilters">
+            应用
+          </button>
+        </div>
+
+        <select
+          v-model="subtitleFilter"
+          class="input w-auto py-1.5 text-xs"
+          title="按字幕筛选"
+          @change="applyFilters"
+        >
+          <option value="">字幕不限</option>
+          <option value="with">已有字幕</option>
+          <option value="without">缺字幕</option>
+        </select>
+
+        <button
+          v-if="filtering"
+          class="btn-ghost px-3 py-1.5 text-xs text-gray-400"
+          @click="resetFilters"
+        >
+          清除筛选
+        </button>
+      </template>
       <button
         v-if="!isOrphan"
         class="btn-ghost px-3 py-1.5 text-xs"

@@ -16,7 +16,9 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import BigInteger, DateTime, Integer, String, Text
+from sqlalchemy import (
+    BigInteger, Boolean, DateTime, Integer, String, Text,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database.base import DBBase
@@ -43,6 +45,24 @@ class MediaLink(DBBase):
     torrent_probe_time: Mapped[datetime | None] = mapped_column(
         DateTime, nullable=True
     )
+
+    # 文件字节数。落库而不是每次现探 —— 大小要支持排序和筛选，
+    # 不入库就只能全表 stat 再在内存里排，几千条记录挂在 NAS 上是分钟级。
+    # 入库后排序筛选都能下推成 SQL，翻页不碰磁盘。
+    #
+    # 空表示还没探过（存量记录、或探测失败）。0 是合法值（真的是空文件），
+    # 与"不知道"必须分开，所以用 nullable 而不是 default 0。
+    # 由对账任务与页面访问顺带回填，见 refresh_sizes
+    size: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    # 上次探测大小的时间。空表示从没探过。
+    # 影片入库后体积不再变，探过一次就不用反复 stat
+    size_probe_time: Mapped[datetime | None] = mapped_column(
+        DateTime, nullable=True
+    )
+
+    # 旁边是否已有字幕。同样落库以支持筛选，语义与 size 一致：
+    # 空表示还没探过，True/False 才是结论
+    has_subtitle: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
 
     # 首次发现源文件消失的时间。空表示源文件还在（或从没查过）。
     #
