@@ -4,11 +4,13 @@ import {
   listActors, subscribeActor, cancelActor, getActorCodes, proxyImage, purgeMigratedActors,
 } from '@/api'
 import { useToast } from '@/composables/useToast'
+import { useConfigStore } from '@/stores/config'
 import EmptyState from '@/components/EmptyState.vue'
 import LoadingBlock from '@/components/LoadingBlock.vue'
 import CodeCard from '@/components/CodeCard.vue'
 
 const toast = useToast()
+const configStore = useConfigStore()
 const items = ref([])
 const loading = ref(false)
 const keyword = ref('')
@@ -157,13 +159,16 @@ onMounted(() => {
         :key="actor.name"
         class="card flex items-center gap-3 transition-colors hover:border-gray-700"
       >
-        <img
-          v-if="actor.photo"
-          :src="proxyImage(actor.photo)"
-          :alt="actor.name"
-          loading="lazy"
-          class="h-14 w-14 shrink-0 rounded-full object-cover"
-        />
+        <!-- 隐私模式的 blur 会糊出图片边界，外面这层圆形容器把它裁回来 -->
+        <div v-if="actor.photo" class="h-14 w-14 shrink-0 overflow-hidden rounded-full">
+          <img
+            :src="proxyImage(actor.photo)"
+            :alt="actor.name"
+            loading="lazy"
+            class="h-full w-full object-cover"
+            :class="configStore.imageClass"
+          />
+        </div>
         <div v-else class="h-14 w-14 shrink-0 rounded-full bg-gray-800" />
 
         <div class="min-w-0 flex-1">

@@ -61,14 +61,6 @@ const coverPosition = computed(() => {
   return 'center'
 })
 
-// 图片模式跟随后端配置
-const imageClass = computed(() => {
-  const mode = configStore.imageMode
-  if (mode === 'BLUR') return 'img-blur'
-  if (mode === 'INVISIBLE') return 'img-hidden'
-  return ''
-})
-
 // 数据源会把年龄、职业设定、日文原名一起塞进 casts，清洗后再显示
 const casts = computed(() => parseCasts(props.item.casts, 3))
 
@@ -202,7 +194,7 @@ async function reset() {
         loading="lazy"
         title="点击查看完整封面"
         class="h-full w-full cursor-pointer object-cover"
-        :class="imageClass"
+        :class="configStore.imageClass"
         :style="{ objectPosition: coverPosition }"
         @error="imageFailed = true"
       />

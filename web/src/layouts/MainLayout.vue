@@ -5,6 +5,7 @@ import { checkVersion, getVersion } from '@/api'
 import { useConfigStore } from '@/stores/config'
 import AppLogo from '@/components/AppLogo.vue'
 import AgentPanel from '@/components/AgentPanel.vue'
+import PrivacyToggle from '@/components/PrivacyToggle.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -154,6 +155,9 @@ onMounted(async () => {
           </svg>
         </button>
         <h1 class="text-sm font-medium text-gray-300">{{ route.meta.title || '' }}</h1>
+
+        <!-- 有人在旁边时一键遮住封面，改的就是设置里那项「图片模式」 -->
+        <PrivacyToggle class="ml-auto" />
       </header>
 
       <!-- 滚动容器只在桌面生效，移动端交给 body 滚。

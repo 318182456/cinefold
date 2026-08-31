@@ -21,6 +21,12 @@ class ConfigRequest(BaseModel):
     config: dict
 
 
+# 纯前端展示项，改了不影响任何后台服务。单独拎出来是因为保存配置会顺带
+# 重启调度器、TG 轮询、目录监听等一串东西 —— 而 header 上的隐私模式开关
+# 是随手点的，不该每点一下就把后台重启一遍
+DISPLAY_ONLY_KEYS = {"image_mode"}
+
+
 @router.get("/config")
 def get_config(current_user: str = Depends(get_current_user)):
     """返回配置，敏感字段已打码。"""
@@ -46,6 +52,10 @@ def save_config(body: ConfigRequest, current_user: str = Depends(get_current_use
 
     save_settings(updates)
     get_settings(reload=True)
+
+    # 这批只改展示，落库就够了，底下那串重启一个都不用做
+    if all(key.lower() in DISPLAY_ONLY_KEYS for key in updates):
+        return ResponseEntity.ok(message=f"已更新 {len(updates)} 项配置")
 
     # 定时任务表达式可能变了，重建调度器
     from app.scheduler import restart_scheduler

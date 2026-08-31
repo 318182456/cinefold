@@ -79,7 +79,10 @@
   @apply bg-gray-600;
 }
 
-/* 图片模式：BLUR / INVISIBLE */
+/* 隐私模式：BLUR 打码 / INVISIBLE 遮黑，都可悬停看清。
+   header 上的开关和设置里的「图片模式」改的是同一项配置。
+   blur 会把颜色糊出图片边界（圆形头像尤其明显），
+   自身裁一刀，免得糊出个方角来 */
 .img-blur {
   filter: blur(14px);
   transition: filter 0.25s;
@@ -89,6 +92,7 @@
 }
 .img-hidden {
   filter: brightness(0);
+  transition: filter 0.25s;
 }
 .img-hidden:hover {
   filter: none;

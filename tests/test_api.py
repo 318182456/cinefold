@@ -147,6 +147,46 @@ class TestConfig:
             save_settings({"QBITTORRENT_URL": ""})
             get_settings(reload=True)
 
+    def test_image_mode_skips_service_restarts(self, client, auth, monkeypatch):
+        """隐私模式开关在 header 上随手点，不该顺带把后台服务重启一遍。"""
+        from app.core.config import get_settings, save_settings
+
+        called = []
+        monkeypatch.setattr(
+            "app.scheduler.restart_scheduler", lambda: called.append("scheduler")
+        )
+
+        try:
+            response = client.post(
+                "/api/v1/config", headers=auth, json={"config": {"image_mode": "INVISIBLE"}}
+            )
+            assert response.json()["code"] == 200
+            assert get_settings(reload=True).image_mode == "INVISIBLE"
+            assert called == []
+        finally:
+            save_settings({"IMAGE_MODE": "BLUR"})
+            get_settings(reload=True)
+
+    def test_normal_key_still_restarts_services(self, client, auth, monkeypatch):
+        """快速路径只对纯展示项生效，掺了别的字段就照旧走完整流程。"""
+        from app.core.config import get_settings, save_settings
+
+        called = []
+        monkeypatch.setattr(
+            "app.scheduler.restart_scheduler", lambda: called.append("scheduler")
+        )
+
+        try:
+            client.post(
+                "/api/v1/config",
+                headers=auth,
+                json={"config": {"image_mode": "VISIBLE", "max_actor": 5}},
+            )
+            assert called == ["scheduler"]
+        finally:
+            save_settings({"IMAGE_MODE": "BLUR"})
+            get_settings(reload=True)
+
     def test_unknown_key_ignored(self, client, auth):
         response = client.post(
             "/api/v1/config", headers=auth, json={"config": {"not_a_real_key": "x"}}
