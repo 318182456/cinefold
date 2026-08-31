@@ -649,6 +649,16 @@ onMounted(() => {
           <button class="btn-ghost px-2 py-1 text-xs" @click="applyFilters">
             应用
           </button>
+          <!-- 首次筛选要先把没探过的补上（存量记录的大小是空的），
+               库大又挂在 NAS 上时这一趟会慢，说一声免得以为卡死 -->
+          <span
+            v-if="stats?.size_pending"
+            class="text-[11px] text-amber-500"
+            :title="`还有 ${stats.size_pending} 条没探测过大小。`
+              + '首次按体积筛选会先补探，可能要等一会儿，之后就快了'"
+          >
+            首次筛选需补探 {{ stats.size_pending }} 条
+          </span>
         </div>
 
         <select

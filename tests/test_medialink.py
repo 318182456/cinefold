@@ -1503,3 +1503,54 @@ def test_sort_and_filter_by_size(tmp_path):
                 row = session.get(MediaLink, path)
                 if row is not None:
                     session.delete(row)
+
+
+def test_size_filter_backfills_before_filtering(tmp_path):
+    """带体积筛选的首次请求就该筛出结果，不必先无筛选访问一次。
+
+    筛选是 SQL 条件，而存量记录的 size 是 NULL —— NULL >= 10GB 永远
+    不成立。如果不在筛选前回填，结果是空的；而「就地补探当前页」只作用
+    于已返回的行，空结果永远填不上自己，这个筛选就永久失效。
+    """
+    from app.api import create_app
+    from app.api.endpoints import get_current_user
+    from app.api.endpoints import medialink as api
+    from fastapi.testclient import TestClient
+
+    library = tmp_path / "lib"
+    library.mkdir()
+    made = []
+    for name, mb in (("PROBE-BIG", 12), ("PROBE-SMALL", 1)):
+        video = library / f"{name}.mp4"
+        video.write_bytes(b"x" * (mb * 1024 * 1024))
+        made.append(str(video))
+        with session_scope() as session:
+            # 存量记录：size / size_probe_time 都是空的
+            session.merge(MediaLink(
+                link_path=str(video), code=name, source_path=str(video),
+            ))
+
+    api._drop_stats_cache()
+    api._exists_cache.clear()
+
+    app = create_app()
+    app.dependency_overrides[get_current_user] = lambda: "tester"
+    client = TestClient(app)
+
+    try:
+        # 关键：第一次请求就带筛选，中间不做任何无筛选访问
+        payload = client.get("/api/v1/medialinks", params={
+            "keyword": "PROBE-", "min_gb": 0.005,
+        }).json()
+        assert payload["code"] == 200, payload
+        items = payload["data"]["items"]
+        assert [i["code"] for i in items] == ["PROBE-BIG"], payload["data"]
+        # 回填顺带把大小写进了库
+        assert items[0]["size"] == 12 * 1024 * 1024
+    finally:
+        api._drop_stats_cache()
+        with session_scope() as session:
+            for path in made:
+                row = session.get(MediaLink, path)
+                if row is not None:
+                    session.delete(row)

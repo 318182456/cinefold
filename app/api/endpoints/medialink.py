@@ -48,6 +48,12 @@ class SubtitleRequest(BaseModel):
     force: bool = False
 
 
+class ReviewRequest(BaseModel):
+    code: str
+    # 重新生成。默认不重生成，已有结果直接复用 —— 每次都是一次 AI 请求
+    force: bool = False
+
+
 class BatchRequest(BaseModel):
     """一批 link_path。孤儿一览的多选批量操作用。
 
@@ -118,6 +124,10 @@ _missing_cache: tuple[float, set[str]] | None = None
 # 探测全是 IO 等待，并发跑能把 NAS 往返时间叠起来。不宜再高，
 # 群晖这类设备并发请求太多反而会退化
 _PROBE_WORKERS = 16
+
+# 筛选前一次最多回填多少条。库特别大时不能让一次请求无限期地探下去 ——
+# 超出的部分留给定时任务，页面上会提示「还有 N 条未统计」
+_FILTER_BACKFILL_CAP = 5000
 
 
 def _missing_links(force: bool = False) -> set[str]:
@@ -291,6 +301,12 @@ def list_medialinks(
     page = max(1, page)
     size = min(max(1, size), 200)
     want_subtitle = subtitle if subtitle in ("with", "without") else ""
+    # 按体积/字幕筛选或按体积排序时，结果依赖全表都已探过 ——
+    # 没探过的行在 SQL 里是 NULL，会被静默排除掉
+    need_probe = (
+        min_gb > 0 or max_gb > 0 or bool(want_subtitle)
+        or sort in ("size_desc", "size_asc")
+    )
 
     with session_scope() as session:
         stmt = select(MediaLink)
@@ -318,6 +334,27 @@ def list_medialinks(
                     "sort": sort, "subtitle": want_subtitle,
                 })
             stmt = stmt.where(MediaLink.link_path.in_(stale))
+
+        # 筛选前先把没探过的补上。
+        #
+        # 这一步不能省：筛选是 SQL 条件，而存量记录的 size 是 NULL，
+        # NULL >= 10GB 永远不成立 —— 筛出来是空的，而「就地补探当前页」
+        # 又只作用于已经返回的行，于是空结果永远填不上自己。
+        # 死锁在这儿：不先回填，这个筛选就永远返回空。
+        #
+        # 只在真的要筛（或按体积排序）时才做，且只补 NULL 的那些。
+        # 一次探完整库在 NAS 上可能要等，但只会等这一次 —— 探过就落库了。
+        if need_probe:
+            pending = list(session.scalars(
+                select(MediaLink).where(MediaLink.size_probe_time.is_(None))
+                .limit(_FILTER_BACKFILL_CAP)
+            ).all())
+            if pending:
+                logger.info(
+                    f"体积筛选前回填 {len(pending)} 条未探测的关联"
+                )
+                _backfill_rows(session, pending)
+                session.flush()
 
         # 体积筛选。大小已落库，直接下推成 SQL 条件。
         # 探不到大小的（size 为空）一律排除：留着会混在「大于 5G」里，
@@ -614,6 +651,57 @@ def fetch_subtitle(
     return ResponseEntity.ok(
         {"written": written}, message=f"已写入 {written} 处"
     )
+
+
+@router.get("/review")
+def get_review(code: str, current_user: str = Depends(get_current_user)):
+    """读一个番号已生成的影评要点。没有则返回空。"""
+    from app.database.models import Review
+
+    code = get_true_code(code or "")
+    if not code:
+        return ResponseEntity.fail("番号不能为空", code=400)
+
+    with session_scope() as session:
+        row = session.get(Review, code)
+        if row is None:
+            return ResponseEntity.ok({})
+        return ResponseEntity.ok({
+            "code": row.code,
+            "cast_count": row.cast_count,
+            "body_type": row.body_type or "",
+            "style": row.style or "",
+            "highlights": (row.highlights or "").splitlines(),
+            "summary": row.summary or "",
+            "nfo_time": row.nfo_time.isoformat() if row.nfo_time else "",
+            "update_time": row.update_time.isoformat() if row.update_time else "",
+        })
+
+
+@router.post("/review")
+def generate_review(
+    body: ReviewRequest, current_user: str = Depends(get_current_user)
+):
+    """给一个番号生成 AI 影评，并写进 NFO 与 Emby 简介。
+
+    不看 REVIEW_ENABLED 开关 —— 那个管的是自动行为，人点了按钮就是明确
+    要生成（与字幕手动重抓同理）。
+    """
+    code = (body.code or "").strip()
+    if not code:
+        return ResponseEntity.fail("番号不能为空", code=400)
+
+    from app.services import review as review_service
+
+    ok = review_service.generate_for_code(code, force=body.force, manual=True)
+    if not ok:
+        return ResponseEntity.fail(
+            "未能生成影评。确认已配置 AI 接口（AI 助手或翻译任一），"
+            "且该番号在库里有类别标签等元数据",
+            code=400,
+        )
+
+    return ResponseEntity.ok({"code": get_true_code(code)}, message="已生成")
 
 
 @router.post("/preview")
