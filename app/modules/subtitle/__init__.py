@@ -16,14 +16,15 @@ from app.modules.subtitle.base import SubtitleItem
 from app.utils import get_true_code
 
 # 抓取顺序。本地字幕库排第一 —— 命中就不必跨境请求，且那里放的是
-# 人工挑过的字幕；subtitlecat 收录最全且无需登录，作网络主力；
+# 人工挑过的字幕；javsub 与 subtitlecat 作网络主力；
 # GitHub 字幕仓库按番号命名、地址稳定，作它跑路时的兜底
-SUBTITLE_SITES: tuple[str, ...] = ("subtitlelocal", "subtitlecat", "subtitlegh")
+SUBTITLE_SITES: tuple[str, ...] = ("subtitlelocal", "javsub", "subtitlecat", "subtitlegh")
 
 # key → (模块, 类名)。与 ladysite 一样延迟导入，避免把 pyquery
 # 的解析开销拉进那些根本不抓字幕的调用路径
 _SITE_CLASSES: dict[str, tuple[str, str]] = {
     "subtitlelocal": ("local", "LocalSubtitle"),
+    "javsub": ("javsub", "JavSub"),
     "subtitlecat": ("subtitlecat", "SubtitleCat"),
     "subtitlegh": ("github", "GithubSubtitle"),
 }

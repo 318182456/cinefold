@@ -820,3 +820,156 @@ def test_local_hit_writes_beside_video(enabled, library, subs_dir):
     out = library.parent / f"{library.stem}.zh-CN.srt"
     assert out.exists()
     assert "我们说过" in out.read_text(encoding="utf-8")
+
+
+# ----------------------------------------------------------------------
+# javsub 解析
+# ----------------------------------------------------------------------
+_JAVSUB_DETAIL_HTML = """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>WAAA-682 Subtitles (Chinese, English, Japanese) | JavSub.ai</title>
+    <link rel="canonical" href="https://javsub.ai/subtitles/waaa-682-77216/">
+</head>
+<body>
+    <div class="watch-layout">
+        <div class="detail-header">
+            <h1>WAAA-682 — JAV Subtitles</h1>
+        </div>
+        <div class="sub-list">
+            <div class="sub-row">
+                <span class="lang">Japanese</span>
+                <a href="/download/free/uuid-ja/">⬇ Download free</a>
+            </div>
+            <div class="sub-row">
+                <span class="lang">Chinese</span>
+                <a href="/download/free/uuid-zh-cn/">⬇ Download free</a>
+            </div>
+            <div class="sub-row">
+                <span class="lang">Chinese (Traditional)</span>
+                <a href="/download/free/uuid-zh-tw/">⬇ Download free</a>
+            </div>
+            <div class="sub-row">
+                <span class="lang">Cantonese</span>
+                <a href="/download/free/uuid-cantonese/">⬇ Download free</a>
+            </div>
+            <div class="sub-row">
+                <span class="lang">English</span>
+                <a href="/download/demo/uuid-en/">Demo</a>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
+"""
+
+_JAVSUB_LIST_HTML = """
+<!DOCTYPE html>
+<html>
+<head><title>Search</title></head>
+<body>
+    <div class="grid">
+        <a href="/subtitles/waaa-6820-11111/" class="card">
+            <div class="name">WAAA-6820</div>
+        </a>
+        <a href="/subtitles/waaa-682-77216/" class="card">
+            <div class="name">WAAA-682</div>
+        </a>
+    </div>
+</body>
+</html>
+"""
+
+
+def test_javsub_find_detail_from_redirect(monkeypatch):
+    """搜索直接 302 跳转到详情页，返回当前页面 HTML 与标题。"""
+    from app.modules.subtitle.javsub import JavSub
+
+    site = JavSub(host="https://javsub.test")
+    monkeypatch.setattr(site.client, "get", lambda *a, **k: _JAVSUB_DETAIL_HTML)
+
+    url, title, html = site._find_detail("WAAA-682")
+    assert url == "https://javsub.ai/subtitles/waaa-682-77216/"
+    assert "WAAA-682" in title
+    assert html == _JAVSUB_DETAIL_HTML
+
+
+def test_javsub_find_detail_from_list(monkeypatch):
+    """搜索返回列表页时，逐卡片比对番号，避免误中 WAAA-6820。"""
+    from app.modules.subtitle.javsub import JavSub
+
+    site = JavSub(host="https://javsub.test")
+    monkeypatch.setattr(site.client, "get", lambda *a, **k: _JAVSUB_LIST_HTML)
+
+    url, title, html = site._find_detail("WAAA-682")
+    assert url == "https://javsub.test/subtitles/waaa-682-77216/"
+    assert title == "WAAA-682"
+    assert html == ""
+
+
+def test_javsub_find_detail_ignores_mismatched_code(monkeypatch):
+    """列表页中没有匹配番号时返回空。"""
+    from app.modules.subtitle.javsub import JavSub
+
+    site = JavSub(host="https://javsub.test")
+    monkeypatch.setattr(site.client, "get", lambda *a, **k: _JAVSUB_LIST_HTML)
+
+    url, title, html = site._find_detail("SSIS-001")
+    assert url == ""
+    assert title == ""
+
+
+def test_javsub_candidate_links_ranks_simplified_then_rest_then_traditional():
+    """候选排序：简中 > 兜底 > 繁中，排除粤语。"""
+    from app.modules.subtitle.javsub import JavSub
+
+    site = JavSub(host="https://javsub.test")
+    links = site._candidate_links(_JAVSUB_DETAIL_HTML, "https://javsub.test/subtitles/waaa-682/")
+
+    # 简中排第一
+    assert links[0] == "https://javsub.test/download/free/uuid-zh-cn/"
+    # 繁中排在最后
+    assert links[-1] == "https://javsub.test/download/free/uuid-zh-tw/"
+    # 粤语被排除
+    assert not any("cantonese" in u for u in links)
+    # 其余语言保留在中间作为兜底
+    assert any("uuid-ja" in u for u in links)
+    assert any("uuid-en" in u for u in links)
+
+
+def test_javsub_search_end_to_end(monkeypatch):
+    """端到端搜索：找到繁体字幕并自动规整转换为简体中文。"""
+    from app.modules.subtitle.javsub import JavSub
+
+    site = JavSub(host="https://javsub.test")
+    monkeypatch.setattr(site.client, "get", lambda *a, **k: _JAVSUB_DETAIL_HTML)
+
+    def mock_download(url, referer=""):
+        if "uuid-zh-cn" in url:
+            return ""  # 模拟简中下载失败
+        if "uuid-zh-tw" in url:
+            return SRT_TW  # 繁体字幕命中
+        return ""
+
+    monkeypatch.setattr(site, "_download", mock_download)
+
+    item = site.search("WAAA-682")
+    assert item is not None
+    assert item.code == "WAAA-682"
+    assert item.site == "javsub"
+    assert "我们说过" in item.content
+
+
+def test_javsub_in_subtitle_sites_and_build():
+    """javsub 在抓取优先级中排在 subtitlelocal 后、subtitlecat 前。"""
+    from app.modules.subtitle import SUBTITLE_SITES, _build
+
+    assert "javsub" in SUBTITLE_SITES
+    assert SUBTITLE_SITES.index("subtitlelocal") < SUBTITLE_SITES.index("javsub")
+    assert SUBTITLE_SITES.index("javsub") < SUBTITLE_SITES.index("subtitlecat")
+
+    site = _build("javsub")
+    assert site is not None
+    assert site.name == "javsub"
+

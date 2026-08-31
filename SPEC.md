@@ -154,15 +154,18 @@ create_time / update_time
 
 ### 字幕 `modules/subtitle/`
 统一接口：`search(code)` → `SubtitleItem | None`，按 `SUBTITLE_SITES` 顺序命中即停。
-- `subtitlecat` — 主力，搜索页取详情页再挑下载链接
-- `github` — GitHub 字幕仓库，按番号命名，作 subtitlecat 跑路时的兜底
+- `local` — 本地字幕素材库（`subtitlelocal`），命中直接取
+- `javsub` — JavSub.ai（`javsub`），收录全面的 AI 翻译字幕站，支持 Free/Demo 下载与搜索
+- `subtitlecat` — SubtitleCat（`subtitlecat`），搜索页取详情页再挑下载链接
+- `github` — GitHub 字幕仓库（`subtitlegh`），按番号命名，作兜底
 
 **只认简体中文**。站点的语言标注不可信（大量繁体与机翻日文标成 Chinese），
 标注只用来缩小候选，最终按正文判定：汉字数量 → 假名占比 → 简繁字形计数
-（`base.is_simplified_chinese`）。判不出就放弃 —— 媒体库里出现看不懂的字幕
-比没有字幕更麻烦。编码按字节猜（`decode_subtitle`），站点常透传 GBK/BIG5。
+（`base.is_simplified_chinese`）。繁体通过 `as_simplified_chinese` 自动规整为简体，
+判不出就放弃 —— 媒体库里出现看不懂的字幕比没有字幕更麻烦。
+编码按字节猜（`decode_subtitle`），站点常透传 GBK/BIG5。
 
-两个字幕源登记在 `datasource` 表里（地址可在页面上改），但 `parser` 留空、
+字幕源登记在 `datasource` 表里（地址可在页面上改），但 `parser` 留空、
 `kind="subtitle"`，因此不会被 `enabled_parser_sources` 拉进详情抓取链路。
 
 ### AI 影评 `modules/review/`

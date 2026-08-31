@@ -118,6 +118,9 @@ SOURCES: tuple[dict, ...] = (
     # parser 留空是有意的：详情抓取只认有 parser 的源
     # （enabled_parser_sources），留空才不会被拉进查番号详情那条链路。
     # 解析实现在 modules/subtitle 下，按 key 取地址
+    {"key": "javsub", "name": "JavSub.ai（字幕）",
+     "host": "https://javsub.ai", "kind": "subtitle",
+     "parser": "", "bypass_first": True, "interval": 2.0},
     {"key": "subtitlecat", "name": "SubtitleCat（字幕）",
      "host": "https://www.subtitlecat.com", "kind": "subtitle",
      "parser": "", "bypass_first": False, "interval": 2.0},
