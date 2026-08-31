@@ -177,6 +177,17 @@ def fill_subtitles() -> int:
     return subtitle.fill_lack_subtitles()
 
 
+def fill_reviews() -> int:
+    """给媒体库里没影评的影片补生成。开关（REVIEW_ENABLED）关着时直接返回。
+
+    顺带把生成过但没写进 NFO 的补写出去 —— 刮削工具重刮会把 plot 冲掉，
+    这轮回填。
+    """
+    from app.services import review
+    logger.info("[任务] 开始补生成影评")
+    return review.fill_lack_reviews()
+
+
 def translate_titles() -> int:
     """翻译缺中文标题的番号。"""
     from app import services
@@ -411,6 +422,7 @@ JOBS: dict[str, dict] = {
     "warm_page_cache": {"func": warm_page_cache, "name": "预热页面缓存", "cron_key": "warm_cache_time"},
     # 默认凌晨跑：每部片都要跨境请求，白天跑会跟抓取任务抢过盾服务
     "fill_subtitles": {"func": fill_subtitles, "name": "补抓字幕", "cron_key": "subtitle_fill_time"},
+    "fill_reviews": {"func": fill_reviews, "name": "补生成影评", "cron_key": "review_fill_time"},
     # cron 默认为空，配了 CRAWLER_DB_TIME 才排班
     "import_crawler_db": {"func": import_crawler_db, "name": "导入爬虫库", "cron_key": "crawler_db_time"},
 }

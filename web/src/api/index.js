@@ -124,6 +124,10 @@ export const registerMediaLink = (payload) => http.post('/medialinks/register', 
 // 手动抓字幕。要跨境搜好几个站，比普通请求慢，放宽超时
 export const fetchSubtitle = (code, force = false) =>
   http.post('/medialinks/subtitle', { code, force }, { timeout: 120000 })
+// 手动生成 AI 影评。要打一次 AI 接口，比普通请求慢，放宽超时
+export const generateReview = (code, force = false) =>
+  http.post('/medialinks/review', { code, force }, { timeout: 120000 })
+export const getReview = (code) => http.get('/medialinks/review', { params: { code } })
 export const previewMediaLinkDelete = (payload) =>
   http.post('/medialinks/preview', payload)
 export const deleteMediaLink = (payload) => http.post('/medialinks/delete', payload)

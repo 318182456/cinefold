@@ -75,6 +75,18 @@ username / password / token
 id (autoincrement) / namespace / key / content / create_time
 ```
 
+### Review（AI 影评）
+```
+code            番号（主键）
+cast_count      出演人数，按 casts 实际条数算，不信模型
+body_type       身材描述，依据不足时为空
+style           拍摄风格，依据不足时为空
+highlights      看点要点，换行分隔
+summary         简评正文
+nfo_time        写进 NFO 的时间。空表示还没写出，定时任务据此补写
+create_time / update_time
+```
+
 ## 4. API 端点
 
 前缀 `/api/v1`。
@@ -102,6 +114,7 @@ id (autoincrement) / namespace / key / content / create_time
 | `POST /codes/download/all` | 批量下载 |
 | `GET  /image-proxy` | 图片代理 |
 | `GET/POST /message` | 消息回调（Telegram/企业微信 webhook） |
+| `GET  /medialinks/review` · `POST /medialinks/review` | 读取/生成 AI 影评（POST 的 `manual=True` 跳过总开关，`force` 重新生成）|
 | `GET  /agent/status` | AI 助手是否可用 |
 | `POST /agent/chat` | AI 助手对话 |
 | `POST /agent/confirm` · `POST /agent/cancel` | 确认/放弃助手提出的下载器操作（confirm 可带 `delete_files` 覆盖删除方式） |
@@ -152,6 +165,10 @@ id (autoincrement) / namespace / key / content / create_time
 两个字幕源登记在 `datasource` 表里（地址可在页面上改），但 `parser` 留空、
 `kind="subtitle"`，因此不会被 `enabled_parser_sources` 拉进详情抓取链路。
 
+### AI 影评 `modules/review/`
+- `reviewai` — OpenAI 兼容接口，提示词要求只按给定证据归纳，依据不足留空
+- `profile` — 演员/厂牌画像聚合，从库里同演员、同厂牌的历史作品统计高频标签
+
 ### AI 助手 `modules/agent/`
 - `agent` — ChatAgent，OpenAI 兼容接口 + function calling，最多 5 轮工具调用
 - `tools` — 只读工具：`overview` / `query_codes` / `code_detail` / `list_actors` /
@@ -191,6 +208,22 @@ id (autoincrement) / namespace / key / content / create_time
 30 秒 TTL 缓存 + 并发，抓完显式失效），页面据此标「有字幕」，多个位置只命中
 部分时标成 `字幕 1/2` —— 换个入口播放就没有，得看得出来还要补。
 
+**AI 影评 `services/review.py`** — 按元数据生成看点并写出。三条触发路径与
+字幕同构：刮削登记完成（`register_scrape` 尾部，异常吞掉不影响登记）、定时
+任务 `fill_reviews`、页面按钮（`POST /medialinks/review`，`manual=True` 跳过
+总开关）。模型没看过影片，依据限定为本片元数据 + 画像聚合
+（`modules/review/profile.py`：同演员、同厂牌在库里其它作品的高频标签，
+带命中数 `hits/total` 一起交给模型；单次命中当噪声丢掉）。出演人数不信模型，
+按 `casts` 实际条数算。依据不足的字段留空——提示词把「不许编」钉死。
+结果落 `review` 表后写向两处：影片旁 NFO 的 `<plot>`（只改这一个节点，
+带 `── AI 看点 ──` 标记以便重新生成时只替换自己那段；解析失败不碰、
+文件不存在不新建）与 Emby 条目的 `Overview`（先 GET 完整条目再整体 POST
+回去——该接口是覆盖语义，只发单个字段会清空其余元数据）。写 NFO 成功才记
+`nfo_time`。定时任务 `_rewrite_pending` 的补写判据是**读文件看 MARKER 在不在**，
+不是只看 `nfo_time` 为空 —— 刮削工具重刮会把 plot 整个冲掉，而库里的时间戳
+还留着上次写成功的值，只信时间戳的话这类记录永远选不中，看点就此永久丢失。
+补写不发 AI 请求（内容库里都有），只是把它写回去。
+
 **转移做种 `services/seedtransfer.py`** — 把 qb 里已下载完的种子交给 tr 继续做种。
 导出 `.torrent` 原文件（磁链拿不到私有站的 metadata），按 `SEED_TRANSFER_PATH_MAP`
 换算保存路径后加进 tr 并触发校验；tr 确认接管后才动 qb 的源任务，且只删任务不删文件
@@ -219,6 +252,7 @@ qb 卡死（WebAPI 不响应但进程还在）时重启它的容器。`QBitTorre
 | `run_actors` | `0 21 * * *` | 演员订阅 |
 | `run_codes_task` | `0 22 * * *` | 订阅下载 |
 | `fill_subtitles` | `0 4 * * *` | 补抓字幕（`SUBTITLE_ENABLED` 关闭时直接返回） |
+| `fill_reviews` | `30 4 * * *` | 补生成 AI 影评（`REVIEW_ENABLED` 关闭时直接返回） |
 
 另有 `cache_photos` / `save_image` / `translate_titles` / `pt_wait` / `transfer_seeds` / `push_job` / `start_scheduler` / `restart_scheduler`。
 

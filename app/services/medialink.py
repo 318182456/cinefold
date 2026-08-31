@@ -370,6 +370,7 @@ def register_scrape(
     logger.info(f"[{code}] 已登记 {len(unique)} 条硬链接关联")
     mark_completed(code)
     _fetch_subtitle_quietly(code)
+    _generate_review_quietly(code)
     return unique
 
 
@@ -384,6 +385,19 @@ def _fetch_subtitle_quietly(code: str) -> None:
         subtitle.fetch_for_code(code)
     except Exception as exc:
         logger.warning(f"[{code}] 抓字幕失败: {exc}")
+
+
+def _generate_review_quietly(code: str) -> None:
+    """刮削登记完就顺手生成 AI 影评。开关关着时是空操作。
+
+    与抓字幕同理：要打 AI 接口，慢且不稳，失败不能影响登记结果，
+    所以异常一律吞掉只记日志。补漏任务下一轮会把漏掉的补上。
+    """
+    try:
+        from app.services import review
+        review.generate_for_code(code)
+    except Exception as exc:
+        logger.warning(f"[{code}] 生成影评失败: {exc}")
 
 
 # ----------------------------------------------------------------------

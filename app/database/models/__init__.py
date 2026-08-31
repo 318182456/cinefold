@@ -7,10 +7,11 @@ from app.database.models.history import History
 from app.database.models.medialink import MediaLink
 from app.database.models.passkey import Passkey
 from app.database.models.pendingdelete import PendingDelete
+from app.database.models.review import Review
 from app.database.models.user import User
 from app.database.models.watchdir import WatchDir
 
 __all__ = [
     "Actor", "Cache", "Code", "CodeAlias", "CodeStatus", "DataSource", "History",
-    "MediaLink", "Passkey", "PendingDelete", "User", "WatchDir",
+    "MediaLink", "Passkey", "PendingDelete", "Review", "User", "WatchDir",
 ]

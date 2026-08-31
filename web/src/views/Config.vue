@@ -267,6 +267,28 @@ const GROUPS = [
     ],
   },
   {
+    key: 'review',
+    cat: 'library',
+    title: 'AI 影评',
+    sections: [
+      {
+        title: '自动生成',
+        hint: '按番号的类别标签、演员与厂牌生成看点，写进影片旁的 NFO 与 '
+          + 'Emby 简介。AI 没看过影片，只依据这些元数据以及同演员/同厂牌'
+          + '历史作品的高频标签来归纳 —— 依据不足的字段留空，不编。'
+          + '用的是「AI 助手」的接口，没配则退回「翻译」那套',
+        fields: [
+          { k: 'review_enabled', label: '启用自动生成', t: 'bool',
+            hint: '刮削入库即生成，并允许定时补漏' },
+          { k: 'review_fill_limit', label: '补漏每轮上限', t: 'number', ph: '20',
+            hint: '每部一次 AI 请求，媒体库大时别设太高' },
+          { k: 'review_fill_time', label: '补漏时间',
+            hint: 'crontab 格式。默认排在补抓字幕之后，两个任务错开跑' },
+        ],
+      },
+    ],
+  },
+  {
     key: 'pt',
     cat: 'pipeline',
     title: 'PT 站点',

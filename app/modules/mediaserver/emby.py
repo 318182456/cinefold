@@ -46,6 +46,105 @@ class Emby:
             logger.warning(f"查询 Emby 失败: {exc}")
             return False
 
+    def find_item(self, code: str) -> dict:
+        """按番号找条目，返回原始 Item 字典。找不到返回空字典。
+
+        与 search 的判定一致（要求名称真含番号），但那个只回布尔值，
+        这里要拿 Id 去改字段，所以单独走一趟。
+        """
+        if not self.url or not self.api_key:
+            return {}
+
+        try:
+            with httpx.Client(timeout=15, trust_env=False) as client:
+                response = client.get(
+                    f"{self.url}/emby/Items",
+                    params={
+                        "api_key": self.api_key,
+                        "SearchTerm": code,
+                        "IncludeItemTypes": "Movie",
+                        "Recursive": "true",
+                        "Limit": 5,
+                    },
+                )
+                response.raise_for_status()
+                items = response.json().get("Items", [])
+
+            code_upper = code.upper()
+            for item in items:
+                if code_upper in (item.get("Name") or "").upper():
+                    return item
+            return {}
+        except Exception as exc:
+            logger.warning(f"查询 Emby 条目失败 {code}: {exc}")
+            return {}
+
+    def update_overview(self, code: str, block: str, marker: str = "") -> bool:
+        """把一段文字并进条目的简介（Overview）。
+
+        Emby 的条目更新接口要求回传完整对象：POST /Items/{id} 是整体覆盖，
+        只发 Overview 一个字段会把其余元数据清空。所以必须先用
+        /Users/{uid}/Items/{id} 取回完整条目，改掉 Overview 再发回去
+        —— 列表接口返回的是精简对象，拿它回传同样会丢字段。
+
+        marker 给出时，简介里已有的那段（从 marker 起到末尾）先切掉再拼，
+        重复生成才不会越堆越长。
+        """
+        if not self.url or not self.api_key:
+            return False
+
+        item = self.find_item(code)
+        item_id = item.get("Id")
+        if not item_id:
+            logger.debug(f"[影评] Emby 里没有 {code} 的条目，跳过推送")
+            return False
+
+        try:
+            with httpx.Client(timeout=20, trust_env=False) as client:
+                # 取完整条目。这个接口要 userId，随便取一个管理员账号即可 ——
+                # 简介是条目级字段，不因用户而异
+                user_id = self._any_user_id(client)
+                if not user_id:
+                    return False
+
+                detail = client.get(
+                    f"{self.url}/emby/Users/{user_id}/Items/{item_id}",
+                    params={"api_key": self.api_key},
+                )
+                detail.raise_for_status()
+                full = detail.json()
+
+                original = full.get("Overview") or ""
+                if marker and marker in original:
+                    original = original.split(marker)[0].rstrip()
+                full["Overview"] = f"{original}\n\n{block}".strip() if original else block
+
+                saved = client.post(
+                    f"{self.url}/emby/Items/{item_id}",
+                    params={"api_key": self.api_key},
+                    json=full,
+                )
+                saved.raise_for_status()
+
+            logger.info(f"[影评] 已推送 Emby 条目 {code}")
+            return True
+        except Exception as exc:
+            logger.warning(f"[影评] 更新 Emby 简介失败 {code}: {exc}")
+            return False
+
+    def _any_user_id(self, client: httpx.Client) -> str:
+        """取任意一个用户 Id。取完整条目的接口需要它。"""
+        try:
+            response = client.get(
+                f"{self.url}/emby/Users", params={"api_key": self.api_key}
+            )
+            response.raise_for_status()
+            users = response.json() or []
+            return (users[0] or {}).get("Id", "") if users else ""
+        except Exception as exc:
+            logger.warning(f"获取 Emby 用户列表失败: {exc}")
+            return ""
+
     def test_connection(self) -> tuple[bool, str]:
         if not self.url or not self.api_key:
             return False, "未配置 Emby 地址或 API Key"

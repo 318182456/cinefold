@@ -91,6 +91,8 @@ def update_database() -> None:
         ("media_link", "size", "BIGINT"),
         ("media_link", "size_probe_time", "TIMESTAMP"),
         ("media_link", "has_subtitle", "BOOLEAN"),
+        # AI 影评。整张 review 表由 create_all 建，这里只补后加的列
+        ("review", "style", "VARCHAR(128)"),
     ]
     for table, column, column_type in migrations:
         check_and_create_column(engine, table, column, column_type)

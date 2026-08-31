@@ -2,9 +2,9 @@
 import { computed, onMounted, ref } from 'vue'
 import {
   batchDeleteMediaLinks, batchDropMediaLinkRecords, deleteMediaLink,
-  dropMediaLinkRecord, fetchSubtitle, getMediaLinkStats, listMediaLinkOrphans,
-  listMediaLinks, previewMediaLinkDelete, pruneMediaLinks, recoverMediaLinks,
-  registerMediaLink,
+  dropMediaLinkRecord, fetchSubtitle, generateReview, getMediaLinkStats,
+  getReview, listMediaLinkOrphans, listMediaLinks, previewMediaLinkDelete,
+  pruneMediaLinks, recoverMediaLinks, registerMediaLink,
 } from '@/api'
 import { useToast } from '@/composables/useToast'
 import LoadingBlock from '@/components/LoadingBlock.vue'
@@ -483,6 +483,46 @@ async function grabSubtitle(group) {
   }
 }
 
+// ---------------------------------------------------------------- AI 影评
+// 与抓字幕同理，不看 REVIEW_ENABLED 开关：人点了按钮就是明确要生成。
+// 生成结果同时写进 NFO 与 Emby 简介，这里只负责展示与重生成
+const reviewBusy = ref('')
+const reviewPanel = ref(null)
+
+async function showReview(group) {
+  reviewBusy.value = group.code
+  try {
+    const data = await getReview(group.code)
+    // 还没生成过时后端回空对象，直接生成一版，省得用户再点一次
+    if (!data || !data.code) {
+      await makeReview(group, false)
+      return
+    }
+    reviewPanel.value = data
+  } catch (err) {
+    toast.error(err.message)
+  } finally {
+    reviewBusy.value = ''
+  }
+}
+
+async function makeReview(group, force = true) {
+  if (force && !window.confirm(`重新生成会覆盖 ${group.code} 现有的影评，继续？`)) {
+    return
+  }
+
+  reviewBusy.value = group.code
+  try {
+    await generateReview(group.code, force)
+    reviewPanel.value = await getReview(group.code)
+    toast.success('已生成影评')
+  } catch (err) {
+    toast.error(err.message || '生成失败')
+  } finally {
+    reviewBusy.value = ''
+  }
+}
+
 // ---------------------------------------------------------------- 记录重建
 // 误删记录后的补救：按 History.save_path 把关联配回来。
 // 先演练看配对结果，确认无误再落库 —— 重建的是反向删除的依据
@@ -946,6 +986,14 @@ onMounted(() => {
               : (group.subtitled ? '重抓字幕' : '抓字幕') }}
           </button>
           <button
+            class="btn-ghost px-2 py-0.5 text-[11px]"
+            :disabled="reviewBusy === group.code"
+            title="按元数据生成看点，写进 NFO 与 Emby 简介"
+            @click="showReview(group)"
+          >
+            {{ reviewBusy === group.code ? '生成中…' : 'AI 影评' }}
+          </button>
+          <button
             class="btn-ghost px-2 py-0.5 text-[11px] text-red-400 hover:bg-red-950/40"
             @click="askDelete(group)"
           >
@@ -1273,6 +1321,64 @@ onMounted(() => {
             @click="runBatchDropRecords"
           >
             {{ batching ? '处理中…' : `确认删除 ${pickedCount} 条记录` }}
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- AI 影评 -->
+    <div
+      v-if="reviewPanel"
+      class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+      @click.self="reviewPanel = null"
+    >
+      <div class="card max-h-[80vh] w-full max-w-lg space-y-3 overflow-y-auto">
+        <p class="text-sm font-medium text-gray-200">
+          {{ reviewPanel.code }} 的 AI 看点
+        </p>
+        <p class="text-[11px] text-gray-500">
+          按类别标签、演员与厂牌的历史作品归纳而来 —— AI 没看过影片，
+          依据不足的项会留空。已写进影片旁的 NFO 与 Emby 简介
+        </p>
+
+        <div class="flex flex-wrap gap-2 text-[11px]">
+          <span v-if="reviewPanel.cast_count" class="badge bg-gray-800 text-gray-300">
+            出演 {{ reviewPanel.cast_count }} 人
+          </span>
+          <span v-if="reviewPanel.body_type" class="badge bg-gray-800 text-gray-300">
+            {{ reviewPanel.body_type }}
+          </span>
+          <span v-if="reviewPanel.style" class="badge bg-gray-800 text-gray-300">
+            {{ reviewPanel.style }}
+          </span>
+          <span
+            v-if="!reviewPanel.nfo_time"
+            class="badge bg-amber-950 text-amber-300"
+            title="影片旁没有 NFO，或写入时失败。定时任务会再试"
+          >
+            未写入 NFO
+          </span>
+        </div>
+
+        <ul
+          v-if="(reviewPanel.highlights || []).length"
+          class="space-y-1 text-[12px] text-gray-300"
+        >
+          <li v-for="(item, i) in reviewPanel.highlights" :key="i">· {{ item }}</li>
+        </ul>
+
+        <p v-if="reviewPanel.summary" class="text-[12px] leading-relaxed text-gray-400">
+          {{ reviewPanel.summary }}
+        </p>
+
+        <div class="flex justify-end gap-2 pt-1">
+          <button class="btn-ghost text-xs" @click="reviewPanel = null">关闭</button>
+          <button
+            class="btn-primary text-xs"
+            :disabled="reviewBusy === reviewPanel.code"
+            @click="makeReview({ code: reviewPanel.code })"
+          >
+            {{ reviewBusy === reviewPanel.code ? '生成中…' : '重新生成' }}
           </button>
         </div>
       </div>

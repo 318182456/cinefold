@@ -274,6 +274,8 @@ class Settings:
     # 榜单缓存 30 分钟过期，预热间隔必须比它短，否则用户还是会撞上冷缓存
     warm_cache_time: str = "*/25 * * * *"
     subtitle_fill_time: str = "0 4 * * *"
+    # 影评补漏。默认排在字幕之后，两个任务都要打外部接口，错开跑
+    review_fill_time: str = "30 4 * * *"
     # --- 外部爬虫库导入 ---
     # PostgreSQL 连接串，为空则整个功能不启用（任务不注册、页面不显示）
     crawler_db_dsn: str = ""
@@ -287,6 +289,16 @@ class Settings:
     subtitle_enabled: bool = False
     # 定时补漏每轮最多处理几部。每部要跨境请求两三次，媒体库大时别设太高
     subtitle_fill_limit: int = 30
+    # 本地字幕库目录。手工下载来的字幕丢这里，按番号自动认领。
+    # 空表示不启用本地源。优先级高于网络源 —— 本地命中就不必跨境请求了
+    subtitle_local_dir: str = ""
+
+    # --- AI 影评 ---
+    # 刮削登记完成后按元数据生成看点，写进 NFO 与 Emby 简介。
+    # 关掉则只剩页面手动生成
+    review_enabled: bool = False
+    # 定时补漏每轮最多处理几部。每部一次 AI 请求，媒体库大时别设太高
+    review_fill_limit: int = 20
 
     # --- 榜单订阅 ---
     rank_page: int = 0
@@ -545,12 +557,17 @@ def load_settings() -> Settings:
         download_schedule_time=_env("DOWNLOAD_SCHEDULE_TIME", "0 22 * * *").strip("'\""),
         warm_cache_time=_env("WARM_CACHE_TIME", "*/25 * * * *").strip("'\""),
         subtitle_fill_time=_env("SUBTITLE_FILL_TIME", "0 4 * * *").strip("'\""),
+        review_fill_time=_env("REVIEW_FILL_TIME", "30 4 * * *").strip("'\""),
         crawler_db_dsn=_env("CRAWLER_DB_DSN", "").strip("'\""),
         crawler_db_time=_env("CRAWLER_DB_TIME", "").strip("'\""),
         crawler_db_limit=_env_int("CRAWLER_DB_LIMIT", 5000),
 
         subtitle_enabled=_env_bool("SUBTITLE_ENABLED", False),
         subtitle_fill_limit=_env_int("SUBTITLE_FILL_LIMIT", 30),
+        subtitle_local_dir=_env("SUBTITLE_LOCAL_DIR", "").strip("'\""),
+
+        review_enabled=_env_bool("REVIEW_ENABLED", False),
+        review_fill_limit=_env_int("REVIEW_FILL_LIMIT", 20),
 
         rank_page=_env_int("RANK_PAGE", 0),
         rank_type=_env("RANK_TYPE"),
