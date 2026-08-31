@@ -277,9 +277,10 @@ def download_torrent(
 
     # 过滤日志只记被淘汰的，选中的反而看不见 —— 排查「怎么又下了这个源」
     # 时没有这行就只能靠 hash 反查下载器
+    discount_text = f", {torrent.discount_label}" if torrent.discount_label else ""
     logger.info(
         f"[{code}] 选中 [{torrent.display_site}] {(torrent.title or '')[:50]} "
-        f"({torrent.size_mb:.0f}MB, {torrent.seeders} 种)"
+        f"({torrent.size_mb:.0f}MB, {torrent.seeders} 种{discount_text})"
     )
 
     client = downloadclient.get_download_client()
@@ -1527,6 +1528,9 @@ def send_downloading_message(code: str, torrent: Torrent | None = None) -> int:
             f"\n站点: {torrent.display_site}  "
             f"大小: {size_gb:.2f}GB  做种: {torrent.seeders}"
         )
+        # 折扣直接写进通知：下载量算不算得看这个，事后回站点翻很麻烦
+        if torrent.discount_label:
+            detail += f"  折扣: {torrent.discount_label}"
     text = f"⬇️ 开始下载\n{title}{detail}"
     return notify.broadcast_photo(photo, text, title) if photo else notify.broadcast_text(text)
 

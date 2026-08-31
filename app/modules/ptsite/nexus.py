@@ -21,8 +21,21 @@ from app.schemas.torrent import Torrent
 from app.utils import clean_header_value
 from app.utils.filters import has_chinese, has_uc, has_uhd
 
-# free 的标识在不同站点分别用图片 alt、span class 或背景色表示
-FREE_MARKERS = ("free", "免费", "pro_free")
+# 折扣标识在不同站点分别用图片 alt、span class 或背景色表示。
+# NexusPHP 原版用 pro_* class，改版站点常换成中文文案，两种都扫。
+# 顺序有意义：先匹配到的先算数，所以带 2up 的组合必须排在裸标识前面，
+# 否则 pro_free2up 会先被 pro_free 吃掉、上传翻倍那半截丢了
+DISCOUNT_MARKERS = (
+    (("pro_free2up", "2xfree", "2x免费"), "2x_free"),
+    (("pro_50pctdown2up", "2x50%"), "2x_percent_50"),
+    (("pro_free", "免费", "free"), "free"),
+    (("pro_50pctdown", "50%"), "percent_50"),
+    (("pro_30pctdown", "30%"), "percent_30"),
+    (("pro_2up", "2x上传"), "2x"),
+)
+
+# 完全不计下载量的折扣，只有这些才算 free
+FREE_DISCOUNTS = ("free", "2x_free")
 
 # 站点连续这么多次返回不可用（换域名、Cookie 失效、触发限流）就熔断
 FAILURE_THRESHOLD = 5
@@ -193,6 +206,8 @@ class NexusSite:
                 download_href = row("a[href*='download.php']").eq(0).attr("href") or ""
                 download_url = urljoin(self.host, download_href) if download_href else ""
 
+                discount = self._extract_discount(row)
+
                 results.append(Torrent(
                     id=torrent_id,
                     site=self.name,
@@ -202,7 +217,8 @@ class NexusSite:
                     chinese=has_chinese(title),
                     uc=has_uc(title),
                     uhd=has_uhd(title),
-                    free=self._is_free(row),
+                    free=discount in FREE_DISCOUNTS,
+                    discount=discount,
                     download_url=download_url,
                     detail_url=urljoin(self.host, detail_href),
                     code=code,
@@ -244,9 +260,14 @@ class NexusSite:
         return 0
 
     @staticmethod
-    def _is_free(row) -> bool:
-        html = (row.html() or "").lower()
-        return any(marker in html for marker in FREE_MARKERS)
+    def _extract_discount(row) -> str:
+        """从整行 HTML 里认折扣标识，认不出返回空串。"""
+        # 去空白：站点的中文标记常写成「2X 免费」这种带空格的形式
+        html = re.sub(r"\s+", "", (row.html() or "").lower())
+        for markers, value in DISCOUNT_MARKERS:
+            if any(marker in html for marker in markers):
+                return value
+        return ""
 
     # ------------------------------------------------------------------
     def download_seed(self, torrent: Torrent) -> bytes | None:

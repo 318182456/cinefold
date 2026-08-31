@@ -34,6 +34,31 @@ from app.schemas.torrent import Torrent
 from app.utils import get_true_code
 from app.utils.filters import has_chinese, has_uc, has_uhd
 
+# promotion 字符串 → 内部折扣标识。站点把「上传翻倍」拼在同一个串里
+# （double_upload_free），所以按倍率和折扣两段分别识别，不做全串枚举 ——
+# 站点加一种组合就要改一次表
+PROMOTION_PARTS = (
+    ("free", "free"),
+    ("fifty_percent", "percent_50"),
+    ("50", "percent_50"),
+    ("half", "percent_50"),
+    ("thirty_percent", "percent_30"),
+    ("30", "percent_30"),
+)
+
+
+def _normalize_promotion(promotion: str) -> str:
+    """double_upload_free → 2x_free，fifty_percent → percent_50。"""
+    if not promotion or promotion == "none":
+        return ""
+    double = "double_upload" in promotion or "2x" in promotion
+    for marker, value in PROMOTION_PARTS:
+        if marker in promotion:
+            return f"2x_{value}" if double else value
+    # 只有倍率没有折扣
+    return "2x" if double else promotion
+
+
 DEFAULT_HOST = "https://rousi.pro"
 # 一次搜索取多少条。番号搜索通常只有几条，给足冗余即可
 SEARCH_LIMIT = 50
@@ -146,6 +171,7 @@ class Rousi:
 
         # promotion 现在是字符串：none / free / double_upload_free …
         promotion = str(item.get("promotion") or "").lower()
+        discount = _normalize_promotion(promotion)
 
         return Torrent(
             id=int(item.get("id") or 0),
@@ -157,6 +183,7 @@ class Rousi:
             uc=has_uc(combined),
             uhd=has_uhd(title),
             free="free" in promotion,
+            discount=discount,
             download_url=self._build_download_url(item.get("id")),
             detail_url=f"{self.host}/torrents/{item.get('id')}",
             code=code,

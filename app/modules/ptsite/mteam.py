@@ -12,6 +12,26 @@ from app.utils.filters import has_chinese, has_uc, has_uhd
 API_HOSTS = ["https://api.m-team.cc", "https://api.m-team.io"]
 
 
+# M-Team 的 discount 取值 → 内部标识。站点用 _2X 前缀表上传翻倍，
+# NORMAL 与空值都表示无折扣
+DISCOUNT_MAP = {
+    "FREE": "free",
+    "_2X_FREE": "2x_free",
+    "PERCENT_50": "percent_50",
+    "_2X_PERCENT_50": "2x_percent_50",
+    "PERCENT_30": "percent_30",
+    "_2X": "2x",
+}
+
+
+def _normalize_discount(raw) -> str:
+    """把站点的 discount 归一化。未知取值原样留着，标注上总比丢掉强。"""
+    value = str(raw or "").strip().upper()
+    if not value or value == "NORMAL":
+        return ""
+    return DISCOUNT_MAP.get(value, value.lower().lstrip("_"))
+
+
 def _is_success(payload: dict) -> bool:
     """M-Team 的 code 有时是字符串 "0"，有时是数字 0。"""
     return str((payload or {}).get("code", "")) == "0"
@@ -124,8 +144,10 @@ class MTeam:
     def _convert(self, item: dict, code: str) -> Torrent:
         title = f"{item.get('name', '')} {item.get('smallDescr', '')}".strip()
         status = item.get("status") or {}
-        # discount 为 FREE / PERCENT_50 等，FREE 才是完全免费
-        free = str(status.get("discount", "")).upper() == "FREE"
+        # discount 为 FREE / PERCENT_50 / _2X_FREE 等
+        discount = _normalize_discount(status.get("discount"))
+        # 只有完全不计下载量的才算 free，PERCENT_50 这类不算
+        free = discount in ("free", "2x_free")
 
         return Torrent(
             id=int(item.get("id") or 0),
@@ -137,6 +159,7 @@ class MTeam:
             uc=has_uc(title),
             uhd=has_uhd(title),
             free=free,
+            discount=discount,
             download_url="",  # 需要单独换取带 token 的下载链接
             detail_url=f"https://kp.m-team.cc/detail/{item.get('id')}",
             code=code,

@@ -248,9 +248,14 @@ seeders: int         # 做种数
 chinese: bool        # 中文字幕
 uc: bool             # 无码破解
 uhd: bool            # 4K/8K
-free: bool           # 免费
+free: bool           # 完全不计下载量（过滤与排序只认它）
+discount: str        # 折扣标识：free / 2x_free / percent_50 / percent_30 / 2x，无折扣为空
 download_url: str    # 磁链或种子地址
 ```
+
+`discount_label` 是只读属性，把 `discount` 译成展示文案（`percent_50` → `50%`）；
+站点没给 `discount` 但标了 `free` 时退回「免费」。搜索列表的标记列、下载通知
+和「选中」日志都用它。
 
 ## 10. 未实现的配置项
 

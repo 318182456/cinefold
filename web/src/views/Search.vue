@@ -263,7 +263,12 @@ const sizeText = (mb) => (mb >= 1024 ? `${(mb / 1024).toFixed(2)} GB` : `${mb.to
               <td class="py-2 pr-3 tabular-nums text-gray-400">{{ sizeText(torrent.size_mb) }}</td>
               <td class="py-2 pr-3 tabular-nums text-gray-400">{{ torrent.seeders }}</td>
               <td class="py-2 pr-3">
-                <span v-if="torrent.free" class="badge mr-1 bg-emerald-900 text-emerald-300">免费</span>
+                <!-- 免费和 50% 用不同颜色：一眼要能分出「不计下载量」和「只计一半」 -->
+                <span
+                  v-if="torrent.discount_label"
+                  class="badge mr-1"
+                  :class="torrent.free ? 'bg-emerald-900 text-emerald-300' : 'bg-teal-900 text-teal-300'"
+                >{{ torrent.discount_label }}</span>
                 <span v-if="torrent.chinese" class="badge mr-1 bg-blue-900 text-blue-300">中字</span>
                 <span v-if="torrent.uhd" class="badge mr-1 bg-purple-900 text-purple-300">4K</span>
                 <span v-if="torrent.uc" class="badge bg-amber-900 text-amber-300">无码</span>

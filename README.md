@@ -193,11 +193,15 @@ AGENT_API_KEY=sk-xxx
       "uc": false,
       "uhd": false,
       "free": true,
+      "discount": "free",
       "download_url": "magnet:?xt=urn:btih:..."
     }
   ]
 }
 ```
+
+`discount` 可选，用于标注折扣力度：`free` / `2x_free` / `percent_50` / `percent_30` / `2x`，
+不填就只按 `free` 标成「免费」。
 
 `BT_URL` 与 `BT_JSON_DATA` 中的 `${keyword}` 会被替换成番号；URL 无占位符时自动追加 `?keyword=`。
 

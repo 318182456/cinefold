@@ -62,6 +62,7 @@ def convert_torrent(raw: dict, site: str, code: str = "") -> Torrent:
         uc=bool(raw.get("uc")) or has_uc(title),
         uhd=bool(raw.get("uhd")) or has_uhd(title),
         free=bool(raw.get("free")),
+        discount=str(raw.get("discount") or ""),
         download_url=str(raw.get("download_url") or ""),
         detail_url=str(raw.get("detail_url") or ""),
         code=code,
