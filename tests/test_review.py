@@ -275,44 +275,106 @@ class TestProfile:
 
 
 # ----------------------------------------------------------------------
+def _block(body: str) -> str:
+    """按新格式拼一段 AI 块（首尾都带标记）。"""
+    return f"{service.MARKER}\n{body}\n{service.END_MARKER}"
+
+
 class TestMergeText:
-    """AI 段可替换，官方简介必须留着。"""
+    """AI 段排最前、可替换，官方简介必须原样留着。"""
 
     def test_keeps_original(self):
-        merged = service.merge_text("官方简介", "新块")
+        merged = service.merge_text("官方简介", _block("新块"))
         assert "官方简介" in merged
         assert "新块" in merged
 
+    def test_ai_block_goes_first(self):
+        """客户端简介折叠只露前几行，垫在官方简介后面等于白写。"""
+        merged = service.merge_text("官" * 500, _block("看点"))
+        assert merged.startswith(service.MARKER)
+        assert merged.index("看点") < merged.index("官" * 10)
+
     def test_replaces_previous_block(self):
-        first = service.merge_text("官方简介", f"{service.MARKER}\n第一版")
-        second = service.merge_text(first, f"{service.MARKER}\n第二版")
+        first = service.merge_text("官方简介", _block("第一版"))
+        second = service.merge_text(first, _block("第二版"))
         assert second.count(service.MARKER) == 1
         assert "第一版" not in second
         assert "第二版" in second
         assert "官方简介" in second
 
+    def test_migrates_old_layout(self):
+        """早先是「官方简介 + AI 段在后、无结束标记」，要能原地转成新版。
+
+        存量条目都是那个形态，认不出来就会在重写时留下两段 AI 内容。
+        """
+        legacy = service.LEGACY_MARKERS[0]
+        old = f"官方简介\n\n{legacy}\n旧要点"
+        merged = service.merge_text(old, _block("新要点"))
+        assert merged.startswith(service.MARKER)
+        assert legacy not in merged
+        assert "旧要点" not in merged
+        assert "官方简介" in merged
+
+    def test_migrates_legacy_paired_markers(self):
+        """带旧首尾标记、且已排在最前的那一版，同样要能换掉。"""
+        start, end = service.LEGACY_MARKERS[0], service.LEGACY_END_MARKERS[0]
+        old = f"{start}\n旧要点\n{end}\n\n官方简介"
+        merged = service.merge_text(old, _block("新要点"))
+        assert merged.count(service.MARKER) == 1
+        assert start not in merged
+        assert "旧要点" not in merged
+        assert "官方简介" in merged
+
     def test_empty_original(self):
-        assert service.merge_text("", "块") == "块"
+        block = _block("块")
+        assert service.merge_text("", block) == block
+
+
+class TestHasContent:
+    """只有首尾标记时不算有内容，否则简介里会多两行光秃秃的分隔线。"""
+
+    def test_markers_only(self):
+        assert service._has_content(f"{service.MARKER}\n{service.END_MARKER}") is False
+
+    def test_with_content(self):
+        assert service._has_content(_block("出演 1 人")) is True
 
 
 class TestRenderBlock:
-    def test_facts_first(self):
+    """折叠后只露前三四行，所以整段必须尽量少占行。"""
+
+    def test_compact_layout(self):
         row = Review(
             code="ABC-123", cast_count=2, body_type="丰满",
             style="纪实", highlights="要点一\n要点二", summary="简评。",
         )
         block = service.render(row)
         lines = block.splitlines()
-        assert lines[0] == service.MARKER
-        assert lines[1] == "出演 2 人 / 丰满 / 纪实"
-        assert "· 要点一" in block
-        assert block.endswith("简评。")
+
+        # 事实、要点、简评各一行，标记不单独占行
+        assert len(lines) == 3
+        assert lines[0] == f"{service.MARKER} 出演 2 人 / 丰满 / 纪实"
+        # 要点全折进一行，不是每条一行
+        assert lines[1] == f"要点一{service.BULLET}要点二"
+        # 结束标记贴在最后一行末尾
+        assert lines[2] == f"简评。 {service.END_MARKER}"
+
+    def test_stays_short_with_many_highlights(self):
+        """要点再多也不该把行数撑开。"""
+        row = Review(
+            code="ABC-123", cast_count=1,
+            highlights="\n".join(f"要点{i}" for i in range(6)),
+            summary="简评。",
+        )
+        assert len(service.render(row).splitlines()) == 3
 
     def test_empty_fields_skipped(self):
         row = Review(code="ABC-123", cast_count=0, summary="只有简评")
         block = service.render(row)
         assert "出演" not in block
         assert "只有简评" in block
+        # 没有事实也没有要点时，只剩标记行与简评行
+        assert len(block.splitlines()) == 2
 
 
 class TestWriteNfo:

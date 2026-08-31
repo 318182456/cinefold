@@ -79,7 +79,7 @@ class Emby:
             logger.warning(f"查询 Emby 条目失败 {code}: {exc}")
             return {}
 
-    def update_overview(self, code: str, block: str, marker: str = "") -> bool:
+    def update_overview(self, code: str, block: str) -> bool:
         """把一段文字并进条目的简介（Overview）。
 
         Emby 的条目更新接口要求回传完整对象：POST /Items/{id} 是整体覆盖，
@@ -87,8 +87,7 @@ class Emby:
         /Users/{uid}/Items/{id} 取回完整条目，改掉 Overview 再发回去
         —— 列表接口返回的是精简对象，拿它回传同样会丢字段。
 
-        marker 给出时，简介里已有的那段（从 marker 起到末尾）先切掉再拼，
-        重复生成才不会越堆越长。
+        怎么拼由 services.review.merge_text 决定，这里不重复实现。
         """
         if not self.url or not self.api_key:
             return False
@@ -114,10 +113,12 @@ class Emby:
                 detail.raise_for_status()
                 full = detail.json()
 
-                original = full.get("Overview") or ""
-                if marker and marker in original:
-                    original = original.split(marker)[0].rstrip()
-                full["Overview"] = f"{original}\n\n{block}".strip() if original else block
+                # 拼接规则（AI 段放最前、按首尾标记精确替换旧的那段）只在
+                # services/review 里实现一份。这里再写一遍必然与那边漂移 ——
+                # 同一段文字在 NFO 与 Emby 里长得不一样才是真麻烦
+                from app.services.review import merge_text
+
+                full["Overview"] = merge_text(full.get("Overview") or "", block)
 
                 saved = client.post(
                     f"{self.url}/emby/Items/{item_id}",

@@ -32,15 +32,31 @@ from app.database.models import Code, MediaLink, Review
 from app.database.session import session_scope
 from app.utils import get_true_code
 
-# 拼进 NFO/Emby 简介时，AI 那段的起始标记。
+# 拼进 NFO/Emby 简介时，AI 那段的首尾标记。
 #
-# 非要有个标记不可：写 plot 是"改写别人的字段" —— 刮削工具已经往里放了
-# 官方简介，我们追加在后面。没有标记就分不清哪段是自己写的，重复生成时
-# 只能整段覆盖，把官方简介一起冲掉。有了标记就能只替换自己那段。
-MARKER = "── AI 看点 ──"
+# 非要有标记不可：写 plot 是"改写别人的字段" —— 刮削工具已经往里放了
+# 官方简介。没有标记就分不清哪段是自己写的，重复生成时只能整段覆盖，
+# 把官方简介一起冲掉。有了标记就能只替换自己那段。
+#
+# 要首尾两个而不是只有开头一个，是因为 AI 段现在排在官方简介**前面**
+# （见 merge_text：手机端简介折叠只露前几行，垫在后面等于白写）。
+# 只有开头标记时，切分只能从标记一刀切到结尾 —— 那会把后面的官方简介
+# 一起切掉。有了结束标记才能精确地只挖走中间这段。
+#
+# 两个都短且不单占一行（见 render）：折叠后只有三四行可用，
+# 拿一整行去画分隔线太奢侈了
+MARKER = "【AI】"
+END_MARKER = "▲"
 
-# 要点之间的分隔符。Emby 简介不渲染 markdown，用不了 - 或 *
-BULLET = "· "
+# 早先版本用过的标记。已经写进 NFO 与 Emby 的条目都带着它们，
+# 剥离时必须照样认得 —— 认不出来就不会被剥掉，新的一段又拼在前面，
+# 同一条简介里并排躺着两段 AI 内容。只能往里加，不能删
+LEGACY_MARKERS = ("── AI 看点 ──",)
+LEGACY_END_MARKERS = ("──────────",)
+
+# 要点之间的分隔符。Emby 简介不渲染 markdown，用不了 - 或 *。
+# 是分隔符不是前缀 —— 要点全折进一行，靠它断开
+BULLET = " · "
 
 
 # ----------------------------------------------------------------------
@@ -250,11 +266,15 @@ def _needs_rewrite(code: str) -> bool:
 def render(row: Review) -> str:
     """把要点拼成写进简介的那段文本。
 
-    结构化要点在前、简评在后：Emby 的简介栏在详情页上方，前几行最显眼，
-    人数/身材/风格这些一眼能扫到的事实放前面才有用。
-    """
-    lines: list[str] = [MARKER]
+    整段排在官方简介之前（见 merge_text），而客户端折叠后只露前三四行 ——
+    所以这里必须尽量少占行：
 
+    - 标记不单占一行，和事实挤在同一行的首尾
+    - 要点全部折进一行，用「·」分隔，而不是每条一行
+    - 简评单独一行放最后，被折掉也不影响前面的事实与要点
+
+    压缩后固定两行（有简评时三行），折叠状态下基本能完整露出来。
+    """
     facts: list[str] = []
     if row.cast_count:
         facts.append(f"出演 {row.cast_count} 人")
@@ -262,32 +282,88 @@ def render(row: Review) -> str:
         facts.append(row.body_type)
     if row.style:
         facts.append(row.style)
-    if facts:
-        lines.append(" / ".join(facts))
 
-    for item in (row.highlights or "").splitlines():
-        if item.strip():
-            lines.append(f"{BULLET}{item.strip()}")
+    items = [x.strip() for x in (row.highlights or "").splitlines() if x.strip()]
+
+    lines: list[str] = []
+    # 首行：标记 + 事实。事实为空时标记也不单独占行，留给要点那行
+    head = " / ".join(facts)
+    lines.append(f"{MARKER} {head}" if head else MARKER)
+
+    if items:
+        lines.append(BULLET.join(items))
 
     if row.summary:
         lines.append(row.summary)
 
+    # 结束标记贴在最后一行末尾，不再单占一行
+    lines[-1] = f"{lines[-1]} {END_MARKER}"
     return "\n".join(lines)
+
+
+def _has_content(block: str) -> bool:
+    """这段里除了首尾标记之外还有没有实质内容。
+
+    标记现在是内嵌的（见 render），空内容渲染出来是「【AI】 ▲」这么一行，
+    整行去比对不上，得先把标记抠掉再看还剩什么。剩不下东西还照写的话，
+    简介开头就会多出一行没有意义的符号。
+    """
+    for raw in block.splitlines():
+        if raw.replace(MARKER, "").replace(END_MARKER, "").strip():
+            return True
+    return False
 
 
 def merge_text(original: str, block: str) -> str:
     """把 AI 那段并进原简介，已有的替换掉而不是重复追加。
 
-    刮削工具放的官方简介要留着 —— 它才是这部片真正的介绍，
-    我们这段只是补充。所以按 MARKER 切开，只换后半段。
-    """
-    original = (original or "").rstrip()
-    if MARKER in original:
-        original = original.split(MARKER)[0].rstrip()
+    **AI 那段放在最前面。** Emby 客户端（尤其手机端）的简介栏默认折叠，
+    只露前三四行 —— 官方简介动辄几百字，看点垫在它后面就永远在折叠线
+    以下，得手动展开才看得到，等于白写。看点是给人一眼扫的，必须占前排。
 
+    刮削工具放的官方简介仍然全须全尾留着，只是挪到后面 —— 它才是这部片
+    真正的介绍，不能因为要腾位置就截断或丢弃。
+
+    切分用 END_MARKER 而不是从 MARKER 一刀切到底：AI 段现在在前面，
+    从 MARKER 往后切会把官方简介一起切掉。
+    """
+    original = _strip_block(original)
     if not original:
         return block
-    return f"{original}\n\n{block}"
+    return f"{block}\n\n{original}"
+
+
+def _strip_block(text: str) -> str:
+    """从简介里剥掉之前写进去的 AI 段，返回剩下的原文。
+
+    几种历史形态都要认得出来，否则重复生成会越堆越长：
+
+    1. 当前：MARKER 开头、END_MARKER 结尾，排在最前面
+    2. 早先：「── AI 看点 ──」开头一直到结尾，排在最后面
+
+    认不出旧标记的后果是实打实的：那段不会被剥掉，新的一段又拼在前面，
+    同一条简介里于是并排躺着两段 AI 内容。已经写出去的条目都是旧标记，
+    所以这张表只能加不能删。
+    """
+    text = (text or "").strip()
+    if not text:
+        return ""
+
+    for marker in (MARKER, *LEGACY_MARKERS):
+        if marker not in text:
+            continue
+
+        head, _, rest = text.partition(marker)
+        # 有结束标记就只吃到标记为止，后面的官方简介留着
+        for end in (END_MARKER, *LEGACY_END_MARKERS):
+            if end and end in rest:
+                _, _, tail = rest.partition(end)
+                return f"{head.strip()}\n\n{tail.strip()}".strip()
+
+        # 没有结束标记 = 早先那版，AI 段一直写到结尾，前面那截才是原文
+        return head.strip()
+
+    return text
 
 
 # ----------------------------------------------------------------------
@@ -300,8 +376,8 @@ def write_out(code: str) -> bool:
         return False
 
     block = render(row)
-    if block.strip() == MARKER:
-        # 只有标记没有内容，写出去只是给简介添乱
+    if not _has_content(block):
+        # 只有标记没有内容，写出去只是给简介添两行分隔线
         return False
 
     wrote_nfo = _write_nfo(code, block)
@@ -383,12 +459,16 @@ def _write_nfo(code: str, block: str) -> bool:
 
 
 def _tagline(block: str) -> str:
-    """取事实那一行当 tagline。没有就返回空。"""
-    lines = [ln for ln in block.splitlines() if ln.strip() and ln.strip() != MARKER]
-    if not lines:
-        return ""
-    first = lines[0]
-    return first if " / " in first else ""
+    """取事实那一行当 tagline。没有就返回空。
+
+    首行现在是「MARKER + 事实」拼在一起（见 render），所以要把标记剥掉
+    再判断，不能整行去比。
+    """
+    for raw in block.splitlines():
+        line = raw.replace(MARKER, "").replace(END_MARKER, "").strip()
+        if line:
+            return line if " / " in line else ""
+    return ""
 
 
 def _push_emby(code: str, block: str) -> bool:
@@ -399,7 +479,7 @@ def _push_emby(code: str, block: str) -> bool:
 
     try:
         from app.modules.mediaserver.emby import Emby
-        return Emby().update_overview(code, block, marker=MARKER)
+        return Emby().update_overview(code, block)
     except Exception as exc:
         logger.warning(f"[影评] {code} 推送 Emby 失败: {exc}")
         return False
