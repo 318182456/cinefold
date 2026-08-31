@@ -240,36 +240,48 @@ def _attach_holds(items: list[dict], grace: int) -> None:
         }
 
 
-def _backfill_rows(session, rows: list) -> None:
-    """给当前页里还没探过的记录就地补上大小与字幕，并写回库。
+def _backfill_sizes(session, rows: list) -> None:
+    """给这些记录补上大小并写回库。
 
-    存量记录升级上来时这两列为空，等定时任务回填要等到下一轮。页面上
-    该显示的东西不该受回填进度影响，所以看到空值就顺手探一次 ——
-    只探眼前这一页，探完写库，翻回来时已是现成的。
+    大小就在文件元数据里，一次 stat 拿到，不读内容 —— 便宜。
+    同 inode 的多条链接共享一份数据，只探一次。
     """
-    now = datetime.now()
-    # 同 inode 的多条链接共享一份数据，大小只探一次
-    by_key: dict[tuple, int | None] = {}
-    live = [r.link_path for r in rows if _exists_cached(r.link_path)]
-    subtitled: dict[str, bool] = {}
-    if live:
-        with ThreadPoolExecutor(max_workers=_PROBE_WORKERS) as pool:
-            subtitled = dict(zip(live, pool.map(_has_subtitle_cached, live)))
+    from app.services.medialink import _probe_size_of
 
+    now = datetime.now()
+    groups: dict[tuple, list] = {}
     for row in rows:
         key = (row.device, row.inode) if row.inode else ("path", row.link_path)
-        if key not in by_key:
-            target = (
-                row.link_path if _exists_cached(row.link_path)
-                else row.source_path
-            )
-            try:
-                by_key[key] = Path(target).stat().st_size
-            except OSError:
-                by_key[key] = None
-        row.size = by_key[key]
-        row.size_probe_time = now
-        row.has_subtitle = subtitled.get(row.link_path, False)
+        groups.setdefault(key, []).append(row)
+
+    members = list(groups.values())
+    with ThreadPoolExecutor(max_workers=_PROBE_WORKERS) as pool:
+        sizes = list(pool.map(
+            lambda g: _probe_size_of(g[0].link_path, g[0].source_path),
+            members,
+        ))
+
+    for group, size in zip(members, sizes):
+        for row in group:
+            row.size = size
+            row.size_probe_time = now
+
+
+def _backfill_subtitles(session, rows: list) -> None:
+    """给这些记录补上字幕状态并写回库。
+
+    比补大小贵得多：要列一次目录，没有外挂时还要读文件头找内挂轨。
+    按文件算，不能跟着 inode 复用 —— 同一份数据的多个硬链接分处不同
+    目录，各自旁边有没有字幕互不相干。
+    """
+    from app.services.medialink import _probe_subtitle_of
+
+    with ThreadPoolExecutor(max_workers=_PROBE_WORKERS) as pool:
+        subs = list(pool.map(
+            lambda r: _probe_subtitle_of(r.link_path), rows
+        ))
+    for row, has_sub in zip(rows, subs):
+        row.has_subtitle = has_sub
 
 
 @router.get("")
@@ -301,11 +313,11 @@ def list_medialinks(
     page = max(1, page)
     size = min(max(1, size), 200)
     want_subtitle = subtitle if subtitle in ("with", "without") else ""
-    # 按体积/字幕筛选或按体积排序时，结果依赖全表都已探过 ——
-    # 没探过的行在 SQL 里是 NULL，会被静默排除掉
-    need_probe = (
-        min_gb > 0 or max_gb > 0 or bool(want_subtitle)
-        or sort in ("size_desc", "size_asc")
+    # 按体积/字幕筛选或按体积排序时，结果依赖那一列全表都已探过 ——
+    # 没探过的行在 SQL 里是 NULL，会被静默排除掉。
+    # 两维分开判：按体积筛不该等字幕探完（贵一个数量级）
+    need_size_probe = (
+        min_gb > 0 or max_gb > 0 or sort in ("size_desc", "size_asc")
     )
 
     with session_scope() as session:
@@ -344,16 +356,29 @@ def list_medialinks(
         #
         # 只在真的要筛（或按体积排序）时才做，且只补 NULL 的那些。
         # 一次探完整库在 NAS 上可能要等，但只会等这一次 —— 探过就落库了。
-        if need_probe:
+        # 只补当前筛选真正需要的那一维，别顺带做另一维的活儿：
+        # 大小是一次 stat（元数据里现成的，上万条几秒），字幕要列目录、
+        # 还可能读文件头找内挂轨（上万条上百秒）。按体积筛却等字幕探完，
+        # 页面要多等一个数量级的时间
+        if need_size_probe:
             pending = list(session.scalars(
                 select(MediaLink).where(MediaLink.size_probe_time.is_(None))
+            ).all())
+            if pending:
+                logger.info(f"体积筛选前回填 {len(pending)} 条大小")
+                _backfill_sizes(session, pending)
+                session.flush()
+
+        if want_subtitle:
+            # 字幕贵，一次设上限。填不完的下次请求接着填 ——
+            # 每轮都往前推进，不会卡在同一批上
+            pending = list(session.scalars(
+                select(MediaLink).where(MediaLink.has_subtitle.is_(None))
                 .limit(_FILTER_BACKFILL_CAP)
             ).all())
             if pending:
-                logger.info(
-                    f"体积筛选前回填 {len(pending)} 条未探测的关联"
-                )
-                _backfill_rows(session, pending)
+                logger.info(f"字幕筛选前回填 {len(pending)} 条字幕状态")
+                _backfill_subtitles(session, pending)
                 session.flush()
 
         # 体积筛选。大小已落库，直接下推成 SQL 条件。
@@ -410,7 +435,9 @@ def list_medialinks(
         # 下次翻回来就已经有值了
         stale = [r for r in rows if r.size_probe_time is None]
         if stale:
-            _backfill_rows(session, stale)
+            # 只有当前页这几十条，两维一起补也很快
+            _backfill_sizes(session, stale)
+            _backfill_subtitles(session, stale)
 
         page_items = [{
             "link_path": r.link_path,
@@ -859,17 +886,23 @@ def drop_record(
 
 @router.post("/refresh-sizes")
 def refresh_link_sizes(
-    limit: int = 500, force: bool = False,
+    limit: int = 0, force: bool = False, with_subtitle: bool = True,
     current_user: str = Depends(get_current_user),
 ):
     """回填文件大小与字幕状态。
 
-    定时任务每半小时跑一批，这里是手动催一把的入口 —— 刚升级上来不想
-    等回填慢慢跑完时用。force 连已探过的也重探，用于文件被换掉后校准。
+    定时任务会自动跑，这里是手动催一把的入口 —— 刚升级上来不想等的时候用。
+
+    limit 默认 0（不限量，一轮全填完）。with_subtitle=false 只填大小，
+    快一个数量级（大小是元数据里现成的，字幕要列目录、读文件头）——
+    库上万条又只想先把体积排序用起来时走这个。
+    force 连已探过的也重探，用于文件被换掉后校准。
     """
     from app.services.medialink import refresh_sizes
 
-    result = refresh_sizes(limit=min(max(1, limit), 5000), force=force)
+    result = refresh_sizes(
+        limit=max(0, limit), force=force, with_subtitle=with_subtitle,
+    )
     _drop_stats_cache()
     return ResponseEntity.ok(
         result,

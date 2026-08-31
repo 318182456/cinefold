@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import os
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -236,57 +237,101 @@ def _probe_size(path: str) -> int | None:
         return None
 
 
-def refresh_sizes(limit: int = 500, force: bool = False) -> dict:
-    """回填 media_link 的大小与字幕状态。
+# 回填的并发度。探测全是 IO 等待，并发跑能把 NAS 的往返时间叠起来。
+# 不宜再高 —— 群晖这类设备并发请求太多反而退化
+_PROBE_WORKERS = 16
 
-    存量记录（升级上来的）这两列是空的，页面要排序筛选就得有值。
-    每轮只处理 limit 条没探过的，由对账任务反复调用，慢慢把库填满 ——
-    一次全量扫几千条挂在 NAS 上会把对账拖成分钟级。
 
-    force 为真时连已探过的也重新探一遍，用于文件真被换掉之后的手工校准。
+def _probe_size_of(link_path: str, source_path: str) -> int | None:
+    """探一条记录的大小。
 
-    大小只探还在的那一侧：硬链接与源文件共享 inode，大小必然相同。
-    两侧都没了就留空，不写 0 —— 那会让它排在"最小"里，而它其实是未知。
+    大小就在文件元数据里，一次 stat 就拿到，不读内容 —— 本来就便宜。
+    只探还在的那一侧：硬链接与源文件共享 inode，大小必然相同。
+    """
+    try:
+        if Path(link_path).exists():
+            return _probe_size(link_path)
+    except OSError:
+        pass
+    return _probe_size(source_path)
+
+
+def _probe_subtitle_of(link_path: str) -> bool:
+    """探一条记录旁边有没有字幕。
+
+    比探大小贵得多：要列一次目录，没有外挂时还要读文件头找内挂字幕。
+    上万条记录时这是回填的主要开销，所以与大小分开、可以单独跳过。
     """
     from app.services.subtitle import has_subtitle
 
+    try:
+        if not Path(link_path).exists():
+            return False
+        return has_subtitle(link_path)
+    except OSError:
+        return False
+
+
+def refresh_sizes(
+    limit: int = 0, force: bool = False, with_subtitle: bool = True,
+) -> dict:
+    """回填 media_link 的大小与字幕状态。
+
+    存量记录（升级上来的）这两列是空的，页面要排序筛选就得有值。
+
+    limit 为 0 时不限量，一轮把剩下的全填完。探测是并发的，且同 inode
+    的记录共享一次 stat，上万条也不必分成几十轮拖上几小时。
+
+    with_subtitle 为假时只回填大小，跳过字幕。两者代价差一个数量级：
+    大小是一次 stat（元数据里现成的），字幕要列目录、还可能读文件头找
+    内挂轨。库特别大又只想先把体积排序用起来时，先跑这个。
+
+    force 为真时连已探过的也重新探一遍，用于文件真被换掉之后的手工校准。
+    """
     with session_scope() as session:
         stmt = select(MediaLink)
         if not force:
             # 只挑没探过的。已经有值的不重复走磁盘
             stmt = stmt.where(MediaLink.size_probe_time.is_(None))
-        rows = list(session.scalars(stmt.limit(limit)).all())
+        if limit > 0:
+            stmt = stmt.limit(limit)
+        rows = list(session.scalars(stmt).all())
 
         if not rows:
             return {"probed": 0, "sized": 0, "remaining": 0}
 
-        now = datetime.now()
-        sized = 0
-        # 同 inode 的多条链接共享一份数据，大小只探一次
-        by_key: dict[tuple, int | None] = {}
+        # 同 inode 的多条链接共享一份数据，大小只探一次。
+        # 分类目录里放了三份链接的片子，磁盘上只走一次往返
+        groups: dict[tuple, list] = {}
         for row in rows:
             key = (row.device, row.inode) if row.inode else ("path", row.link_path)
-            if key not in by_key:
-                target = (
-                    row.link_path if Path(row.link_path).exists()
-                    else row.source_path
-                )
-                by_key[key] = _probe_size(target)
-            size = by_key[key]
+            groups.setdefault(key, []).append(row)
 
-            row.size = size
-            row.size_probe_time = now
-            if size is not None:
-                sized += 1
+        members = list(groups.values())
+        with ThreadPoolExecutor(max_workers=_PROBE_WORKERS) as pool:
+            sizes = list(pool.map(
+                lambda g: _probe_size_of(g[0].link_path, g[0].source_path),
+                members,
+            ))
 
-            # 字幕：文件不在就没有字幕可言，不必列目录
-            try:
-                row.has_subtitle = (
-                    has_subtitle(row.link_path)
-                    if Path(row.link_path).exists() else False
-                )
-            except OSError:
-                row.has_subtitle = False
+        now = datetime.now()
+        sized = 0
+        for group, size in zip(members, sizes):
+            for row in group:
+                row.size = size
+                row.size_probe_time = now
+                if size is not None:
+                    sized += 1
+
+        # 字幕按文件算，不能跟着 inode 复用 —— 同一份数据的多个硬链接
+        # 分处不同目录，各自旁边有没有字幕互不相干
+        if with_subtitle:
+            with ThreadPoolExecutor(max_workers=_PROBE_WORKERS) as pool:
+                subs = list(pool.map(
+                    lambda r: _probe_subtitle_of(r.link_path), rows
+                ))
+            for row, has_sub in zip(rows, subs):
+                row.has_subtitle = has_sub
 
         # 先 flush 再统计：刚写上的 size_probe_time 要算进去，
         # 否则这一批会被重复计入"剩余未探"
@@ -301,6 +346,45 @@ def refresh_sizes(limit: int = 500, force: bool = False) -> dict:
         f"剩余未探 {remaining} 条"
     )
     return {"probed": len(rows), "sized": sized, "remaining": remaining}
+
+
+def refresh_subtitles(limit: int = 500) -> dict:
+    """只回填字幕状态，不动大小。
+
+    与大小分开是因为代价差一个数量级：大小是一次 stat（元数据里现成的），
+    字幕要列一次目录，没有外挂时还要读文件头找内挂轨。实测 2000 条
+    大小 0.6 秒、字幕 20 秒 —— 上万条时字幕占掉几乎全部时间。
+
+    所以大小一轮全填完，字幕分批磨：每轮 limit 条，由定时任务反复调。
+    只挑 has_subtitle 为空（从没探过）的，探过就不再回头。
+    """
+    with session_scope() as session:
+        rows = list(session.scalars(
+            select(MediaLink)
+            .where(MediaLink.has_subtitle.is_(None))
+            .limit(max(1, limit))
+        ).all())
+
+        if not rows:
+            return {"probed": 0, "remaining": 0}
+
+        with ThreadPoolExecutor(max_workers=_PROBE_WORKERS) as pool:
+            subs = list(pool.map(
+                lambda r: _probe_subtitle_of(r.link_path), rows
+            ))
+        for row, has_sub in zip(rows, subs):
+            row.has_subtitle = has_sub
+
+        session.flush()
+        remaining = session.scalar(
+            select(func.count()).select_from(MediaLink)
+            .where(MediaLink.has_subtitle.is_(None))
+        ) or 0
+
+    logger.info(
+        f"媒体关联字幕回填 {len(rows)} 条，剩余未探 {remaining} 条"
+    )
+    return {"probed": len(rows), "remaining": remaining}
 
 
 def register_scrape(

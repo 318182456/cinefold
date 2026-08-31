@@ -1554,3 +1554,69 @@ def test_size_filter_backfills_before_filtering(tmp_path):
                 row = session.get(MediaLink, path)
                 if row is not None:
                     session.delete(row)
+
+
+def test_refresh_sizes_fills_everything_by_default(tmp_path):
+    """默认不限量，一轮把剩下的全填完。
+
+    此前默认 limit=500，定时任务每半小时一轮 —— 上万条要磨十几个小时，
+    这期间体积排序和筛选都是残缺的。大小就在文件元数据里（一次 stat），
+    并发探完上万条只要几秒，没有理由分批。
+    """
+    library = tmp_path / "lib"
+    library.mkdir()
+    made = []
+    for i in range(600):
+        video = library / f"MANY-{i:04d}.mp4"
+        video.write_bytes(b"x" * 128)
+        made.append(str(video))
+
+    with session_scope() as session:
+        for i, path in enumerate(made):
+            session.add(MediaLink(
+                link_path=path, code=f"MANY-{i:04d}", source_path=path,
+            ))
+
+    try:
+        # 一轮就该全填完，而不是停在 500
+        result = medialink.refresh_sizes(with_subtitle=False)
+        assert result["probed"] == 600, result
+        assert result["remaining"] == 0, result
+    finally:
+        with session_scope() as session:
+            for path in made:
+                row = session.get(MediaLink, path)
+                if row is not None:
+                    session.delete(row)
+
+
+def test_refresh_sizes_can_skip_subtitles(tmp_path):
+    """with_subtitle=False 只填大小，不碰字幕。
+
+    两者代价差一个数量级：大小是元数据里现成的，字幕要列目录、
+    没外挂时还要读文件头找内挂轨。上万条时字幕占掉几乎全部时间。
+    """
+    video = tmp_path / "SKIP-1.mp4"
+    video.write_bytes(b"x" * 256)
+    with session_scope() as session:
+        session.merge(MediaLink(
+            link_path=str(video), code="SKIP-1", source_path=str(video),
+        ))
+
+    try:
+        medialink.refresh_sizes(with_subtitle=False)
+        with session_scope() as session:
+            row = session.get(MediaLink, str(video))
+            assert row.size == 256
+            # 字幕没探，仍是空 —— 留给 refresh_subtitles
+            assert row.has_subtitle is None
+
+        medialink.refresh_subtitles()
+        with session_scope() as session:
+            row = session.get(MediaLink, str(video))
+            assert row.has_subtitle is False
+    finally:
+        with session_scope() as session:
+            row = session.get(MediaLink, str(video))
+            if row is not None:
+                session.delete(row)
