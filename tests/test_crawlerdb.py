@@ -260,6 +260,33 @@ class TestSchedulerTask:
         monkeypatch.setattr(crawlerdb, "import_all", _boom)
         assert scheduler.import_crawler_db() == 0
 
+    def test_full_entry_passes_full(self, monkeypatch):
+        """全量入口必须真的把 full 传下去。
+
+        增量水位越过之后，被旧清洗规则丢掉的行再也查不回来，
+        全量重跑是唯一的补救路径 —— 这里退化成增量就等于没有入口。
+        """
+        from app import scheduler
+        from app.core import config
+        from app.modules import crawlerdb
+
+        monkeypatch.setattr(config.get_settings(), "crawler_db_dsn",
+                            "postgresql://x/y", raising=False)
+        seen: dict = {}
+        monkeypatch.setattr(crawlerdb, "import_all",
+                            lambda **kw: seen.update(kw) or 0)
+
+        scheduler.import_crawler_db_full()
+        assert seen == {"full": True}
+
+    def test_full_entry_registered_but_not_scheduled(self):
+        """全量挂在手动入口上，不排班：每天全表扫一遍没有意义。"""
+        from app import scheduler
+
+        meta = scheduler.JOBS["import_crawler_db_full"]
+        assert meta["func"] is scheduler.import_crawler_db_full
+        assert not meta["cron_key"]
+
 
 class TestDSNMasked:
     def test_not_returned_in_plaintext(self, monkeypatch):
