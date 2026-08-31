@@ -351,6 +351,29 @@ def _run_ladysite_task(func_name: str, label: str) -> int:
         return 0
 
 
+def import_crawler_db() -> int:
+    """从外部爬虫库导入番号情报。DSN 没配时直接返回。
+
+    只补空字段、不改 status —— 导入是为了充实番号库供浏览和搜索，
+    不该让几万条番号悄悄进下载流程。要下载还是手动订阅。
+    """
+    settings = get_settings()
+    if not settings.crawler_db_dsn:
+        logger.debug("[任务] CRAWLER_DB_DSN 未配置，跳过爬虫库导入")
+        return 0
+
+    from app.modules import crawlerdb
+
+    logger.info("[任务] 开始从爬虫库导入番号")
+    try:
+        return crawlerdb.import_all()
+    except crawlerdb.CrawlerDBError as exc:
+        # 对方的库不归我们管，连不上是常态。记 warning 让它下轮再试，
+        # 不要抛出去——异常会让 APScheduler 把这个任务整个移除
+        logger.warning(f"[任务] 爬虫库导入失败: {exc}")
+        return 0
+
+
 # ======================================================================
 # 任务注册表
 # ======================================================================
@@ -367,6 +390,8 @@ JOBS: dict[str, dict] = {
     "warm_page_cache": {"func": warm_page_cache, "name": "预热页面缓存", "cron_key": "warm_cache_time"},
     # 默认凌晨跑：每部片都要跨境请求，白天跑会跟抓取任务抢过盾服务
     "fill_subtitles": {"func": fill_subtitles, "name": "补抓字幕", "cron_key": "subtitle_fill_time"},
+    # cron 默认为空，配了 CRAWLER_DB_TIME 才排班
+    "import_crawler_db": {"func": import_crawler_db, "name": "导入爬虫库", "cron_key": "crawler_db_time"},
 }
 
 # 固定间隔任务，不走 crontab

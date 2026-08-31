@@ -317,6 +317,19 @@ const GROUPS = [
             hint: '关掉后仍参与搜索、结果可手动下载，只是自动选种时不选它' },
         ],
       },
+      {
+        title: '番号情报库',
+        hint: '直连爬虫系统的 PostgreSQL，定时把番号和演员补进本地库。上面的 BT 源是同一套系统的磁链接口，两者互不影响',
+        fields: [
+          { k: 'crawler_db_dsn', label: '连接串', t: 'password',
+            ph: 'postgresql://user:pass@host:5432/dbname',
+            hint: '留空则不启用。只读对方的库，不会写入' },
+          { k: 'crawler_db_limit', label: '单次上限',
+            hint: '一次任务最多导入多少条，0 表示不限' },
+          { k: 'crawler_db_time', label: '导入时间',
+            hint: 'crontab 格式，留空则不自动执行' },
+        ],
+      },
     ],
   },
   {

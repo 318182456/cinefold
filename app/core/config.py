@@ -36,7 +36,7 @@ SENSITIVE_KEYS = {
     "agent_api_key",
     "github_token", "oidc_client_secret", "medialink_webhook_token",
     # 连接串里通常内嵌账号密码
-    "database_url", "redis_url",
+    "database_url", "redis_url", "crawler_db_dsn",
 }
 
 DEFAULT_FILTER = {
@@ -274,6 +274,13 @@ class Settings:
     # 榜单缓存 30 分钟过期，预热间隔必须比它短，否则用户还是会撞上冷缓存
     warm_cache_time: str = "*/25 * * * *"
     subtitle_fill_time: str = "0 4 * * *"
+    # --- 外部爬虫库导入 ---
+    # PostgreSQL 连接串，为空则整个功能不启用（任务不注册、页面不显示）
+    crawler_db_dsn: str = ""
+    # 默认不排班：连接串没配好就跑等于每次都往日志里写一条失败
+    crawler_db_time: str = ""
+    # 单次最多导入多少条，防止首次全量把库和日志刷爆。0 表示不限
+    crawler_db_limit: int = 5000
 
     # --- 字幕 ---
     # 刮削登记完成后自动抓字幕，并允许定时补漏。关掉则只剩页面手动触发
@@ -538,6 +545,9 @@ def load_settings() -> Settings:
         download_schedule_time=_env("DOWNLOAD_SCHEDULE_TIME", "0 22 * * *").strip("'\""),
         warm_cache_time=_env("WARM_CACHE_TIME", "*/25 * * * *").strip("'\""),
         subtitle_fill_time=_env("SUBTITLE_FILL_TIME", "0 4 * * *").strip("'\""),
+        crawler_db_dsn=_env("CRAWLER_DB_DSN", "").strip("'\""),
+        crawler_db_time=_env("CRAWLER_DB_TIME", "").strip("'\""),
+        crawler_db_limit=_env_int("CRAWLER_DB_LIMIT", 5000),
 
         subtitle_enabled=_env_bool("SUBTITLE_ENABLED", False),
         subtitle_fill_limit=_env_int("SUBTITLE_FILL_LIMIT", 30),

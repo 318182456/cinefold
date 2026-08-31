@@ -207,6 +207,31 @@ AGENT_API_KEY=sk-xxx
 
 ---
 
+## 外部爬虫库
+
+直连另一套爬虫系统的 PostgreSQL，定时把它已有的番号情报和演员补进本地库。
+与上面的自定义 BT 源是两回事：那个查磁链、走 HTTP 接口；这个补标题封面演员、直连数据库。
+
+```bash
+CRAWLER_DB_DSN='postgresql://user:pass@192.168.1.10:5432/dbname'
+CRAWLER_DB_LIMIT=5000           # 单次上限，0 不限
+CRAWLER_DB_TIME='0 3 * * *'     # 留空则只能手动触发
+```
+
+读两张表：`movie` → 本地 `code`，`cast` → 本地 `actor`。
+列名映射写在 [`app/modules/crawlerdb/importer.py`](app/modules/crawlerdb/importer.py)
+的 `MOVIE_FIELDS` / `CAST_FIELDS`，对方改表结构只改这两处。
+
+两条不会变的语义：
+
+- **只补空字段**，不覆盖已有值 —— 本地已翻译的 `cn_title`、刮削过的数据不会被冲掉
+- **不改订阅状态** —— 导入只是充实番号库供浏览和搜索，不会让番号自动进下载流程
+
+只读对方的库，不写、不建表。连不上时记 warning 并返回 0，不抛异常
+（抛出去会让调度器摘掉这个任务，对方库恢复了也不会自己跑起来）。
+
+---
+
 ## 转移做种
 
 把 qBittorrent 里已下载完的种子交给 Transmission 继续做种，qB 腾出任务位去下新的。
