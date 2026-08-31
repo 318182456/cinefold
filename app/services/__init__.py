@@ -1528,9 +1528,9 @@ def send_downloading_message(code: str, torrent: Torrent | None = None) -> int:
             f"\n站点: {torrent.display_site}  "
             f"大小: {size_gb:.2f}GB  做种: {torrent.seeders}"
         )
-        # 折扣直接写进通知：下载量算不算得看这个，事后回站点翻很麻烦
-        if torrent.discount_label:
-            detail += f"  折扣: {torrent.discount_label}"
+        # 折扣始终写进通知，无折扣也明说。省略掉的话「没折扣」和「漏解析了」
+        # 在消息里长得一样，看的人分不出该不该去站点复核
+        detail += f"  折扣: {torrent.discount_label or '无'}"
     text = f"⬇️ 开始下载\n{title}{detail}"
     return notify.broadcast_photo(photo, text, title) if photo else notify.broadcast_text(text)
 

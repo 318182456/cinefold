@@ -122,3 +122,41 @@ class TestNexusDiscount:
         from app.modules.ptsite.nexus import NexusSite, FREE_DISCOUNTS
         row = self._row("<span class='pro_50pctdown'>50%</span>")
         assert NexusSite._extract_discount(row) not in FREE_DISCOUNTS
+
+
+class TestDownloadingMessage:
+    """开始下载的通知（Telegram / 企业微信共用这一条文案）。"""
+
+    @staticmethod
+    def _send(monkeypatch, torrent):
+        from app import services
+        sent = []
+        # 番号未必在库里，_code_display 会去查 DB，这里不关心标题
+        monkeypatch.setattr(services, "_code_display", lambda code: (code, ""))
+        monkeypatch.setattr(
+            services.notify, "broadcast_text",
+            lambda text: sent.append(text) or 1,
+        )
+        services.send_downloading_message("ABP-554", torrent)
+        return sent[0]
+
+    def test_free_shown(self, monkeypatch):
+        torrent = Torrent(site="MTeam", size_mb=2048, seeders=30,
+                          free=True, discount="free")
+        assert "折扣: 免费" in self._send(monkeypatch, torrent)
+
+    def test_percent_50_shown(self, monkeypatch):
+        """50% 要照实写出来，不能因为不是 free 就当没折扣。"""
+        torrent = Torrent(site="MTeam", size_mb=2048, seeders=30,
+                          discount="percent_50")
+        assert "折扣: 50%" in self._send(monkeypatch, torrent)
+
+    def test_no_discount_says_none(self, monkeypatch):
+        """无折扣也要明说。整段省掉的话，跟「漏解析了」在消息里分不出来。"""
+        torrent = Torrent(site="MTeam", size_mb=2048, seeders=30)
+        assert "折扣: 无" in self._send(monkeypatch, torrent)
+
+    def test_no_torrent_keeps_message_short(self, monkeypatch):
+        """没带种子信息时不该凭空冒出「折扣: 无」。"""
+        text = self._send(monkeypatch, None)
+        assert "折扣" not in text
