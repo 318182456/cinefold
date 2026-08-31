@@ -3,8 +3,9 @@
 流程分两步：搜索页拿详情页地址，详情页里挑简体中文的下载链接。
 
 站点的语言标注不可信 —— 它的中文条目大量是机翻，繁简混杂，还有标着
-Chinese 实为日文原文的。所以标注只用来缩小候选范围，最终按正文内容
-判定简体（见 base.is_simplified_chinese），判不出就换下一个候选。
+Chinese 实为日文原文的。所以标注只用来给候选排序，最终按正文内容
+判定（见 base.as_simplified_chinese）：简体直接用，繁体转成简体，
+日文英文才跳到下一个候选。
 """
 from __future__ import annotations
 
@@ -18,8 +19,8 @@ from app.modules.subtitle.base import (
     MAX_SUBTITLE_BYTES,
     MIN_SUBTITLE_BYTES,
     SubtitleItem,
+    as_simplified_chinese,
     decode_subtitle,
-    is_simplified_chinese,
     looks_like_subtitle,
     pick_suffix,
 )
@@ -33,9 +34,14 @@ _ZH_HINT = re.compile(
     r"chinese|中文|简体|簡體|zh[-_]?(cn|hans)?", re.IGNORECASE
 )
 
-# 明确是繁体或粤语的标注，直接排除，省一次下载
-_ZH_EXCLUDE = re.compile(
-    r"traditional|繁體|繁体|cantonese|zh[-_]?(tw|hk|hant)", re.IGNORECASE
+# 明确是粤语的标注，直接排除，省一次下载。
+# 繁体不再排除 —— 它能转成简体（见 base.as_simplified_chinese），
+# 是可用候选，只是排在简体后面
+_ZH_EXCLUDE = re.compile(r"cantonese|yue", re.IGNORECASE)
+
+# 繁体标注。不排除，但优先级低于简体
+_ZH_TRADITIONAL = re.compile(
+    r"traditional|繁體|繁体|zh[-_]?(tw|hk|hant)", re.IGNORECASE
 )
 
 # 一个番号最多试几个候选链接。站点上同一部片常挂十几种语言，
@@ -68,8 +74,10 @@ class SubtitleCat:
             content = self._download(url)
             if not content:
                 continue
-            if not is_simplified_chinese(content):
-                logger.debug(f"[字幕] {code} 候选非简体，跳过: {url}")
+            # 繁体在这里转成简体，转不了（日文、英文）才跳过
+            content = as_simplified_chinese(content)
+            if not content:
+                logger.debug(f"[字幕] {code} 候选不是中文，跳过: {url}")
                 continue
             return SubtitleItem(
                 code=code,
@@ -110,6 +118,7 @@ class SubtitleCat:
         doc = PyQuery(html)
         preferred: list[str] = []
         fallback: list[str] = []
+        traditional: list[str] = []
 
         for link in doc("a").items():
             href = (link.attr("href") or "").strip()
@@ -125,15 +134,19 @@ class SubtitleCat:
                 continue
 
             url = absolute_url(href, self.client.host)
-            if _ZH_HINT.search(label):
+            if _ZH_TRADITIONAL.search(label):
+                traditional.append(url)
+            elif _ZH_HINT.search(label):
                 preferred.append(url)
             else:
                 fallback.append(url)
 
-        # 标注像简中的排前面；其余作兜底 —— 站点上有些条目压根没有语言
-        # 标注，但正文确实是简体
+        # 三档：标注简中的最优先；无标注的次之（站点上有些条目压根没有
+        # 语言标注，正文却是简体）；标注繁体的垫底 —— 它要多转一道，
+        # 且个别字转不地道，有简体可用时不该动它
         seen: set[str] = set()
-        return [u for u in preferred + fallback if not (u in seen or seen.add(u))]
+        ordered = preferred + fallback + traditional
+        return [u for u in ordered if not (u in seen or seen.add(u))]
 
     def _download(self, url: str) -> str:
         """下载字幕正文。拿不到或内容不像字幕时返回空串。

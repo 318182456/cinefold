@@ -333,20 +333,38 @@ _DETAIL_HTML = """
 """
 
 
-def test_candidate_links_prefers_simplified_and_drops_traditional():
-    """语言标在 URL 上，只看链接文本的话十几种语言全都无从区分。"""
+def test_candidate_links_ranks_simplified_then_rest_then_traditional():
+    """语言标在 URL 上，只看链接文本的话十几种语言全都无从区分。
+
+    繁中不再排除 —— 它能转成简体，是可用候选，只排在最后。
+    """
     from app.modules.subtitle.subtitlecat import SubtitleCat
 
     links = SubtitleCat(host="https://sc.test")._candidate_links(_DETAIL_HTML)
 
     # 简中排第一
     assert links[0].endswith("SONE-895-zh-CN.srt")
-    # 繁中直接排除，连下载都不该发起
-    assert not any("zh-TW" in u for u in links)
+    # 繁中仍在候选里，但垫底：有简体可用时不该动它
+    assert any("zh-TW" in u for u in links)
+    assert links[-1].endswith("SONE-895-zh-TW.srt")
     # 其余语言仍留作兜底（正文判定会把它们挡下）
     assert any(u.endswith("-en.srt") for u in links)
     # 全部补成绝对地址
     assert all(u.startswith("https://sc.test/") for u in links)
+
+
+def test_candidate_links_drops_cantonese():
+    """粤语转不成通用简体，仍旧排除。"""
+    from app.modules.subtitle.subtitlecat import SubtitleCat
+
+    html = """
+    <html><body>
+    <a href="/subs/1/SONE-895-zh-CN.srt">Download</a>
+    <a href="/subs/2/SONE-895-cantonese.srt">Download</a>
+    </body></html>
+    """
+    links = SubtitleCat(host="https://sc.test")._candidate_links(html)
+    assert not any("cantonese" in u for u in links)
 
 
 def test_search_result_relative_href_becomes_absolute(monkeypatch):
@@ -426,3 +444,183 @@ def test_has_subtitle_not_fooled_by_longer_code(enabled, tmp_path):
     (folder / "ABS-0011.srt").write_text(SRT_ZH, encoding="utf-8")
 
     assert not service._has_subtitle(video)
+
+# ----------------------------------------------------------------------
+# 补漏候选筛选与回写
+# ----------------------------------------------------------------------
+def _add_link(video: Path, code: str, has_subtitle=None):
+    """登记一条硬链接，has_subtitle 显式给三态之一。"""
+    with session_scope() as session:
+        session.add(MediaLink(
+            link_path=str(video), code=code, source_path=str(video),
+            inode=None, device=None, has_subtitle=has_subtitle,
+        ))
+
+
+def _make_video(folder: Path, name: str) -> Path:
+    folder.mkdir(parents=True, exist_ok=True)
+    video = folder / f"{name}.mp4"
+    video.write_bytes(b"x" * 1024)
+    return video
+
+
+def test_lacking_skips_rows_marked_subtitled(tmp_path):
+    """has_subtitle=True 的行不该再进候选 —— 这是 SQL 侧筛掉的那批。"""
+    done = _make_video(tmp_path / "a", "AAA-001")
+    todo = _make_video(tmp_path / "b", "BBB-002")
+    _add_link(done, "AAA-001", has_subtitle=True)
+    _add_link(todo, "BBB-002", has_subtitle=False)
+
+    codes = service._codes_lacking_subtitle(10)
+    assert codes == ["BBB-002"]
+
+
+def test_lacking_probes_null_rows(tmp_path):
+    """列为 NULL（旧库升上来）必须实地探，不能当成已有字幕跳过。"""
+    bare = _make_video(tmp_path / "a", "AAA-001")
+    withsub = _make_video(tmp_path / "b", "BBB-002")
+    (withsub.parent / "BBB-002.zh-CN.srt").write_text(SRT_ZH, encoding="utf-8")
+    _add_link(bare, "AAA-001", has_subtitle=None)
+    _add_link(withsub, "BBB-002", has_subtitle=None)
+
+    codes = service._codes_lacking_subtitle(10)
+    # 磁盘上真有字幕的那个要被复核掉，只剩没字幕的
+    assert codes == ["AAA-001"]
+
+
+def test_lacking_rechecks_false_rows_against_disk(tmp_path):
+    """列说 False 但用户手工放了字幕，要以磁盘为准。"""
+    video = _make_video(tmp_path / "a", "AAA-001")
+    (video.parent / "AAA-001.chs.srt").write_text(SRT_ZH, encoding="utf-8")
+    _add_link(video, "AAA-001", has_subtitle=False)
+
+    assert service._codes_lacking_subtitle(10) == []
+
+
+def test_lacking_respects_limit(tmp_path):
+    for i in range(5):
+        v = _make_video(tmp_path / f"d{i}", f"AAA-{i:03d}")
+        _add_link(v, f"AAA-{i:03d}", has_subtitle=False)
+
+    assert len(service._codes_lacking_subtitle(2)) == 2
+
+
+def test_fetch_writes_back_has_subtitle(monkeypatch, enabled, library):
+    """抓完要把列标成 True，否则下一轮补漏还会把它算进候选。"""
+    _stub_search(monkeypatch, SubtitleItem(
+        code="ABS-001", site="test", content=SRT_ZH, suffix=".srt"
+    ))
+    assert service.fetch_for_code("ABS-001") == 1
+
+    with session_scope() as session:
+        row = session.get(MediaLink, str(library))
+        assert row.has_subtitle is True
+
+
+def test_dirprobe_lists_each_directory_once(tmp_path, monkeypatch):
+    """同一目录下多部片只该列一次目录 —— 这是扫全库的主要开销。"""
+    folder = tmp_path / "mixed"
+    videos = [_make_video(folder, f"AAA-{i:03d}") for i in range(4)]
+
+    calls = []
+    real = service._subtitle_names
+
+    def counting(parent):
+        calls.append(parent)
+        return real(parent)
+
+    monkeypatch.setattr(service, "_subtitle_names", counting)
+
+    probe = service._DirProbe()
+    for v in videos:
+        probe.has_subtitle(v)
+
+    assert len(calls) == 1
+
+
+def test_matches_stem_rejects_longer_code():
+    """ABS-0011.srt 不是 ABS-001 的字幕。"""
+    assert service._matches_stem("abs-001.srt", "abs-001")
+    assert service._matches_stem("abs-001.zh-cn.srt", "abs-001")
+    assert service._matches_stem("abs-001-chs.srt", "abs-001")
+    assert not service._matches_stem("abs-0011.srt", "abs-001")
+
+
+def test_simplified_accepts_beyond_original_glyphs():
+    """扩表后，避开旧字表的正经简体字幕也该认出来。"""
+    zh = """1
+00:00:01,000 --> 00:00:04,000
+她的脸颊有点热，紧张得不敢抬头
+
+2
+00:00:05,000 --> 00:00:08,000
+爱人在剧场里等着，电灯忽然灭了
+
+3
+00:00:09,000 --> 00:00:12,000
+妈妈买了双鞋，钱不够只能先欠着
+"""
+    tw = """1
+00:00:01,000 --> 00:00:04,000
+她的臉頰有點熱，緊張得不敢抬頭
+
+2
+00:00:05,000 --> 00:00:08,000
+愛人在劇場裡等著，電燈忽然滅了
+
+3
+00:00:09,000 --> 00:00:12,000
+媽媽買了雙鞋，錢不夠只能先欠著
+"""
+    assert is_simplified_chinese(zh)
+    assert not is_simplified_chinese(tw)
+
+
+# ----------------------------------------------------------------------
+# 繁转简
+# ----------------------------------------------------------------------
+def test_to_simplified_converts_and_leaves_simplified_alone():
+    from app.modules.subtitle.t2s import has_traditional, to_simplified
+
+    assert to_simplified("臉頰劇場錢") == "脸颊剧场钱"
+    # 已经是简体的原样返回
+    assert to_simplified("脸颊剧场钱") == "脸颊剧场钱"
+    # 非汉字不受影响
+    assert to_simplified("OK 123 あい") == "OK 123 あい"
+    assert to_simplified("") == ""
+    assert has_traditional("臉頰")
+    assert not has_traditional("脸颊")
+
+
+def test_t2s_table_is_aligned():
+    """字表逐位对应是转换的前提，错位会让结果整体乱掉。"""
+    from app.modules.subtitle import t2s
+
+    assert len(t2s._TRAD_CHARS) == len(t2s._SIMP_CHARS)
+    assert len(t2s._TRAD_CHARS) > 2000
+
+
+def test_as_simplified_accepts_traditional_by_converting():
+    """繁体以前一律丢弃，现在转成简体收下 —— 这是命中率的主要来源。"""
+    from app.modules.subtitle.base import as_simplified_chinese
+
+    out = as_simplified_chinese(SRT_TW)
+    assert out
+    assert "我们说过" in out
+    # 时间轴不能被动到
+    assert "00:00:01,000 --> 00:00:04,000" in out
+
+
+def test_as_simplified_passes_simplified_through_unchanged():
+    from app.modules.subtitle.base import as_simplified_chinese
+
+    assert as_simplified_chinese(SRT_ZH) == SRT_ZH
+
+
+def test_as_simplified_still_rejects_japanese_and_english():
+    """转换只解决字形差异，看不懂的语言仍旧不收。"""
+    from app.modules.subtitle.base import as_simplified_chinese
+
+    assert as_simplified_chinese(SRT_JA) == ""
+    assert as_simplified_chinese("Hello world, plain english subtitle") == ""
+    assert as_simplified_chinese("") == ""

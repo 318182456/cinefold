@@ -37,14 +37,47 @@ class SubtitleItem:
         return f"{self.code}{self.suffix}"
 
 
-# 简体独有字形。这些字在繁体里写法不同，出现即可判定为简体。
-# 取高频字，短字幕也能命中
-_SIMPLIFIED_ONLY = set("们说过还这来时对没样开关闭东车马鸟长门问间见觉学"
-                       "个为国将实现发现给认识话请让边远进运动图书区医")
+# 简繁对照字表。左为简体、右为繁体，同一位置一一对应。
+#
+# 写成成对的字符串而不是两个独立集合：判定靠比较两边的出现次数，
+# 字表一旦错位或一边多出几个字，计数就带着偏差，而这种错误光看代码
+# 看不出来 —— 下面用断言把对齐关系钉住。
+#
+# 字表要足够大：判定的失败模式不是判错，而是两边都数不到（见
+# is_simplified_chinese 第 3 条），那种情况一律放弃。字表越小，正经的
+# 简体字幕越容易因为「恰好没用到这几十个字」而被丢掉，口语化的短字幕
+# 尤其容易踩中。
+_GLYPH_PAIRS: tuple[tuple[str, str], ...] = (
+    # 高频虚词、代词、动词
+    ("们说过还这来时对没样开关闭个为国将实现给认识话请让边远进运动",
+     "們說過還這來時對沒樣開關閉個為國將實現給認識話請讓邊遠進運動"),
+    # 具象名词
+    ("东车马鸟长门问间见觉学图书区医体单双发头买卖钱银铁钢铜针线",
+     "東車馬鳥長門問間見覺學圖書區醫體單雙發頭買賣錢銀鐵鋼銅針線"),
+    # 动作与状态
+    ("爱欢乐办务听闻写读讲谈论议决战胜负担应该须愿",
+     "愛歡樂辦務聽聞寫讀講談論議決戰勝負擔應該須願"),
+    # 身体、亲属、称谓
+    ("脸颊脑脏肿众丽妆娱儿妇妈爷孙亲师员",
+     "臉頰腦臟腫眾麗妝娛兒婦媽爺孫親師員"),
+    # 场景高频
+    ("点热闹静紧张压电灯灾难险终继续离归剧场",
+     "點熱鬧靜緊張壓電燈災難險終繼續離歸劇場"),
+)
+
+# 两边必须严格等长且逐位对应，否则计数比较从一开始就是偏的
+for _simp, _trad in _GLYPH_PAIRS:
+    assert len(_simp) == len(_trad), f"简繁字表长度不一致: {_simp!r} / {_trad!r}"
+
+# 简体独有字形。出现即为简体的证据
+_SIMPLIFIED_ONLY = frozenset("".join(s for s, _ in _GLYPH_PAIRS))
 
 # 繁体独有字形，与上面一一对应
-_TRADITIONAL_ONLY = set("們說過還這來時對沒樣開關閉東車馬鳥長門問間見覺學"
-                        "個為國將實現發現給認識話請讓邊遠進運動圖書區醫")
+_TRADITIONAL_ONLY = frozenset("".join(t for _, t in _GLYPH_PAIRS))
+
+# 同一个字不该同时算作简体证据和繁体证据（如「乐」既是「樂」的简化，
+# 本身又是繁体用字），那种字对两边计数都加分，等于噪声
+assert not (_SIMPLIFIED_ONLY & _TRADITIONAL_ONLY), "简繁字表有重叠字"
 
 # 日文假名。JAV 字幕站上日文原文字幕很多，且常被标成「Chinese」
 _KANA = re.compile(r"[぀-ゟ゠-ヿ]")
@@ -89,8 +122,12 @@ def is_simplified_chinese(text: str) -> bool:
       3. 简体字形要多于繁体 —— 两者都为 0 时（生僻用字、极短字幕）
          判为不确定，宁可放弃
 
-    不用 opencc 之类的库：为一个判定引入几十 MB 的词典不划算，
-    而字形集合对字幕这种口语化文本已经足够准。
+    只做判定、不改内容。繁体要转成简体的话走 as_simplified_chinese ——
+    判定函数保持无副作用，调用方才好分别复用这两件事。
+
+    判定本身不引 opencc：为一个判定拉进几十 MB 的词典不划算，字形集合
+    对字幕这种口语化文本已经足够准。转换那边同理，用的是内联字表（见
+    t2s）。
     """
     if not text:
         return False
@@ -112,6 +149,53 @@ def is_simplified_chinese(text: str) -> bool:
         # 两种字形都没出现，无从判断。放弃比赌一把强
         return False
     return simplified > traditional
+
+
+def is_chinese_subtitle(text: str) -> bool:
+    """这段字幕是中文吗（简繁不论）。
+
+    与 is_simplified_chinese 共用前两道判据（汉字量、假名占比），
+    只是不再要求字形偏简体 —— 繁体也算中文，转换过后一样能用。
+    """
+    if not text:
+        return False
+
+    han = _HAN.findall(text)
+    if len(han) < 20:
+        return False
+
+    kana = _KANA.findall(text)
+    if len(kana) > len(han) * 0.15:
+        return False
+
+    # 得有一边的字形能数到，否则可能是日文汉字文本之类
+    simplified = sum(1 for ch in text if ch in _SIMPLIFIED_ONLY)
+    traditional = sum(1 for ch in text if ch in _TRADITIONAL_ONLY)
+    return simplified > 0 or traditional > 0
+
+
+def as_simplified_chinese(text: str) -> str:
+    """把字幕正文规整成简体中文，拿不到就返回空串。
+
+    简体原样返回；繁体逐字转成简体。以前繁体一律丢弃，媒体库因此白缺
+    很多本来能用的字幕 —— 转换后的简体比没有字幕有用得多。
+
+    日文、英文仍旧返回空串：那是「看不懂」而非「字形不同」，转不出来。
+    """
+    if not is_chinese_subtitle(text):
+        return ""
+
+    if is_simplified_chinese(text):
+        return text
+
+    from app.modules.subtitle.t2s import to_simplified
+
+    converted = to_simplified(text)
+    # 转完再验一次：字形偏简体才算成功。转不动（表里没有这些字）时
+    # 结果与原文一样，那就仍旧不可用
+    if not is_simplified_chinese(converted):
+        return ""
+    return converted
 
 
 def looks_like_subtitle(text: str) -> bool:

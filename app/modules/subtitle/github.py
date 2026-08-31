@@ -17,8 +17,8 @@ from app.modules.subtitle.base import (
     MIN_SUBTITLE_BYTES,
     SUBTITLE_SUFFIXES,
     SubtitleItem,
+    as_simplified_chinese,
     decode_subtitle,
-    is_simplified_chinese,
     looks_like_subtitle,
 )
 
@@ -53,8 +53,9 @@ class GithubSubtitle:
                 content = self._fetch(f"/{stem}{suffix}")
                 if not content:
                     continue
-                if not is_simplified_chinese(content):
-                    logger.debug(f"[字幕] {code} 仓库命中但非简体，跳过")
+                content = as_simplified_chinese(content)
+                if not content:
+                    logger.debug(f"[字幕] {code} 仓库命中但不是中文，跳过")
                     continue
                 return SubtitleItem(
                     code=code,
