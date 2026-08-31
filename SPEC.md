@@ -169,7 +169,11 @@ create_time / update_time
 `kind="subtitle"`，因此不会被 `enabled_parser_sources` 拉进详情抓取链路。
 
 ### AI 影评 `modules/review/`
-- `reviewai` — OpenAI 兼容接口，提示词要求只按给定证据归纳，依据不足留空
+- `reviewai` — OpenAI 兼容接口，提示词要求只按给定证据归纳，依据不足留空。
+  用哪套 AI 由 `REVIEW_PROVIDER` 决定（`_pick_provider`）：`auto` 先助手后翻译，
+  `agent` / `translate` 指定死。**整套取而不是逐字段回退** —— 助手只填了地址
+  没填 Key 时，逐字段回退会拿助手地址配翻译 Key 发出去，必然 401 且日志里
+  看着两处都「配了」，极难查。指定死的那两个即使没配全也不换套
 - `profile` — 演员/厂牌画像聚合，从库里同演员、同厂牌的历史作品统计高频标签
 
 ### AI 助手 `modules/agent/`

@@ -297,6 +297,12 @@ class Settings:
     # 刮削登记完成后按元数据生成看点，写进 NFO 与 Emby 简介。
     # 关掉则只剩页面手动生成
     review_enabled: bool = False
+    # 用哪套 AI 配置。auto 先用助手、没配则回退翻译；agent / translate 指定死。
+    #
+    # 要能指定死，是因为回退是按字段各自取的：助手只填了地址没填 Key 时，
+    # 会拿助手的地址配上翻译的 Key 发出去，两边对不上必然 401，而日志里
+    # 看着两处都「配了」，很难查。选死一套就不会串
+    review_provider: str = "auto"
     # 定时补漏每轮最多处理几部。每部一次 AI 请求，媒体库大时别设太高
     review_fill_limit: int = 20
 
@@ -567,6 +573,7 @@ def load_settings() -> Settings:
         subtitle_local_dir=_env("SUBTITLE_LOCAL_DIR", "").strip("'\""),
 
         review_enabled=_env_bool("REVIEW_ENABLED", False),
+        review_provider=_env("REVIEW_PROVIDER", "auto"),
         review_fill_limit=_env_int("REVIEW_FILL_LIMIT", 20),
 
         rank_page=_env_int("RANK_PAGE", 0),

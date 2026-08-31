@@ -314,12 +314,25 @@ SUBTITLE_FILL_TIME='0 4 * * *'  # 补漏时间
 
 ```bash
 REVIEW_ENABLED=true
+REVIEW_PROVIDER=auto          # auto / agent / translate
 REVIEW_FILL_LIMIT=20          # 定时补漏每轮最多处理几部
 REVIEW_FILL_TIME='30 4 * * *' # 补漏时间，默认排在补抓字幕之后
 ```
 
-用的是「AI 助手」那套接口，没配则自动退回「翻译」的 `OPENAI_*` 配置，
-不用为这个功能再配一遍。
+用哪套 AI 由 `REVIEW_PROVIDER` 决定：
+
+| 取值 | 说明 |
+|---|---|
+| `auto` | 先用「AI 助手」（`AGENT_*`），没配则回退「翻译」（`OPENAI_*`），默认 |
+| `agent` | 指定死用助手那套 |
+| `translate` | 指定死用翻译那套 |
+
+要生成的是结构化 JSON，模型太弱容易吐不出合法结果——翻译那套若配的是
+便宜的小模型，建议选 `agent`。
+
+**整套取，不跨套拼。** 助手只填了地址没填 Key 时，逐字段回退会拿助手的
+地址配上翻译的 Key 发出去，两边对不上必然 401，而日志里看着两处都「配了」，
+这种故障极难查。指定死的那两个即使没配全也不会背着你换一套发出去。
 
 三条触发路径，与字幕同构：
 

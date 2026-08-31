@@ -88,21 +88,76 @@ def _strip_fence(text: str) -> str:
     return _FENCE.sub("", text.strip())
 
 
+# 可选的 AI 来源。auto 是先助手后翻译，其余两个指定死
+PROVIDERS = ("auto", "agent", "translate")
+
+
+def _config_of(settings, name: str) -> dict:
+    """取一套完整的 AI 配置。整套取，不跨套拼。"""
+    if name == "agent":
+        return {
+            "url": settings.agent_url,
+            "model": settings.agent_model,
+            "api_key": settings.agent_api_key,
+        }
+    return {
+        "url": settings.openai_url,
+        "model": settings.openai_model,
+        "api_key": settings.openai_api_key,
+    }
+
+
+def _usable(config: dict) -> bool:
+    """地址与 Key 都在才算配好了。少一样发出去也是白发。"""
+    return bool(config["url"] and config["api_key"])
+
+
+def _pick_provider(settings, override: str = "") -> tuple[str, dict]:
+    """定下用哪套配置，返回 (来源名, 配置)。
+
+    整套取而不是逐字段回退：助手只填了地址没填 Key 时，逐字段回退会拿
+    助手的地址配上翻译的 Key 发出去，两边对不上必然 401 —— 而日志里看着
+    两处都「配了」，这种串味的故障极难查。所以要么整套用助手，要么整套
+    用翻译。
+
+    指定死的那两个即使没配好也照用（返回的配置里 url/key 为空，enabled
+    会是 False）—— 用户明说了用这套，就不该背着他换一套发出去。
+    """
+    name = (override or settings.review_provider or "auto").strip().lower()
+    if name not in PROVIDERS:
+        logger.warning(f"[影评] 未知的 AI 来源 {name}，按 auto 处理")
+        name = "auto"
+
+    if name != "auto":
+        return name, _config_of(settings, name)
+
+    agent = _config_of(settings, "agent")
+    if _usable(agent):
+        return "agent", agent
+    return "translate", _config_of(settings, "translate")
+
+
 class ReviewAI:
     """按元数据与画像证据生成影评要点。
 
-    配置复用 AI 助手 → 翻译，前者优先。理由与 agent 一样：翻译用便宜的
-    小模型就够，这里要模型稳定吐出结构化 JSON，通常得用强一点的。
-    助手没配就退回翻译那套，别逼用户为这个功能再配一遍。
+    用哪套 AI 由 REVIEW_PROVIDER 决定（见 _pick_provider）：
+    auto 先助手后翻译，agent / translate 指定死。
+
+    默认 auto 而不是直接指定，是因为两套的定位不同：翻译用便宜的小模型
+    就够，这里要模型稳定吐出结构化 JSON，通常得用强一点的，与助手的
+    需求一致。助手没配就退回翻译，别逼用户为这个功能再配一遍。
     """
 
-    def __init__(self, url: str = "", model: str = "", api_key: str = ""):
+    def __init__(
+        self, url: str = "", model: str = "", api_key: str = "", provider: str = ""
+    ):
         settings = get_settings()
-        self.url = (url or settings.agent_url or settings.openai_url).rstrip("/")
-        self.model = (
-            model or settings.agent_model or settings.openai_model or "gpt-4o-mini"
-        )
-        self.api_key = api_key or settings.agent_api_key or settings.openai_api_key
+        self.provider, picked = _pick_provider(settings, provider)
+
+        # 显式传入的参数优先，用于测试与将来可能的按次覆盖
+        self.url = (url or picked["url"]).rstrip("/")
+        self.model = model or picked["model"] or "gpt-4o-mini"
+        self.api_key = api_key or picked["api_key"]
         self.proxy = settings.proxy or None
 
     @property
@@ -112,6 +167,9 @@ class ReviewAI:
     def generate(self, meta: dict) -> dict:
         """给一份番号元数据生成要点。失败返回空字典。"""
         if not self.enabled:
+            # 把定下的来源说出来。指定死某一套却没配全时，光看「未启用」
+            # 会以为是总开关的事，其实是那套 AI 没配
+            logger.debug(f"[影评] AI 来源 {self.provider} 未配置，跳过")
             return {}
 
         payload = _render(meta, build_profile(meta))

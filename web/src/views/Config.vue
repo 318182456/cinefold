@@ -264,6 +264,17 @@ const GROUPS = [
             hint: 'crontab 格式。默认凌晨跑，避开白天与抓取任务抢过盾服务' },
         ],
       },
+      {
+        title: '本地字幕库',
+        hint: '手工下载来的字幕丢进一个目录，按番号自动认领。命名不用讲究 —— '
+          + 'SSNI-497（迅雷）.srt、SONE-895 (1).ass 这类带来源噪声的都认，'
+          + '也会递归扫子目录。优先级高于网络源：本地命中就不必跨境请求。'
+          + '文件只读不删，可以反复用',
+        fields: [
+          { k: 'subtitle_local_dir', label: '字幕库目录', ph: '/subs',
+            hint: '容器内的路径，记得先把宿主目录挂进容器。留空表示不启用' },
+        ],
+      },
     ],
   },
   {
@@ -276,10 +287,15 @@ const GROUPS = [
         hint: '按番号的类别标签、演员与厂牌生成看点，写进影片旁的 NFO 与 '
           + 'Emby 简介。AI 没看过影片，只依据这些元数据以及同演员/同厂牌'
           + '历史作品的高频标签来归纳 —— 依据不足的字段留空，不编。'
-          + '用的是「AI 助手」的接口，没配则退回「翻译」那套',
+          + '用哪套 AI 见下面的选项',
         fields: [
           { k: 'review_enabled', label: '启用自动生成', t: 'bool',
             hint: '刮削入库即生成，并允许定时补漏' },
+          { k: 'review_provider', label: '用哪套 AI', t: 'select',
+            options: ['auto', 'agent', 'translate'],
+            hint: 'auto 先用助手、没配则回退翻译；agent / translate 指定死。'
+              + '要生成结构化结果，模型太弱容易吐不出合法 JSON，'
+              + '翻译那套若配的是小模型，建议选 agent' },
           { k: 'review_fill_limit', label: '补漏每轮上限', t: 'number', ph: '20',
             hint: '每部一次 AI 请求，媒体库大时别设太高' },
           { k: 'review_fill_time', label: '补漏时间',

@@ -106,6 +106,97 @@ class TestParse:
         assert out["cast_count"] == 0
 
 
+class TestProviderChoice:
+    """用哪套 AI 由 REVIEW_PROVIDER 决定，且必须整套取。"""
+
+    @pytest.fixture
+    def ai(self):
+        """临时铺一套助手 + 翻译配置，用完还原。"""
+        settings = get_settings()
+        keys = (
+            "review_provider",
+            "agent_url", "agent_model", "agent_api_key",
+            "openai_url", "openai_model", "openai_api_key",
+        )
+        original = {k: getattr(settings, k) for k in keys}
+
+        def _apply(**kwargs):
+            for key, value in kwargs.items():
+                setattr(settings, key, value)
+            return settings
+
+        yield _apply
+        for key, value in original.items():
+            setattr(settings, key, value)
+
+    def test_auto_prefers_agent(self, ai):
+        ai(review_provider="auto",
+           agent_url="http://agent", agent_api_key="ak", agent_model="big",
+           openai_url="http://trans", openai_api_key="tk", openai_model="small")
+        client = reviewai.ReviewAI()
+        assert client.provider == "agent"
+        assert client.url == "http://agent"
+        assert client.model == "big"
+
+    def test_auto_falls_back_to_translate(self, ai):
+        """助手没配时回退翻译，别逼用户为这个功能再配一遍。"""
+        ai(review_provider="auto",
+           agent_url="", agent_api_key="", agent_model="",
+           openai_url="http://trans", openai_api_key="tk", openai_model="small")
+        client = reviewai.ReviewAI()
+        assert client.provider == "translate"
+        assert client.url == "http://trans"
+
+    def test_explicit_translate_ignores_agent(self, ai):
+        """指定死翻译时，即使助手配好了也不用它。"""
+        ai(review_provider="translate",
+           agent_url="http://agent", agent_api_key="ak", agent_model="big",
+           openai_url="http://trans", openai_api_key="tk", openai_model="small")
+        client = reviewai.ReviewAI()
+        assert client.provider == "translate"
+        assert client.url == "http://trans"
+
+    def test_explicit_agent_not_silently_swapped(self, ai):
+        """指定死助手却没配全时，不许背着用户改用翻译。"""
+        ai(review_provider="agent",
+           agent_url="", agent_api_key="", agent_model="",
+           openai_url="http://trans", openai_api_key="tk", openai_model="small")
+        client = reviewai.ReviewAI()
+        assert client.provider == "agent"
+        assert client.enabled is False
+        assert client.url == ""
+
+    def test_never_mixes_two_configs(self, ai):
+        """助手只填了地址没填 Key 时，不许拼上翻译的 Key。
+
+        逐字段回退会拿助手地址配翻译 Key 发出去，必然 401，
+        而日志里看着两处都「配了」，极难查。
+        """
+        ai(review_provider="auto",
+           agent_url="http://agent", agent_api_key="", agent_model="",
+           openai_url="http://trans", openai_api_key="tk", openai_model="small")
+        client = reviewai.ReviewAI()
+        assert (client.url, client.api_key) == ("http://trans", "tk")
+
+    def test_unknown_value_treated_as_auto(self, ai):
+        ai(review_provider="乱填的",
+           agent_url="http://agent", agent_api_key="ak", agent_model="big",
+           openai_url="", openai_api_key="", openai_model="")
+        assert reviewai.ReviewAI().provider == "agent"
+
+    def test_explicit_argument_wins(self, ai):
+        ai(review_provider="auto",
+           agent_url="http://agent", agent_api_key="ak", agent_model="big",
+           openai_url="http://trans", openai_api_key="tk", openai_model="small")
+        assert reviewai.ReviewAI(provider="translate").url == "http://trans"
+
+    def test_disabled_without_any_config(self, ai):
+        ai(review_provider="auto",
+           agent_url="", agent_api_key="", agent_model="",
+           openai_url="", openai_api_key="", openai_model="")
+        assert reviewai.ReviewAI().enabled is False
+
+
 class TestRender:
     """给模型看的输入：空字段不出现，画像证据带命中数。"""
 
