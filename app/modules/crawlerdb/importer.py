@@ -29,6 +29,10 @@ DEFAULT_LIMIT = 5000
 # 每多少条提交一次。整批一个事务的话，中间一条坏数据会让全部回滚
 COMMIT_BATCH = 200
 
+# 被跳过的番号最多列几条。给得比常见数量宽一点：这个日志的用处就是
+# 判断正则是不是卡太严，只露前十条会看不出规律
+MAX_LOGGED_CODES = 50
+
 # 增量水位存在 Cache 表的这个 namespace 下
 WATERMARK_NS = "crawlerdb"
 WATERMARK_KEY = "movie_since"
@@ -229,14 +233,16 @@ def fetch_movies(limit: int = 0, since: str = "") -> list[dict]:
     # 合并而不是只留一条：同番号的几行往往互补（一行有封面没系列，
     # 另一行反过来），只取第一条会平白丢掉后面那些字段
     merged: dict[str, dict] = {}
-    dropped = 0
+    dropped: list[str] = []
     duplicated = 0
 
     for row in _query(sql, params):
         item = _row_to_item(row, MOVIE_FIELDS)
         code = _normalize_code(item.get("code"))
         if not code:
-            dropped += 1
+            # 记下原值而不只是计数：光有"跳过 42 行"没法判断是正则卡太严
+            # 误杀了正经番号，还是对方那边本来就有脏数据
+            dropped.append(str(row.get("number") or "")[:40] or "(空)")
             continue
         item["code"] = code
 
@@ -251,9 +257,14 @@ def fetch_movies(limit: int = 0, since: str = "") -> list[dict]:
             exist.setdefault(key, value)
 
     if dropped:
-        # 丢掉多少要说出来。静默跳过的话，「导入 0 条」和
-        # 「番号列取错了」看起来一模一样
-        logger.warning(f"[爬虫库] {dropped} 行番号格式不合法，已跳过")
+        # 丢掉多少要说出来，还要说清丢的是什么。静默跳过的话，
+        # 「导入 0 条」和「番号列取错了」看起来一模一样
+        logger.warning(
+            f"[爬虫库] {len(dropped)} 行番号格式不合法，已跳过：\n  "
+            + "\n  ".join(dropped[:MAX_LOGGED_CODES])
+            + (f"\n  …另有 {len(dropped) - MAX_LOGGED_CODES} 条"
+               if len(dropped) > MAX_LOGGED_CODES else "")
+        )
     if duplicated:
         logger.info(f"[爬虫库] 合并了 {duplicated} 行重复番号")
 
@@ -384,11 +395,13 @@ def fetch_casts(limit: int = 0) -> list[dict]:
     # 与番号同理：源表主键是 id，同名演员可能有多行，而本地主键是 name。
     # 不去重会在 commit 时撞 actor_pkey
     merged: dict[str, dict] = {}
+    nameless = 0
     for row in _query(sql, params):
         item = _row_to_item(row, CAST_FIELDS)
         # name 是本地主键，没有就整条丢掉
         name = item.get("name")
         if not name:
+            nameless += 1
             continue
         exist = merged.get(name)
         if exist is None:
@@ -396,6 +409,9 @@ def fetch_casts(limit: int = 0) -> list[dict]:
         else:
             for key, value in item.items():
                 exist.setdefault(key, value)
+
+    if nameless:
+        logger.warning(f"[爬虫库] {nameless} 行演员没有名字，已跳过")
     return list(merged.values())
 
 

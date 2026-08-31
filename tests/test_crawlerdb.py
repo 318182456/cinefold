@@ -433,3 +433,51 @@ class TestWatermark:
         written = datetime.strptime(_clean["v"], "%Y-%m-%d %H:%M:%S")
         gap = (before - written).total_seconds() / 60
         assert 9 <= gap <= 11
+
+
+class TestDroppedLogging:
+    """被跳过的番号要能从日志里看出来。
+
+    光有「跳过 42 行」没法判断是正则卡太严误杀了正经番号，
+    还是对方那边本来就有脏数据 —— 排查时第一步就是想看这些原值。
+    """
+
+    @staticmethod
+    def _capture(func):
+        """项目用 loguru，pytest 的 caplog 抓不到，得自己挂 sink。"""
+        from loguru import logger
+
+        lines: list[str] = []
+        sink = logger.add(lambda m: lines.append(str(m)), level="WARNING")
+        try:
+            func()
+        finally:
+            logger.remove(sink)
+        return "".join(lines)
+
+    def test_bad_codes_listed(self, monkeypatch):
+        rows = [
+            {**MOVIE_ROW, "number": "这不是番号"},
+            {**MOVIE_ROW, "number": "https://example.com/x"},
+        ]
+        monkeypatch.setattr(importer, "_query", lambda *a, **k: rows)
+        text = self._capture(importer.fetch_movies)
+        assert "这不是番号" in text
+        assert "example.com" in text
+
+    def test_long_list_truncated(self, monkeypatch):
+        """脏数据很多时不能把日志刷爆。"""
+        rows = [{**MOVIE_ROW, "number": f"脏数据{i}"} for i in range(80)]
+        monkeypatch.setattr(importer, "_query", lambda *a, **k: rows)
+        assert "另有 30 条" in self._capture(importer.fetch_movies)
+
+    def test_blank_number_shown_as_placeholder(self, monkeypatch):
+        """空番号也要占一行，否则日志里数量对不上。"""
+        monkeypatch.setattr(importer, "_query",
+                            lambda *a, **k: [{**MOVIE_ROW, "number": None}])
+        assert "(空)" in self._capture(importer.fetch_movies)
+
+    def test_nameless_casts_counted(self, monkeypatch):
+        monkeypatch.setattr(importer, "_query",
+                            lambda *a, **k: [{"name": None, "cn_name": "x", "photo": None}])
+        assert "没有名字" in self._capture(importer.fetch_casts)
