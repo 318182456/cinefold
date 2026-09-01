@@ -33,16 +33,18 @@ const isOrphan = computed(() => view.value === 'orphan')
 const orphanSourceGone = ref(0)
 const orphanTorrentGone = ref(0)
 
-// 孤儿一览的多选。按 link_path 选而不是 code —— 同一番号可能有多条链接，
+// 多选。按 link_path 选而不是 code —— 同一番号可能有多条链接，
 // 用户勾的是具体哪一条。不复用 useCodeSelection：那个是按 code 组织的，
-// 动作也写死成订阅/取消订阅
+// 动作也写死成订阅/取消订阅。
+// 两个视图共用这一套：全部关联按番号分组，多勾一层组级复选框，
+// 落到底下仍是一串 link_path，批量接口不用区分是从哪个视图来的
 const picked = ref(new Set())
 const batching = ref(false)
 // 批量删除的确认框。真删文件不可逆，必须再问一次
 const batchConfirm = ref('')
 
 const pickedCount = computed(() => picked.value.size)
-// 选中记录的体积合计。孤儿一览按 link_path 选，同一份数据被选中多条时
+// 选中记录的体积合计。按 link_path 选，同一份数据被选中多条时
 // 仍要去重，否则报出的"可腾出空间"会虚高
 const pickedSize = computed(() =>
   sumSize(items.value.filter((i) => picked.value.has(i.link_path))),
@@ -66,6 +68,26 @@ function togglePickAll() {
   const next = new Set(picked.value)
   const paths = items.value.map((i) => i.link_path)
   if (allPicked.value) paths.forEach((p) => next.delete(p))
+  else paths.forEach((p) => next.add(p))
+  picked.value = next
+}
+
+// 组级勾选：整组链接一起选中或取消。全部关联视图按番号分组，
+// 用户想删的通常是「这个番号的全部」，逐条勾太啰嗦
+function groupPicked(group) {
+  return group.links.every((l) => picked.value.has(l.link_path))
+}
+
+// 组内选中了一部分。复选框要显示成半选，否则跟"没选"看着一样
+function groupPartial(group) {
+  return !groupPicked(group) && group.links.some((l) => picked.value.has(l.link_path))
+}
+
+function toggleGroup(group) {
+  const next = new Set(picked.value)
+  const paths = group.links.map((l) => l.link_path)
+  // 半选时按"补齐整组"处理 —— 点一下把剩下的也勾上，比先清空再点两下顺手
+  if (groupPicked(group)) paths.forEach((p) => next.delete(p))
   else paths.forEach((p) => next.add(p))
   picked.value = next
 }
@@ -217,6 +239,8 @@ async function rescanOrphans() {
     total.value = data.total || 0
     orphanSourceGone.value = data.source_gone || 0
     orphanTorrentGone.value = data.torrent_gone || 0
+    // 重扫后列表内容可能整批变了，旧的选中已对不上眼前所见
+    clearPicked()
     toast.success(`扫描完成，共 ${data.total || 0} 条`)
   } catch (err) {
     toast.error(err.message)
@@ -282,6 +306,9 @@ function search() {
 function toggleMissing() {
   missingOnly.value = !missingOnly.value
   page.value = 1
+  // 同 search()：换了筛选条件，选中的多半已被筛掉，留着就成了
+  // 「删掉屏幕上看不见的东西」
+  clearPicked()
   load()
 }
 
@@ -782,6 +809,42 @@ onMounted(() => {
       </template>
     </div>
 
+    <!-- 多选工具条。两个视图共用：全选只作用于当前页，翻页会清空选中 -->
+    <div v-if="!loading && items.length" class="flex flex-wrap items-center gap-2">
+      <button class="btn-ghost px-3 py-1 text-xs" @click="togglePickAll">
+        {{ allPicked ? '取消本页全选' : '本页全选' }}
+      </button>
+      <span class="text-xs tabular-nums text-gray-500">
+        已选 {{ pickedCount }}
+        <!-- 删掉能腾出多少空间。批量删除前最想确认的就是这个数 -->
+        <span v-if="pickedSize" class="text-gray-400">· {{ formatSize(pickedSize) }}</span>
+      </span>
+      <button
+        v-if="pickedCount"
+        class="btn-ghost px-3 py-1 text-xs"
+        :disabled="batching"
+        @click="clearPicked"
+      >
+        清空选择
+      </button>
+
+      <button
+        class="btn px-3 py-1 text-xs"
+        :class="!pickedCount || batching ? 'btn-ghost' : 'bg-red-900 text-red-200'"
+        :disabled="!pickedCount || batching"
+        @click="batchConfirm = 'delete'"
+      >
+        批量联动删除
+      </button>
+      <button
+        class="btn-ghost px-3 py-1 text-xs"
+        :disabled="!pickedCount || batching"
+        @click="batchConfirm = 'record'"
+      >
+        批量删记录
+      </button>
+    </div>
+
     <LoadingBlock v-if="loading" :rows="5" />
 
     <!-- 孤儿一览：下载侧已删、媒体库侧仍在。
@@ -790,42 +853,6 @@ onMounted(() => {
       <p v-if="!items.length" class="card text-center text-sm text-gray-500">
         没有发现下载侧已删、媒体库侧仍在的关联。
       </p>
-
-      <!-- 多选工具条。全选只作用于当前页，翻页会清空选中 -->
-      <div v-if="items.length" class="flex flex-wrap items-center gap-2">
-        <button class="btn-ghost px-3 py-1 text-xs" @click="togglePickAll">
-          {{ allPicked ? '取消本页全选' : '本页全选' }}
-        </button>
-        <span class="text-xs tabular-nums text-gray-500">
-          已选 {{ pickedCount }}
-          <!-- 删掉能腾出多少空间。批量删除前最想确认的就是这个数 -->
-          <span v-if="pickedSize" class="text-gray-400">· {{ formatSize(pickedSize) }}</span>
-        </span>
-        <button
-          v-if="pickedCount"
-          class="btn-ghost px-3 py-1 text-xs"
-          :disabled="batching"
-          @click="clearPicked"
-        >
-          清空选择
-        </button>
-
-        <button
-          class="btn px-3 py-1 text-xs"
-          :class="!pickedCount || batching ? 'btn-ghost' : 'bg-red-900 text-red-200'"
-          :disabled="!pickedCount || batching"
-          @click="batchConfirm = 'delete'"
-        >
-          批量联动删除
-        </button>
-        <button
-          class="btn-ghost px-3 py-1 text-xs"
-          :disabled="!pickedCount || batching"
-          @click="batchConfirm = 'record'"
-        >
-          批量删记录
-        </button>
-      </div>
 
       <div v-if="items.length" class="space-y-2">
         <div
@@ -923,8 +950,23 @@ onMounted(() => {
 
     <!-- 列表：按番号分组 -->
     <div v-else class="space-y-3">
-      <div v-for="group in grouped" :key="group.code" class="card space-y-2">
+      <div
+        v-for="group in grouped"
+        :key="group.code"
+        class="card space-y-2"
+        :class="groupPicked(group) ? 'border-brand' : ''"
+      >
         <div class="flex flex-wrap items-center gap-2">
+          <!-- 组级勾选：一次选中这个番号下的全部链接。组内只勾了一部分时
+               显示半选，跟"整组都选中"区分开 -->
+          <input
+            type="checkbox"
+            class="h-3.5 w-3.5 shrink-0 cursor-pointer accent-brand"
+            :checked="groupPicked(group)"
+            :indeterminate.prop="groupPartial(group)"
+            :title="`选中 ${group.code} 的全部 ${group.links.length} 条链接`"
+            @change="toggleGroup(group)"
+          />
           <span class="font-mono text-sm font-medium text-brand">{{ group.code }}</span>
           <!-- 长片名放不进 code 列，code 是哈希 —— 把原文件名显示出来，
                否则这一组根本认不出是哪部片子 -->
@@ -1004,9 +1046,18 @@ onMounted(() => {
         <div
           v-for="link in group.links"
           :key="link.link_path"
-          class="space-y-1 rounded-lg bg-gray-900/60 px-3 py-2"
+          class="space-y-1 rounded-lg px-3 py-2"
+          :class="isPicked(link.link_path) ? 'bg-gray-800/80 ring-1 ring-brand/40' : 'bg-gray-900/60'"
         >
           <div class="flex items-start gap-2">
+            <!-- 单条勾选。同一番号下多条链接分属不同分类目录，
+                 用户可能只想删其中一处 -->
+            <input
+              type="checkbox"
+              class="mt-0.5 h-3.5 w-3.5 shrink-0 cursor-pointer accent-brand"
+              :checked="isPicked(link.link_path)"
+              @change="togglePick(link.link_path)"
+            />
             <span
               class="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full"
               :class="link.link_exists ? 'bg-emerald-500' : 'bg-red-500'"
@@ -1294,7 +1345,7 @@ onMounted(() => {
         <template v-else>
           <p class="text-[11px] text-gray-400">
             只删掉库里的关联记录，磁盘上的文件与下载器里的种子都不动。
-            用于清理已经手工处理干净的孤儿记录。
+            记录清掉后这些文件就不再受联动删除管，Emby 里照旧能看。
           </p>
         </template>
 
