@@ -648,6 +648,65 @@ class Test图源白名单:
         assert not _is_allowed("https://evil.com/x.jpg")
 
 
+class Test版本后缀回退:
+    """START-025-C 这类带版本后缀的番号，各资源站上都没有。
+
+    后缀是本地用来区分中文字幕版/无码版的，站上只有一条 START-025 ——
+    拿带后缀的去查，每个站都返回「无此番号」，整部片一个字段都抓不到。
+    """
+
+    @pytest.mark.parametrize(
+        "code,expect",
+        [
+            ("START-025-C", "START-025"),
+            ("START-025-UC", "START-025"),
+            ("START-025-UCH", "START-025"),
+            ("START-025-CH", "START-025"),
+            ("SSIS-001-U", "SSIS-001"),
+            # 没有后缀就没有可退的
+            ("START-025", ""),
+            # 结尾是数字的正常番号不能被当成后缀剥掉
+            ("T28-544", ""),
+            ("032416_267", ""),
+            ("", ""),
+        ],
+    )
+    def test_剥出基础番号(self, code, expect):
+        assert merge.base_code(code) == expect
+
+    def test_抓到就不回退(self, monkeypatch):
+        """第一次就命中时不该再多抓一轮 —— 每轮是十几次跨境请求。"""
+        calls = []
+
+        def fake(code, timeout):
+            calls.append(code)
+            return {"title": "有结果"}
+
+        monkeypatch.setattr(merge, "_fetch_one", fake)
+        assert merge.fetch_merged("START-025-C")["title"] == "有结果"
+        assert calls == ["START-025-C"]
+
+    def test_抓空才回退基础番号(self, monkeypatch):
+        calls = []
+
+        def fake(code, timeout):
+            calls.append(code)
+            return {"title": "基础番号的结果"} if code == "START-025" else {}
+
+        monkeypatch.setattr(merge, "_fetch_one", fake)
+        got = merge.fetch_merged("START-025-C")
+        assert got["title"] == "基础番号的结果"
+        assert calls == ["START-025-C", "START-025"]
+
+    def test_无后缀时不做第二轮(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            merge, "_fetch_one", lambda code, timeout: calls.append(code) or {},
+        )
+        assert merge.fetch_merged("START-025") == {}
+        assert calls == ["START-025"]
+
+
 class Test产物清单随图片存在而变:
     """没有封面就不该列海报/背景/缩略图。
 

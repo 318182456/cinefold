@@ -146,15 +146,52 @@ def merge_details(results: list[SourceResult], code: str = "") -> dict:
     return merged
 
 
+def base_code(code: str) -> str:
+    """去掉 -C / -UC 这类版本后缀，返回资源站上的番号。
+
+    版本后缀是本地用来区分「中文字幕版 / 无码版」的（文件名带、媒体库
+    条目带），但资源站上只有一条 START-025 —— 拿 START-025-C 去查，
+    每个站都会返回「无此番号」，整部片一个字段都抓不到。
+
+    没有后缀时返回空串，表示「没有别的可试了」。
+    """
+    from app.utils import _CODE_SUFFIX
+
+    upper = (code or "").upper()
+    for suffix in ("-UCH", "-UC", "-CH", "-C", "-U"):
+        if upper.endswith(suffix):
+            stripped = upper[: -len(suffix)]
+            # 剥完还得像个番号，别把 T-28 剥成 T-
+            return stripped if _CODE_SUFFIX.match(suffix) and stripped else ""
+    return ""
+
+
 def fetch_merged(code: str, timeout: float = 25.0) -> dict:
     """抓全部可用站点并合并。抓不到返回空字典。
 
     与 get_code_detail 的区别是不提前返回 —— 全部站点都要等，
     因为要比较字段质量。超时的站点自然被排除（它的 future 拿不到结果）。
+
+    带版本后缀的番号（START-025-C）在各站都查不到，抓空后自动退回
+    基础番号再试一次 —— 中文字幕版与原版的元数据本来就是同一份，
+    差别只在本地的文件名与条目。
     """
     if not code:
         return {}
 
+    merged = _fetch_one(code, timeout)
+    if merged:
+        return merged
+
+    fallback = base_code(code)
+    if fallback:
+        logger.info(f"[{code}] 各源都没有，退回基础番号 {fallback} 再试")
+        return _fetch_one(fallback, timeout)
+    return {}
+
+
+def _fetch_one(code: str, timeout: float) -> dict:
+    """按一个番号抓全部站点并合并。"""
     from app.modules import ladysite
 
     sites = ladysite._sites_for_code(code)
