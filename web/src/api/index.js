@@ -188,8 +188,9 @@ export const cancelWatchDirHold = (linkPath) =>
 
 // ---------------------------------------------------------------- 刮削
 // 试算：解析路径、算出产物落在哪，不动任何文件。
-// 只用库里已有的元数据，不跨境抓取 —— 否则点一下预览就是几十次请求
-export const previewScrape = (payload) => http.post('/scrape/preview', payload)
+// fetch_meta 为真时会真的联网检索元数据（首次几十秒），所以放宽超时
+export const previewScrape = (payload) =>
+  http.post('/scrape/preview', payload, { timeout: 600000 })
 // 执行刮削。建硬链接、写 NFO、下图都在这一步，慢，所以放宽超时
 export const runScrape = (payload) =>
   http.post('/scrape/run', payload, { timeout: 600000 })

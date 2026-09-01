@@ -112,11 +112,18 @@ def _result_dict(result: scrape_service.ScrapeResult) -> dict:
 
 
 @router.post("/preview")
-def preview(body: ScrapeRequest, current_user: str = Depends(get_current_user)):
+async def preview(body: ScrapeRequest, current_user: str = Depends(get_current_user)):
     """试算：这个路径会被解析成什么、产物落在哪，不动任何文件。
 
     接入前先跑这个 —— 命名模板写错时，产出的目录结构要等刮完才发现就晚了。
+
+    fetch_meta 为真时会真的联网检索元数据，慢（首次几十秒），
+    所以整个函数放线程池跑，别占着事件循环
     """
+    return await run_in_threadpool(_preview_sync, body)
+
+
+def _preview_sync(body: ScrapeRequest) -> dict:
     settings = get_settings()
     manual = get_true_code(body.code) if body.code else ""
     if body.code and not manual:
@@ -164,11 +171,21 @@ def preview(body: ScrapeRequest, current_user: str = Depends(get_current_user)):
     ]
 
     items = []
+    # 抓取按番号去重：分集共用一份元数据，逐个文件抓等于同一番号抓好几遍。
+    #
+    # fetch_meta 为真时真的联网检索 —— 页面上那个勾选就是这个意思，
+    # 不抓的话「本地无元数据」的番号永远显示不出标题演员封面，
+    # 用户也就无从判断刮得对不对（原来这里写死了 fetch=False，
+    # 那个勾选形同虚设）
+    meta_cache: dict[str, dict] = {}
     for code, infos in groups.items():
-        # 试算不抓网络：只用库里已有的元数据，否则点一下预览就跨境请求几十次
-        meta = scrape_service._load_meta(code, fetch=False)
+        meta = meta_cache.get(code)
+        if meta is None:
+            meta = scrape_service._load_meta(code, fetch=body.fetch_meta)
+            meta_cache[code] = meta
         for info in infos:
             target = scrape_service._target_path(meta, info, body.target_dir)
+            preview_images = {} if info.trailer else _preview_images(meta, settings)
             items.append({
                 "code": code,
                 "source": str(info.path),
@@ -178,12 +195,15 @@ def preview(body: ScrapeRequest, current_user: str = Depends(get_current_user)):
                 "uncensored": info.uncensored,
                 "target": str(target),
                 "has_meta": bool(meta),
-                # 预告片不会被刮，列出产物只会误导
-                "outputs": [] if info.trailer else _planned_outputs(target, settings),
                 # NFO 的实际内容与图片地址。让用户直接看到会写进去什么，
-                # 而不是只看到文件名 —— 元数据抓得对不对，看内容才知道
+                # 而不是只看到文件名 —— 元数据抓得对不对，看内容才知道。
+                # 预告片不会被刮，列出这些只会误导
                 "nfo": "" if info.trailer else _preview_nfo(meta, info, target),
-                "images": {} if info.trailer else _preview_images(meta, settings),
+                "images": preview_images,
+                "outputs": (
+                    [] if info.trailer
+                    else _planned_outputs(target, settings, preview_images)
+                ),
             })
 
     return ResponseEntity.ok({
@@ -199,16 +219,17 @@ def _preview_code_only(code: str, body: ScrapeRequest, settings) -> dict:
     """只给番号的试算：假设有这么一部片，算产物路径与文件清单。
 
     用来验证命名模板 —— 改完模板想看效果，不必先去找一个真实存在的影片。
-    元数据用库里已有的；没有就只能按番号算，演员/系列那些字段会显示成
-    「未知」，这本身也是有用的信息（说明这条番号还没抓过详情）。
+    fetch_meta 为真时真的去检索：只填番号想看这部片的情报，本来就该
+    联网抓，否则库里没有的番号只能显示成一堆「未知」。
     """
     from app.utils.mediafile import MediaFileInfo
 
-    meta = scrape_service._load_meta(code, fetch=False)
+    meta = scrape_service._load_meta(code, fetch=body.fetch_meta)
     # 造一个假的源文件：文件名就是番号，后缀取最常见的 .mp4。
     # 目录用番号本身，让 {source_filename} 之类的字段也算得出来
     info = MediaFileInfo(path=Path(f"{code}/{code}.mp4"), code=code)
     target = scrape_service._target_path(meta, info, body.target_dir)
+    images = _preview_images(meta, settings)
 
     item = {
         "code": code,
@@ -219,9 +240,9 @@ def _preview_code_only(code: str, body: ScrapeRequest, settings) -> dict:
         "uncensored": False,
         "target": str(target),
         "has_meta": bool(meta),
-        "outputs": _planned_outputs(target, settings),
+        "outputs": _planned_outputs(target, settings, images),
         "nfo": _preview_nfo(meta, info, target),
-        "images": _preview_images(meta, settings),
+        "images": images,
     }
     return ResponseEntity.ok({
         "items": [item],
@@ -306,11 +327,15 @@ def _preview_images(meta: dict, settings) -> dict:
     }
 
 
-def _planned_outputs(target: Path, settings) -> list[dict]:
+def _planned_outputs(target: Path, settings, images: dict) -> list[dict]:
     """这个产物会写出哪些文件。硬链接 + NFO + 图片，按写入顺序。
 
     试算的意义就在这里 —— 让用户在开刮前看全会往媒体库里放什么。
     只列文件名（同目录），路径已经在 target 里给过了。
+
+    images 是 _preview_images 的结果，用来决定图片那几项要不要列 ——
+    没有封面地址就不会有海报/背景/缩略图，剧照同理。照列会让人以为
+    刮完能拿到 10 个文件，实际只出 2 个。
     """
     from app.modules.scrape import images as scrape_images
 
@@ -318,12 +343,14 @@ def _planned_outputs(target: Path, settings) -> list[dict]:
         {"kind": "hardlink", "name": target.name},
         {"kind": "nfo", "name": target.with_suffix(".nfo").name},
     ]
-    outputs += [
-        {"kind": kind, "name": name}
-        for kind, name in scrape_images.planned_names(
-            target, max(0, settings.scrape_still_limit)
-        )
-    ]
+
+    has_cover = bool(images.get("poster") or images.get("fanart"))
+    still_count = len(images.get("stills") or [])
+    for kind, name in scrape_images.planned_names(target, still_count):
+        # 海报/背景/缩略图都来自那张封面，没封面就一个都没有
+        if kind != "still" and not has_cover:
+            continue
+        outputs.append({"kind": kind, "name": name})
     return outputs
 
 
@@ -360,7 +387,7 @@ async def run(body: ScrapeRequest, current_user: str = Depends(get_current_user)
         return ResponseEntity.fail(_explain_missing(target), code=400)
 
     if body.dry_run:
-        return preview(body, current_user)
+        return await preview(body, current_user)
 
     settings = get_settings()
     root = (

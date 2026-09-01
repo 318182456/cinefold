@@ -648,6 +648,44 @@ class Test图源白名单:
         assert not _is_allowed("https://evil.com/x.jpg")
 
 
+class Test产物清单随图片存在而变:
+    """没有封面就不该列海报/背景/缩略图。
+
+    照列会让人以为刮完能拿到 10 个文件，实际只出 2 个 ——
+    试算的全部意义就是「所见即所得」，列出不会产生的文件比不列更糟。
+    """
+
+    def _outputs(self, images, still_limit=5):
+        from app.api.endpoints.scrape import _planned_outputs
+
+        class _S:
+            scrape_still_limit = still_limit
+
+        return [
+            o["kind"]
+            for o in _planned_outputs(Path("/m/ABS-001.mp4"), _S(), images)
+        ]
+
+    def test_没有图时只列硬链接与NFO(self):
+        got = self._outputs({"poster": "", "fanart": "", "stills": []})
+        assert got == ["hardlink", "nfo"]
+
+    def test_有封面无剧照时不列剧照(self):
+        got = self._outputs({"poster": "/p", "fanart": "/f", "stills": []})
+        assert got == ["hardlink", "nfo", "poster", "fanart", "thumb"]
+
+    def test_剧照按实际张数列(self):
+        got = self._outputs({"poster": "/p", "fanart": "/f", "stills": ["/1", "/2"]})
+        assert got.count("still") == 2
+
+    def test_剧照数不超过实际拿到的(self):
+        """配置上限是 5，但源站只给了 1 张时就只该列 1 张。"""
+        got = self._outputs(
+            {"poster": "/p", "fanart": "/f", "stills": ["/1"]}, still_limit=5,
+        )
+        assert got.count("still") == 1
+
+
 class Test产物路径警告:
     """输出目录已经以分类名结尾、模板里又写一次 {category} 时，
     会得到 日本AV/日本AV/… —— 配置上很自然就会踩到，刮完才发现

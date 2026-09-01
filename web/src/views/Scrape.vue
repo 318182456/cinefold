@@ -133,7 +133,7 @@ async function doRun() {
       <div>
         <p class="text-sm font-medium text-gray-300">刮削试算</p>
         <p class="mt-0.5 text-[11px] text-gray-600">
-          先试算看产物落在哪，确认无误再开刮。试算不动任何文件，也不跨境抓元数据
+          先试算看产物落在哪、会写出什么，确认无误再开刮。试算不动任何文件，但会联网检索元数据（首次较慢）
         </p>
       </div>
 
@@ -230,8 +230,8 @@ async function doRun() {
       </p>
 
       <p v-if="noMetaCount" class="text-[11px] text-gray-600">
-        「本地无元数据」不代表刮不了 —— 试算不联网，开刮时会去抓。
-        标题、演员、封面要抓到才有
+        「本地无元数据」说明这几条番号在各数据源都没检索到 ——
+        开刮也不会有标题、演员和封面，只会建硬链接并写一份只有番号的 NFO
       </p>
 
       <div v-if="items.length" class="space-y-2">
