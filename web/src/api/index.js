@@ -186,6 +186,16 @@ export const listWatchDirHolds = (watchId = 0) =>
 export const cancelWatchDirHold = (linkPath) =>
   http.delete('/watchdirs/holds', { params: { link_path: linkPath } })
 
+// ---------------------------------------------------------------- 刮削
+// 试算：解析路径、算出产物落在哪，不动任何文件。
+// 只用库里已有的元数据，不跨境抓取 —— 否则点一下预览就是几十次请求
+export const previewScrape = (payload) => http.post('/scrape/preview', payload)
+// 执行刮削。建硬链接、写 NFO、下图都在这一步，慢，所以放宽超时
+export const runScrape = (payload) =>
+  http.post('/scrape/run', payload, { timeout: 600000 })
+// 命名模板可用的字段清单，兼带 Jinja2 是否可用
+export const getScrapeFields = () => http.get('/scrape/fields')
+
 // ---------------------------------------------------------------- 榜单
 export const getRank = (rankType = '', limit = 120) =>
   http.get('/rank', { params: { rank_type: rankType, limit } })

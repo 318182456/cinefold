@@ -50,6 +50,9 @@ class CodeInfo:
     """抓取到的番号信息。字段与 database.models.Code 对齐。"""
     code: str = ""
     title: str = ""
+    # 官方剧情简介。绝大多数站不给，目前只有 airav 的 JSON 接口有
+    # （字段名 description）。写进 NFO 的 <plot>，AI 看点拼在它前面
+    outline: str = ""
     release_date: str = ""
     duration: str = ""
     producer: str = ""
@@ -67,6 +70,7 @@ class CodeInfo:
         data = {
             "code": self.code,
             "title": self.title,
+            "outline": self.outline,
             "release_date": self.release_date,
             "duration": self.duration,
             "producer": self.producer,

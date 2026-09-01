@@ -246,6 +246,51 @@ const GROUPS = [
     tests: ['emby', 'jellyfin', 'plex'],
   },
   {
+    key: 'scrape',
+    cat: 'library',
+    title: '刮削',
+    sections: [
+      {
+        title: '刮削方式',
+        hint: '两种方式互斥 —— 都开着会同时往媒体库写同一批文件，产物互相覆盖。'
+          + '切到自建后请停掉 MDCng 的定时任务；仍收到它的 webhook 回调时，'
+          + '关联照常登记（否则联动删除会失效），但日志里会警告',
+        fields: [
+          { k: 'scrape_mode', label: '由谁刮削', t: 'select',
+            options: ['external', 'builtin'],
+            hint: 'external：等 MDCng 等外部工具回调 /webhook/scrape，行为与旧版一致。'
+              + 'builtin：自己抓元数据、写 NFO、出图、建硬链接，不需要外部工具' },
+        ],
+      },
+      {
+        title: '产物命名',
+        hint: '仅自建刮削生效。支持基础语法 {number} 与 Jinja2 高级语法 '
+          + '{{ number }}，与 MDCng 的模板写法一致，配置可直接搬过来。'
+          + '基础语法缺失字段填「未知」，高级语法填空并支持条件与 filter。'
+          + '改模板前建议先在刮削页试算，确认产物路径符合预期',
+        fields: [
+          { k: 'scrape_dir_template', label: '目录模板', ph: '{category}/{first_actor}',
+            hint: '相对「刮削输出目录」，留空表示不分子目录、全部平铺。'
+              + '注意用 first_actor 而非 actor —— 后者是全部演员的逗号拼接，'
+              + '多演员时会得到一个超长目录名' },
+          { k: 'scrape_file_template', label: '文件名模板', ph: '{number}',
+            hint: '不含扩展名。分集后缀（-CD1）会自动补，除非模板里已写了 {cd}' },
+          { k: 'scrape_category', label: '分类名', ph: '日本AV',
+            hint: '填进模板的 {category}，用来把不同类型的片分到不同目录' },
+        ],
+      },
+      {
+        title: '产物内容',
+        fields: [
+          { k: 'scrape_overwrite', label: '重刮时覆盖', t: 'bool',
+            hint: '关闭时只补缺失的，手改过的 NFO 与换过的封面不会被冲掉' },
+          { k: 'scrape_still_limit', label: '剧照张数', t: 'number', ph: '5',
+            hint: '落进影片旁的 extrafanart 目录。每张都要跨境下载，0 表示不下' },
+        ],
+      },
+    ],
+  },
+  {
     key: 'subtitle',
     cat: 'library',
     title: '字幕',

@@ -55,6 +55,9 @@ def update_database() -> None:
     """字段级迁移。旧版本升级上来时补齐新增列。"""
     migrations = [
         ("code", "cn_title", "TEXT"),
+        # 官方剧情简介。存量行为空 —— 只有 airav 给这个字段，
+        # 已有番号要等下次重抓才补上，NFO 里没有 plot 不影响其他字段
+        ("code", "outline", "TEXT"),
         ("code", "local_banner", "TEXT"),
         ("code", "local_still_photo", "TEXT"),
         ("code", "preview_url", "TEXT"),

@@ -293,6 +293,26 @@ class Settings:
     # 空表示不启用本地源。优先级高于网络源 —— 本地命中就不必跨境请求了
     subtitle_local_dir: str = ""
 
+    # --- 自建刮削 ---
+    # 刮削由谁做：
+    #   external  等外部工具（MDCng 等）的 webhook 回调，保持原有行为
+    #   builtin   自己抓元数据、写 NFO、出图、建硬链接
+    #
+    # 默认 external：升级上来的用户 MDCng 还在跑，切过来必须是显式动作，
+    # 否则两边同时往媒体库写就会打架
+    scrape_mode: str = "external"
+    # 产物目录模板，相对 medialink_scrape_dir。支持 {field} 与 Jinja2 语法
+    scrape_dir_template: str = "{category}/{first_actor}"
+    # 产物文件名模板，不含扩展名。分集后缀会自动补（模板里没写 {cd} 时）
+    scrape_file_template: str = "{number}"
+    # 分类字段的取值。填进 {category}，用来把不同类型的片分到不同目录
+    scrape_category: str = "日本AV"
+    # 重新刮削时是否覆盖已有的 NFO 与图片。
+    # 关掉则只补缺失的 —— 用户手改过的元数据不会被自动任务冲掉
+    scrape_overwrite: bool = False
+    # 落几张剧照到 extrafanart。0 表示不下剧照（每张都要跨境下载）
+    scrape_still_limit: int = 5
+
     # --- AI 影评 ---
     # 刮削登记完成后按元数据生成看点，写进 NFO 与 Emby 简介。
     # 关掉则只剩页面手动生成
@@ -571,6 +591,17 @@ def load_settings() -> Settings:
         subtitle_enabled=_env_bool("SUBTITLE_ENABLED", False),
         subtitle_fill_limit=_env_int("SUBTITLE_FILL_LIMIT", 30),
         subtitle_local_dir=_env("SUBTITLE_LOCAL_DIR", "").strip("'\""),
+
+        scrape_mode=_env("SCRAPE_MODE", "external").strip().lower(),
+        # 模板里带 {} 与引号，strip 掉引号是必要的 —— dotenv 处理标准写法，
+        # 手工编辑的文件常留下 KEY='{number}' 这种
+        scrape_dir_template=_env(
+            "SCRAPE_DIR_TEMPLATE", "{category}/{first_actor}"
+        ).strip("'\""),
+        scrape_file_template=_env("SCRAPE_FILE_TEMPLATE", "{number}").strip("'\""),
+        scrape_category=_env("SCRAPE_CATEGORY", "日本AV").strip("'\""),
+        scrape_overwrite=_env_bool("SCRAPE_OVERWRITE", False),
+        scrape_still_limit=_env_int("SCRAPE_STILL_LIMIT", 5),
 
         review_enabled=_env_bool("REVIEW_ENABLED", False),
         review_provider=_env("REVIEW_PROVIDER", "auto"),

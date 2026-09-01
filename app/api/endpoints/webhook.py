@@ -161,6 +161,17 @@ async def scrape_webhook(request: Request):
 
     code = get_true_code(number) or number
 
+    # 两套刮削同时往媒体库写会互相覆盖产物，配置上已经二选一
+    # （SCRAPE_MODE），但用户切换期间难免两边都在跑，这里留个提示。
+    #
+    # 仍然照常登记：外部工具建的硬链接是真实存在的，不登记就管不到 ——
+    # Emby 删片时反查不到记录，联动删除会失效，源文件永远留在盘上
+    if get_settings().scrape_mode == "builtin":
+        logger.warning(
+            f"[{code}] 已启用自建刮削（SCRAPE_MODE=builtin），却仍收到外部"
+            "刮削工具的回调。两者会争同一批产物，建议停掉其中一个"
+        )
+
     # stat + rglob 是阻塞 IO，别占着事件循环
     links = await run_in_threadpool(register_scrape, code, source_path, link_path)
 

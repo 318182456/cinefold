@@ -100,12 +100,12 @@ def create_app() -> FastAPI:
 
     from app.api.endpoints import (
         actors, admin, agent, auth, config, datasource, medialink, message, migrate,
-        picproxy, subscribe, watchdir, webhook,
+        picproxy, scrape, subscribe, watchdir, webhook,
     )
 
     for module in (
         admin, auth, config, subscribe, actors, picproxy, message, migrate, datasource,
-        medialink, watchdir, webhook, agent,
+        medialink, watchdir, webhook, agent, scrape,
     ):
         app.include_router(module.router, prefix=API_PREFIX)
 

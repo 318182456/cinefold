@@ -1067,6 +1067,7 @@ AIRAV_JSON = """
  "actors":[{"name":"葵司"},{"name":"乙白沙也加"}],
  "tags":[{"name":"中文字幕"},{"name":"美乳"}],
  "factories":[{"name":"S1"}],
+ "description":"女友不在的三天裡，我和她的姐姐發生了關係。",
  "img_url":"https://airav.io/img/ssis001.jpg"}
 """
 
@@ -1105,6 +1106,47 @@ class TestAiravParse:
         from app.modules.ladysite.airav import json_to_code
 
         assert json_to_code(AIRAV_JSON_EMPTY, "NOSUCH-999") is None
+
+    def test_简介繁转简(self):
+        """接口按 lng=zh-TW 请求，拿到的是繁体。
+
+        媒体库里其余字段都是简体，NFO 的 plot 混着繁体很难看。
+        airav 是目前唯一给简介的源，这个字段进 NFO 的 <plot>。
+        """
+        from app.modules.ladysite.airav import json_to_code
+
+        info = json_to_code(AIRAV_JSON, "SSIS-001")
+        assert info.outline == "女友不在的三天里，我和她的姐姐发生了关系。"
+
+    def test_简介清掉HTML标签(self):
+        from app.modules.ladysite.airav import _clean_outline
+
+        assert _clean_outline("第一句。<br>第二句。") == "第一句。 第二句。"
+        assert _clean_outline("<p>帶標籤</p>") == "带标签"
+
+    def test_简介缺失时为空(self):
+        """绝大多数站不给简介，空是常态，不能因此判定番号不存在。"""
+        from app.modules.ladysite.airav import _clean_outline, json_to_code
+
+        assert _clean_outline(None) == ""
+        assert _clean_outline("") == ""
+        # 非字符串（接口偶尔给 null 之外的类型）不能抛
+        assert _clean_outline(123) == ""
+
+        info = json_to_code(
+            '{"barcode":"ABS-001","name":"标题"}', "ABS-001"
+        )
+        assert info is not None
+        assert info.outline == ""
+
+    def test_简介超长截断在句末(self):
+        """几千字的营销文案灌进 Emby 简介栏会把 AI 看点挤到折叠线以下。"""
+        from app.modules.ladysite.airav import OUTLINE_MAX_CHARS, _clean_outline
+
+        got = _clean_outline("這是一段簡介。" * 200)
+        assert len(got) <= OUTLINE_MAX_CHARS
+        # 切在句末而不是半句上
+        assert got.endswith("。")
 
     def test_html_fallback_when_api_returns_html(self):
         """接口路径没了会返回 HTML，此时应走 HTML 分支而非报错。"""

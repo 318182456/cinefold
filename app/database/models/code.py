@@ -25,6 +25,9 @@ class Code(DBBase):
     code: Mapped[str] = mapped_column(String(64), primary_key=True)
     title: Mapped[str | None] = mapped_column(Text, nullable=True)
     cn_title: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 官方剧情简介。绝大多数资源站不给，目前只有 airav 有，所以多数行是空的。
+    # 写进 NFO 的 <plot>，AI 看点拼在它前面（见 services/review.py）
+    outline: Mapped[str | None] = mapped_column(Text, nullable=True)
     # 订阅任务、看板统计、列表页筛选都按状态查，没索引就是整表扫
     status: Mapped[int] = mapped_column(
         Integer, default=CodeStatus.NONE, nullable=False, index=True

@@ -912,7 +912,64 @@ def sync_download_status() -> int:
         logger.info(f"{completed} 个任务下载完成")
         _limit_bt_upload(client, just_done)
         _transfer_just_completed(client, just_done)
+        _scrape_just_completed(client, just_done)
     return completed
+
+
+def _scrape_just_completed(client, hashes: list[str]) -> None:
+    """刚下完的任务走自建刮削。SCRAPE_MODE != builtin 时是空操作。
+
+    external 模式下什么都不做 —— 那时刮削由 MDCng 之类的外部工具负责，
+    它刮完会回调 /webhook/scrape。两边同时往媒体库写会打架，所以必须
+    二选一。
+
+    刮削失败不能影响下载状态：状态已经改成「已下载」了，刮削是下一步。
+    异常吞掉只记日志，用户可以在页面上手动重刮。
+    """
+    if get_settings().scrape_mode != "builtin":
+        return
+    if not hashes:
+        return
+
+    from pathlib import Path
+
+    from app.services import scrape as scrape_service
+    from app.services.medialink import is_adoptable_video
+    from app.utils import mediafile
+
+    try:
+        files = client.list_torrent_files(hashes) or []
+    except Exception as exc:
+        logger.warning(f"[刮削] 取种子文件清单失败: {exc}")
+        return
+
+    videos: list[Path] = []
+    for raw in files:
+        try:
+            path = Path(raw)
+            if path.is_file() and is_adoptable_video(path):
+                videos.append(path)
+        except OSError:
+            continue
+
+    if not videos:
+        logger.debug("[刮削] 刚完成的种子里没有可刮削的影片")
+        return
+
+    # 按番号分组后整组一起刮：分集只抓一次元数据，
+    # 逐个文件刮会让 CD1/CD2 各抓一遍（见 modules/scrape/merge.py）
+    groups = mediafile.group_parts(videos)
+    for info in groups.pop("", []):
+        if info.western:
+            logger.info(f"[刮削] 欧美片命名，无番号可用，跳过: {info.path.name}")
+        else:
+            logger.warning(f"[刮削] 认不出番号，跳过: {info.path}")
+
+    for code, items in groups.items():
+        try:
+            scrape_service.scrape_group(code, items)
+        except Exception as exc:
+            logger.warning(f"[{code}] 自动刮削失败: {exc}")
 
 
 def _limit_bt_upload(client, hashes: list[str]) -> None:

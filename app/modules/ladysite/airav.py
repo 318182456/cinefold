@@ -10,12 +10,18 @@ Airav 有 JSON 接口，可靠性更好。
 from __future__ import annotations
 
 import json
+import re
 
 from loguru import logger
 from pyquery import PyQuery
 
 from app.modules.ladysite.base import CodeInfo, SiteClient, join_list
 from app.utils import get_true_code
+
+# 简介的字数上限。Emby 的简介栏折叠后只露前几行，而 AI 看点还要拼在
+# 简介前面（见 services/review.py 的 merge_text）—— 官方简介太长会把
+# 看点挤到折叠线以下，等于白写
+OUTLINE_MAX_CHARS = 500
 
 HOST = "https://airav.io"
 
@@ -76,6 +82,41 @@ def _root(host: str) -> str:
     return "/".join(parts[:3]) if len(parts) >= 3 else host
 
 
+def _clean_outline(raw: object) -> str:
+    """清洗简介文本。
+
+    三件事：
+      去 HTML  接口偶尔把 <br> 之类塞在简介里，写进 NFO 会原样显示出来
+      繁转简   接口按 lng=zh-TW 请求（见文件头），拿到的是繁体。
+               媒体库里其余字段都是简体，混排很难看
+      掐长度   个别条目的 description 是整段营销文案，几千字灌进 Emby
+               的简介栏会把页面撑爆，而 AI 看点还要拼在前面
+
+    截断落在句末而不是硬切：切在半句上比短一点更难读。
+    """
+    text = (raw or "")
+    if not isinstance(text, str) or not text.strip():
+        return ""
+
+    from app.modules.subtitle.t2s import to_simplified
+
+    # <br> 之类先换成空格，再统一清标签，避免相邻两句黏在一起
+    text = re.sub(r"<\s*br\s*/?\s*>", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"<[^>]+>", "", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    if not text:
+        return ""
+
+    text = to_simplified(text)
+
+    if len(text) > OUTLINE_MAX_CHARS:
+        head = text[:OUTLINE_MAX_CHARS]
+        # 往回找最近的句末标点，找不到就认了硬切
+        cut = max(head.rfind(mark) for mark in "。！？.!?")
+        text = head[: cut + 1] if cut > OUTLINE_MAX_CHARS // 2 else head
+    return text
+
+
 def json_to_code(raw: str, code: str = "") -> CodeInfo | None:
     """解析 Airav 的 JSON 接口响应。"""
     try:
@@ -92,6 +133,7 @@ def json_to_code(raw: str, code: str = "") -> CodeInfo | None:
 
     info = CodeInfo(code=get_true_code(payload.get("barcode") or code))
     info.title = (payload.get("name") or "").strip()
+    info.outline = _clean_outline(payload.get("description"))
     info.release_date = (payload.get("publish_date") or "")[:10]
 
     info.casts = join_list(
