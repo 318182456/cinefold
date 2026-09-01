@@ -4,6 +4,8 @@ import { previewScrape, runScrape, getScrapeFields } from '@/api'
 import { useToast } from '@/composables/useToast'
 import { useConfigStore } from '@/stores/config'
 import EmptyState from '@/components/EmptyState.vue'
+import ModalDialog from '@/components/ModalDialog.vue'
+import PrivateImage from '@/components/PrivateImage.vue'
 
 const toast = useToast()
 // 隐私模式对刮削预览同样适用 —— 这里显示的就是封面与剧照本身，
@@ -365,24 +367,23 @@ async function doRun() {
 
     <!-- 产物详情：NFO 全文与图片。
          列表里塞不下这些，但「刮得对不对」恰恰要看内容才知道 -->
-    <div
-      v-if="detail"
-      class="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
-      @click.self="detail = null"
+    <ModalDialog
+      :open="!!detail"
+      size="3xl"
+      scrollable
+      @close="detail = null"
     >
-      <div class="card flex max-h-[90vh] w-full max-w-5xl flex-col gap-3 overflow-y-auto">
-        <div class="flex items-start justify-between gap-3">
-          <div class="min-w-0">
-            <p class="text-sm font-medium text-gray-200">
-              <span class="font-mono text-brand">{{ detail.code }}</span>
-              <span v-if="detail.part" class="ml-1 text-xs text-gray-500">CD{{ detail.part }}</span>
-            </p>
-            <p class="mt-0.5 break-all font-mono text-[11px] text-gray-500">
-              {{ detail.target }}
-            </p>
-          </div>
-          <button class="btn-ghost shrink-0 px-2 py-1 text-xs" @click="detail = null">关闭</button>
-        </div>
+      <template v-if="detail" #title>
+        <p class="text-sm font-medium text-gray-200">
+          <span class="font-mono text-brand">{{ detail.code }}</span>
+          <span v-if="detail.part" class="ml-1 text-xs text-gray-500">CD{{ detail.part }}</span>
+        </p>
+        <p class="mt-0.5 break-all font-mono text-[11px] text-gray-500">
+          {{ detail.target }}
+        </p>
+      </template>
+
+      <template v-if="detail">
 
         <div class="grid gap-3 lg:grid-cols-2">
           <!-- 图片 -->
@@ -393,21 +394,17 @@ async function doRun() {
             <div v-if="detail.images?.poster || detail.images?.fanart" class="flex flex-wrap gap-3">
               <div v-if="detail.images?.poster" class="space-y-1">
                 <p class="text-[11px] text-gray-600">海报（列表封面·已裁成竖版）</p>
-                <img
+                <PrivateImage
                   :src="detail.images.poster"
-                  class="max-h-56 rounded border border-gray-800 object-contain"
-                  :class="configStore.imageClass"
-                  loading="lazy"
-                >
+                  img-class="max-h-56 rounded border border-gray-800 object-contain"
+                />
               </div>
               <div v-if="detail.images?.fanart" class="space-y-1">
                 <p class="text-[11px] text-gray-600">背景（详情页大图·原图不裁）</p>
-                <img
+                <PrivateImage
                   :src="detail.images.fanart"
-                  class="max-h-56 rounded border border-gray-800 object-contain"
-                  :class="configStore.imageClass"
-                  loading="lazy"
-                >
+                  img-class="max-h-56 rounded border border-gray-800 object-contain"
+                />
               </div>
             </div>
             <p v-else class="text-[11px] text-gray-600">没有封面地址，刮削时也不会有图</p>
@@ -417,14 +414,12 @@ async function doRun() {
                 剧照 {{ detail.images.stills.length }} 张 → extrafanart/
               </p>
               <div class="flex flex-wrap gap-1">
-                <img
+                <PrivateImage
                   v-for="(url, i) in detail.images.stills"
                   :key="i"
                   :src="url"
-                  class="h-20 rounded border border-gray-800 object-cover"
-                  :class="configStore.imageClass"
-                  loading="lazy"
-                >
+                  img-class="h-20 rounded border border-gray-800 object-cover"
+                />
               </div>
             </div>
           </div>
@@ -451,7 +446,7 @@ async function doRun() {
             </p>
           </div>
         </div>
-      </div>
-    </div>
+      </template>
+    </ModalDialog>
   </div>
 </template>

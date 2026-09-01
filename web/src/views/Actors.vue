@@ -4,13 +4,12 @@ import {
   listActors, subscribeActor, cancelActor, getActorCodes, proxyImage, purgeMigratedActors,
 } from '@/api'
 import { useToast } from '@/composables/useToast'
-import { useConfigStore } from '@/stores/config'
 import EmptyState from '@/components/EmptyState.vue'
+import PrivateImage from '@/components/PrivateImage.vue'
 import LoadingBlock from '@/components/LoadingBlock.vue'
 import CodeCard from '@/components/CodeCard.vue'
 
 const toast = useToast()
-const configStore = useConfigStore()
 const items = ref([])
 const loading = ref(false)
 const keyword = ref('')
@@ -161,12 +160,10 @@ onMounted(() => {
       >
         <!-- 隐私模式的 blur 会糊出图片边界，外面这层圆形容器把它裁回来 -->
         <div v-if="actor.photo" class="h-14 w-14 shrink-0 overflow-hidden rounded-full">
-          <img
+          <PrivateImage
             :src="proxyImage(actor.photo)"
             :alt="actor.name"
-            loading="lazy"
-            class="h-full w-full object-cover"
-            :class="configStore.imageClass"
+            img-class="h-full w-full object-cover"
           />
         </div>
         <div v-else class="h-14 w-14 shrink-0 rounded-full bg-gray-800" />

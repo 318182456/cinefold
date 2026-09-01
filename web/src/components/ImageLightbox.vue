@@ -1,6 +1,6 @@
 <script setup>
 import { onBeforeUnmount, watch } from 'vue'
-import { useConfigStore } from '@/stores/config'
+import PrivateImage from '@/components/PrivateImage.vue'
 
 const props = defineProps({
   src: { type: String, default: '' },
@@ -8,7 +8,6 @@ const props = defineProps({
 })
 const emit = defineEmits(['close'])
 
-const configStore = useConfigStore()
 
 function onKeydown(event) {
   if (event.key === 'Escape') emit('close')
@@ -46,11 +45,11 @@ onBeforeUnmount(() => {
         <!-- 图本身不关闭，留给用户放大看细节。
              隐私模式在这儿照样生效 —— 全屏大图才是最怕被旁人瞥见的，
              鼠标移上去（触屏点一下）就看清 -->
-        <img
+        <PrivateImage
           :src="src"
           :alt="alt"
-          class="max-h-full max-w-full rounded-lg object-contain shadow-2xl"
-          :class="configStore.imageClass"
+          loading="eager"
+          img-class="max-h-full max-w-full rounded-lg object-contain shadow-2xl"
           @click.stop
         />
         <button

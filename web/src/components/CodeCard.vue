@@ -10,7 +10,7 @@ import {
   translateCodeTitle,
 } from '@/api'
 import { useToast } from '@/composables/useToast'
-import { useConfigStore } from '@/stores/config'
+import PrivateImage from '@/components/PrivateImage.vue'
 import { parseCasts } from '@/utils/cast'
 import ImageLightbox from './ImageLightbox.vue'
 
@@ -23,7 +23,6 @@ const props = defineProps({
 const emit = defineEmits(['changed', 'detail', 'toggle-select'])
 
 const toast = useToast()
-const configStore = useConfigStore()
 const busy = ref(false)
 const refetching = ref(false)
 const imageFailed = ref(false)
@@ -187,20 +186,15 @@ async function reset() {
       class="relative h-28 w-20 shrink-0 overflow-hidden rounded-lg bg-gray-800"
       @click.stop="selectable ? emit('toggle-select', item.code) : (lightboxOpen = true)"
     >
-      <img
-        v-if="cover && !imageFailed"
-        :src="cover"
+      <PrivateImage
+        :src="imageFailed ? '' : cover"
         :alt="item.code"
-        loading="lazy"
         title="点击查看完整封面"
-        class="h-full w-full cursor-pointer object-cover"
-        :class="configStore.imageClass"
-        :style="{ objectPosition: coverPosition }"
+        img-class="h-full w-full cursor-pointer object-cover"
+        :object-position="coverPosition"
+        fallback-text="无封面"
         @error="imageFailed = true"
       />
-      <div v-else class="flex h-full w-full items-center justify-center text-[10px] text-gray-600">
-        无封面
-      </div>
     </div>
 
     <!-- 信息 -->
