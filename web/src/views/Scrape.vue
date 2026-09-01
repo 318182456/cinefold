@@ -1,10 +1,14 @@
 <script setup>
 import { computed, onMounted, reactive, ref } from 'vue'
-import { previewScrape, runScrape, getScrapeFields, getConfig } from '@/api'
+import { previewScrape, runScrape, getScrapeFields } from '@/api'
 import { useToast } from '@/composables/useToast'
+import { useConfigStore } from '@/stores/config'
 import EmptyState from '@/components/EmptyState.vue'
 
 const toast = useToast()
+// 隐私模式对刮削预览同样适用 —— 这里显示的就是封面与剧照本身，
+// 和番号卡片上那些是同一类内容，没理由在这个页面裸奔
+const configStore = useConfigStore()
 
 const form = reactive({
   path: '',
@@ -60,7 +64,12 @@ const noMetaCount = computed(() => items.value.filter((i) => !i.has_meta).length
 
 onMounted(async () => {
   try {
-    const [data, config] = await Promise.all([getScrapeFields(), getConfig()])
+    // 配置走 store：它已经缓存过一份，而且隐私模式也从这里取，
+    // 自己再请求一遍会多一次往返，还可能和 store 里的值不一致
+    const [data, config] = await Promise.all([
+      getScrapeFields(),
+      configStore.load(),
+    ])
     fields.value = data.fields || []
     jinjaAvailable.value = data.jinja_available !== false
     mode.value = config?.scrape_mode || ''
@@ -387,6 +396,7 @@ async function doRun() {
                 <img
                   :src="detail.images.poster"
                   class="max-h-56 rounded border border-gray-800 object-contain"
+                  :class="configStore.imageClass"
                   loading="lazy"
                 >
               </div>
@@ -395,6 +405,7 @@ async function doRun() {
                 <img
                   :src="detail.images.fanart"
                   class="max-h-56 rounded border border-gray-800 object-contain"
+                  :class="configStore.imageClass"
                   loading="lazy"
                 >
               </div>
@@ -411,6 +422,7 @@ async function doRun() {
                   :key="i"
                   :src="url"
                   class="h-20 rounded border border-gray-800 object-cover"
+                  :class="configStore.imageClass"
                   loading="lazy"
                 >
               </div>
