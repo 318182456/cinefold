@@ -26,6 +26,16 @@ const jinjaAvailable = ref(true)
 const mode = ref('')
 const showFields = ref(false)
 
+// 产物类型的显示名。kind 由后端给（与 images.planned_names 一致）
+const OUTPUT_LABELS = {
+  hardlink: '硬链接',
+  nfo: 'NFO',
+  poster: '海报',
+  fanart: '背景',
+  thumb: '缩略图',
+  still: '剧照',
+}
+
 // 模板语法示例。写成常量而不是直接放进模板 —— 花括号会被 Vue 当插值解析
 const SYNTAX_BASIC = '{number}'
 const SYNTAX_JINJA = '{{ number | upper }}'
@@ -34,8 +44,12 @@ const items = computed(() => result.value?.items || [])
 const unknown = computed(() => result.value?.unknown || [])
 
 // 试算过且有产物才允许开刮 —— 强制先看一眼产物路径再动手。
-// 刮削会真的建硬链接写文件，路径错了要手工收拾
-const canRun = computed(() => items.value.length > 0 && !running.value)
+// 刮削会真的建硬链接写文件，路径错了要手工收拾。
+// 仅番号试算不算数：那时压根没有源文件，无从刮起
+const canRun = computed(
+  () => items.value.length > 0 && !result.value?.code_only && !running.value,
+)
+const warnings = computed(() => result.value?.warnings || [])
 
 const trailerCount = computed(() => items.value.filter((i) => i.trailer).length)
 const noMetaCount = computed(() => items.value.filter((i) => !i.has_meta).length)
@@ -52,8 +66,10 @@ onMounted(async () => {
 })
 
 async function doPreview() {
-  if (!form.path.trim()) {
-    toast.error('请填写要刮削的文件或目录路径')
+  // 只填番号也能试算 —— 算的是「假如有这么一部片，产物会落在哪」，
+  // 改完命名模板想看效果时不必先去找一个真实存在的影片
+  if (!form.path.trim() && !form.code.trim()) {
+    toast.error('请填写影片路径，或只填一个番号试算命名效果')
     return
   }
   previewing.value = true
@@ -108,7 +124,7 @@ async function doRun() {
 
       <div class="space-y-2">
         <label class="block">
-          <span class="text-xs text-gray-400">影片文件或目录</span>
+          <span class="text-xs text-gray-400">影片文件或目录<span class="ml-1 text-gray-600">（只验证命名模板时可留空）</span></span>
           <input
             v-model="form.path"
             class="input mt-1 w-full font-mono text-xs"
@@ -116,7 +132,7 @@ async function doRun() {
             @keyup.enter="doPreview"
           >
           <span class="mt-1 block text-[11px] text-gray-600">
-            容器内的路径。目录会递归扫，按番号分组，分集只抓一次元数据
+            容器内的路径。目录会递归扫，按番号分组，分集只抓一次元数据。留空并只填番号，可试算命名效果
           </span>
         </label>
 
@@ -185,47 +201,60 @@ async function doRun() {
         </p>
       </div>
 
+      <p
+        v-for="(warn, i) in warnings"
+        :key="i"
+        class="rounded border border-amber-900/60 bg-amber-950/30 px-2 py-1 text-[11px] text-amber-400"
+      >
+        {{ warn }}
+      </p>
+
+      <p v-if="result.code_only" class="text-[11px] text-gray-500">
+        仅按番号试算命名效果，没有真实文件，因此不能直接开刮。
+        填上影片路径后再试算即可
+      </p>
+
       <p v-if="noMetaCount" class="text-[11px] text-gray-600">
         「本地无元数据」不代表刮不了 —— 试算不联网，开刮时会去抓。
         标题、演员、封面要抓到才有
       </p>
 
-      <div v-if="items.length" class="overflow-x-auto">
-        <table class="w-full text-xs">
-          <thead class="text-gray-500">
-            <tr class="border-b border-gray-800">
-              <th class="py-1.5 pr-3 text-left font-normal">番号</th>
-              <th class="py-1.5 pr-3 text-left font-normal">源文件</th>
-              <th class="py-1.5 pr-3 text-left font-normal">产物路径</th>
-              <th class="py-1.5 text-left font-normal">标记</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr
-              v-for="(item, index) in items"
-              :key="index"
-              class="border-b border-gray-800/50"
-              :class="item.trailer ? 'opacity-40' : ''"
-            >
-              <td class="py-1.5 pr-3 align-top">
-                <span class="font-mono text-brand">{{ item.code }}</span>
-                <span v-if="item.part" class="ml-1 text-gray-500">CD{{ item.part }}</span>
-              </td>
-              <td class="max-w-[16rem] break-all py-1.5 pr-3 align-top font-mono text-[11px] text-gray-500">
-                {{ item.source }}
-              </td>
-              <td class="max-w-[20rem] break-all py-1.5 pr-3 align-top font-mono text-[11px] text-gray-300">
-                {{ item.target }}
-              </td>
-              <td class="py-1.5 align-top">
-                <span v-if="item.trailer" class="text-gray-500">预告片·跳过</span>
-                <span v-if="item.subbed" class="text-emerald-400">中文字幕</span>
-                <span v-if="item.uncensored" class="ml-1 text-amber-400">无码</span>
-                <span v-if="!item.has_meta" class="ml-1 text-gray-600">无元数据</span>
-              </td>
-            </tr>
-          </tbody>
-        </table>
+      <div v-if="items.length" class="space-y-2">
+        <div
+          v-for="(item, index) in items"
+          :key="index"
+          class="rounded border border-gray-800 p-2"
+          :class="item.trailer ? 'opacity-40' : ''"
+        >
+          <div class="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+            <span class="font-mono text-xs text-brand">{{ item.code }}</span>
+            <span v-if="item.part" class="text-[11px] text-gray-500">CD{{ item.part }}</span>
+            <span v-if="item.trailer" class="text-[11px] text-gray-500">预告片·跳过</span>
+            <span v-if="item.subbed" class="text-[11px] text-emerald-400">中文字幕</span>
+            <span v-if="item.uncensored" class="text-[11px] text-amber-400">无码</span>
+            <span v-if="!item.has_meta" class="text-[11px] text-gray-600">无元数据</span>
+          </div>
+
+          <p v-if="item.source" class="mt-0.5 break-all font-mono text-[11px] text-gray-600">
+            源 {{ item.source }}
+          </p>
+          <p class="mt-0.5 break-all font-mono text-[11px] text-gray-400">
+            → {{ item.target }}
+          </p>
+
+          <!-- 会写出的全部文件。刮削真正往媒体库里放的就是这些 -->
+          <div v-if="item.outputs?.length" class="mt-1 border-t border-gray-800/60 pt-1">
+            <p class="text-[11px] text-gray-600">
+              产出 {{ item.outputs.length }} 个文件（同目录）
+            </p>
+            <div class="mt-0.5 grid grid-cols-1 gap-x-4 gap-y-0.5 sm:grid-cols-2">
+              <p v-for="(out, i) in item.outputs" :key="i" class="text-[11px]">
+                <span class="inline-block w-14 text-gray-600">{{ OUTPUT_LABELS[out.kind] || out.kind }}</span>
+                <span class="break-all font-mono text-gray-400">{{ out.name }}</span>
+              </p>
+            </div>
+          </div>
+        </div>
       </div>
 
       <EmptyState v-else text="这个路径下没有可刮削的影片" />

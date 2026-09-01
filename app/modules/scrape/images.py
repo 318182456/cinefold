@@ -142,6 +142,25 @@ def _write_atomic(path: Path, data: bytes) -> bool:
         return False
 
 
+def planned_names(video_path: Path, still_count: int = 0) -> list[tuple[str, str]]:
+    """这部影片会产出哪些图片文件，返回 [(类型, 相对文件名)]。
+
+    给试算用 —— 让用户在开刮前看全会写出什么，而不是刮完再去翻目录。
+    命名规则必须与 write_images 完全一致，所以两边都从这里取名字。
+
+    still_count 是剧照张数（受 SCRAPE_STILL_LIMIT 限制），0 表示不下剧照。
+    """
+    stem = video_path.stem
+    names = [
+        ("poster", f"{stem}-poster.jpg"),
+        ("fanart", f"{stem}-fanart.jpg"),
+        ("thumb", f"{stem}-thumb.jpg"),
+    ]
+    for index in range(1, min(still_count, MAX_STILLS) + 1):
+        names.append(("still", f"{EXTRAFANART_DIR}/{index}.jpg"))
+    return names
+
+
 def write_images(
     video_path: Path,
     images: ImageSet,
@@ -159,15 +178,18 @@ def write_images(
     分集影片每个分集各写一份 —— 这正是 issue #503 的修法。多占一点
     磁盘（几百 KB）换来每一集在 Emby 里都有图，值得。
     """
-    stem = video_path.stem
     directory = video_path.parent
     written: dict[str, str] = {}
 
+    # 名字从 planned_names 取，与试算共用一处 —— 两边各写一遍迟早会
+    # 对不上，那时试算显示的路径和真刮出来的就不是一回事了。
+    # thumb 与 fanart 同源：部分皮肤只读 thumb，多写一份省得用户困惑
+    content = {"poster": images.poster, "fanart": images.fanart,
+               "thumb": images.fanart}
     targets = [
-        ("poster", f"{stem}-poster.jpg", images.poster),
-        ("fanart", f"{stem}-fanart.jpg", images.fanart),
-        # thumb 与 fanart 同源。部分皮肤只读 thumb，多写一份省得用户困惑
-        ("thumb", f"{stem}-thumb.jpg", images.fanart),
+        (kind, name, content[kind])
+        for kind, name in planned_names(video_path)
+        if kind in content
     ]
 
     for kind, name, data in targets:

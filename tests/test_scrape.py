@@ -488,6 +488,72 @@ class Test指定硬链接目录:
 
 
 # ----------------------------------------------------------------------
+class Test试算产物清单:
+    """试算要列全会写出哪些文件，而不只是产物路径。
+
+    刮削真正往媒体库里放的是硬链接 + NFO + 4~13 张图，只显示一个
+    mp4 路径，用户无从判断刮完目录会变成什么样。
+    """
+
+    def test_列出全部产物(self, tmp_path):
+        got = scrape_images.planned_names(tmp_path / "ABS-001.mp4", still_count=3)
+        assert got == [
+            ("poster", "ABS-001-poster.jpg"),
+            ("fanart", "ABS-001-fanart.jpg"),
+            ("thumb", "ABS-001-thumb.jpg"),
+            ("still", "extrafanart/1.jpg"),
+            ("still", "extrafanart/2.jpg"),
+            ("still", "extrafanart/3.jpg"),
+        ]
+
+    def test_不下剧照时不列剧照(self, tmp_path):
+        got = scrape_images.planned_names(tmp_path / "ABS-001.mp4", still_count=0)
+        assert all(kind != "still" for kind, _ in got)
+
+    def test_剧照数受上限约束(self, tmp_path):
+        got = scrape_images.planned_names(
+            tmp_path / "ABS-001.mp4", still_count=scrape_images.MAX_STILLS + 5,
+        )
+        stills = [n for k, n in got if k == "still"]
+        assert len(stills) == scrape_images.MAX_STILLS
+
+    def test_分集各自一套(self, tmp_path):
+        cd1 = scrape_images.planned_names(tmp_path / "ABS-001-CD1.mp4")
+        cd2 = scrape_images.planned_names(tmp_path / "ABS-001-CD2.mp4")
+        assert cd1[0][1] == "ABS-001-CD1-poster.jpg"
+        assert cd2[0][1] == "ABS-001-CD2-poster.jpg"
+
+    def test_预告的清单与实际写入一致(self, tmp_path):
+        """试算与真写必须用同一套命名，否则试算给的路径是假的。"""
+        video = tmp_path / "ABS-001.mp4"
+        video.write_bytes(b"x")
+        written = scrape_images.write_images(
+            video, scrape_images.build_image_set(_encode(800, 538), [], "RIGHT"),
+        )
+        planned = dict(scrape_images.planned_names(video))
+        for kind in ("poster", "fanart", "thumb"):
+            assert written[kind] == planned[kind]
+
+
+class Test产物路径警告:
+    """输出目录已经以分类名结尾、模板里又写一次 {category} 时，
+    会得到 日本AV/日本AV/… —— 配置上很自然就会踩到，刮完才发现
+    就得手工挪文件。"""
+
+    def _warn(self, path):
+        from app.api.endpoints.scrape import _warn_paths
+
+        return _warn_paths([{"target": path}])
+
+    def test_重复目录名要警告(self):
+        got = self._warn("/volume3/h_video/日本AV/日本AV/推川ゆうり/JMTY-083.mp4")
+        assert got and "日本AV" in got[0]
+
+    def test_正常路径不警告(self):
+        assert self._warn("/volume3/h_video/日本AV/推川ゆうり/JMTY-083.mp4") == []
+
+
+# ----------------------------------------------------------------------
 class Test路径诊断:
     """路径不存在时要说清断在哪一层。
 

@@ -28,8 +28,10 @@ router = APIRouter(prefix="/scrape", tags=["刮削"])
 
 
 class ScrapeRequest(BaseModel):
-    # 影片文件或目录的绝对路径
-    path: str
+    # 影片文件或目录的绝对路径。
+    # 试算时可以留空，只填 code —— 那时算的是「假如有这么一部片，
+    # 产物会落在哪、叫什么名字」，用来验证命名模板，不需要真有文件
+    path: str = ""
     # 只试算，不建链接不写文件
     dry_run: bool = False
     # 库里已有元数据时是否仍去抓。关掉能省跨境请求，重刮时常用
@@ -114,11 +116,25 @@ def preview(body: ScrapeRequest, current_user: str = Depends(get_current_user)):
 
     接入前先跑这个 —— 命名模板写错时，产出的目录结构要等刮完才发现就晚了。
     """
+    settings = get_settings()
+    manual = get_true_code(body.code) if body.code else ""
+    if body.code and not manual:
+        return ResponseEntity.fail(f"指定的番号不是合法格式: {body.code}", code=400)
+
+    # 只给番号不给路径：算「假如有这么一部片，产物会落在哪」。
+    # 用来验证命名模板，不需要真有文件 —— 改完模板想看效果时，
+    # 不必先去找一个实际存在的影片
+    if not body.path.strip():
+        if not manual:
+            return ResponseEntity.fail(
+                "请填写影片路径，或只填一个番号试算命名效果", code=400,
+            )
+        return _preview_code_only(manual, body, settings)
+
     target = Path(body.path)
     if not target.exists():
         return ResponseEntity.fail(_explain_missing(target), code=400)
 
-    settings = get_settings()
     if target.is_file():
         videos = [target]
     else:
@@ -131,10 +147,6 @@ def preview(body: ScrapeRequest, current_user: str = Depends(get_current_user)):
 
     groups = mediafile.group_parts(videos)
     pending = groups.pop("", [])
-
-    manual = get_true_code(body.code) if body.code else ""
-    if body.code and not manual:
-        return ResponseEntity.fail(f"指定的番号不是合法格式: {body.code}", code=400)
 
     if manual and pending:
         # 与 scrape_dir 同一规则：只认领认不出的，已认出的不动
@@ -155,6 +167,7 @@ def preview(body: ScrapeRequest, current_user: str = Depends(get_current_user)):
         # 试算不抓网络：只用库里已有的元数据，否则点一下预览就跨境请求几十次
         meta = scrape_service._load_meta(code, fetch=False)
         for info in infos:
+            target = scrape_service._target_path(meta, info, body.target_dir)
             items.append({
                 "code": code,
                 "source": str(info.path),
@@ -162,8 +175,10 @@ def preview(body: ScrapeRequest, current_user: str = Depends(get_current_user)):
                 "trailer": info.trailer,
                 "subbed": info.subbed,
                 "uncensored": info.uncensored,
-                "target": str(scrape_service._target_path(meta, info, body.target_dir)),
+                "target": str(target),
                 "has_meta": bool(meta),
+                # 预告片不会被刮，列出产物只会误导
+                "outputs": [] if info.trailer else _planned_outputs(target, settings),
             })
 
     return ResponseEntity.ok({
@@ -171,7 +186,91 @@ def preview(body: ScrapeRequest, current_user: str = Depends(get_current_user)):
         "unknown": unknown,
         "dir_template": settings.scrape_dir_template,
         "file_template": settings.scrape_file_template,
+        "warnings": _warn_paths(items),
     })
+
+
+def _preview_code_only(code: str, body: ScrapeRequest, settings) -> dict:
+    """只给番号的试算：假设有这么一部片，算产物路径与文件清单。
+
+    用来验证命名模板 —— 改完模板想看效果，不必先去找一个真实存在的影片。
+    元数据用库里已有的；没有就只能按番号算，演员/系列那些字段会显示成
+    「未知」，这本身也是有用的信息（说明这条番号还没抓过详情）。
+    """
+    from app.utils.mediafile import MediaFileInfo
+
+    meta = scrape_service._load_meta(code, fetch=False)
+    # 造一个假的源文件：文件名就是番号，后缀取最常见的 .mp4。
+    # 目录用番号本身，让 {source_filename} 之类的字段也算得出来
+    info = MediaFileInfo(path=Path(f"{code}/{code}.mp4"), code=code)
+    target = scrape_service._target_path(meta, info, body.target_dir)
+
+    item = {
+        "code": code,
+        "source": "",
+        "part": 0,
+        "trailer": False,
+        "subbed": False,
+        "uncensored": False,
+        "target": str(target),
+        "has_meta": bool(meta),
+        "outputs": _planned_outputs(target, settings),
+    }
+    return ResponseEntity.ok({
+        "items": [item],
+        "unknown": [],
+        "dir_template": settings.scrape_dir_template,
+        "file_template": settings.scrape_file_template,
+        "warnings": _warn_paths([item]),
+        # 前端据此提示「这是假设的路径，没有真实文件」
+        "code_only": True,
+    })
+
+
+def _planned_outputs(target: Path, settings) -> list[dict]:
+    """这个产物会写出哪些文件。硬链接 + NFO + 图片，按写入顺序。
+
+    试算的意义就在这里 —— 让用户在开刮前看全会往媒体库里放什么。
+    只列文件名（同目录），路径已经在 target 里给过了。
+    """
+    from app.modules.scrape import images as scrape_images
+
+    outputs = [
+        {"kind": "hardlink", "name": target.name},
+        {"kind": "nfo", "name": target.with_suffix(".nfo").name},
+    ]
+    outputs += [
+        {"kind": kind, "name": name}
+        for kind, name in scrape_images.planned_names(
+            target, max(0, settings.scrape_still_limit)
+        )
+    ]
+    return outputs
+
+
+def _warn_paths(items: list[dict]) -> list[str]:
+    """挑出一看就不对劲的产物路径。
+
+    目前只查一种：路径里出现连续重复的目录名（日本AV/日本AV/…）。
+    这是「刮削输出目录」已经以分类名结尾、模板里又写了一次 {category}
+    造成的，配置上很自然就会踩到，而刮完才发现就得手工挪文件了。
+    """
+    seen: set[str] = set()
+    out: list[str] = []
+    for item in items:
+        parts = Path(item["target"]).parts
+        dup = next(
+            (a for a, b in zip(parts, parts[1:]) if a == b and a not in ("/", "\\")),
+            "",
+        )
+        if dup and dup not in seen:
+            seen.add(dup)
+            out.append(
+                f"产物路径里「{dup}」重复了一层。多半是「刮削输出目录」"
+                f"已经以 {dup} 结尾，目录模板里又写了一次 —— "
+                "把模板里对应那段去掉，或把输出目录改到上一层"
+            )
+    return out
 
 
 @router.post("/run")
