@@ -233,6 +233,68 @@ class TestSubscribe:
         )
         assert response.json()["code"] == 404
 
+    def test_cancel_date_style_code(self, client, auth):
+        """日期型番号必须能取消。
+
+        榜单订阅按页面上的连字符写法（081226-100）直接存主键，接口层却先
+        用 get_true_code 换成下划线（081226_100）再查，于是永远 404
+        「番号不存在」—— 页面上列着却取消不掉，实测积了一百多条。
+        """
+        from app.database.models import Code, CodeStatus
+        from app.database.session import session_scope
+
+        with session_scope() as session:
+            session.merge(Code(code="081226-100", status=CodeStatus.SUBSCRIBED))
+
+        assert client.post(
+            "/api/v1/codes/cancel", headers=auth, json={"code": "081226-100"}
+        ).json()["code"] == 200
+
+        with session_scope() as session:
+            assert session.get(Code, "081226-100").status == CodeStatus.NONE
+            # 不能顺手建出下划线写法的第二行
+            assert session.get(Code, "081226_100") is None
+
+    def test_cancel_date_style_code_batch(self, client, auth):
+        """批量取消同样要认连字符写法，且不能把已改的算进 missing。"""
+        from app.database.models import Code, CodeStatus
+        from app.database.session import session_scope
+
+        with session_scope() as session:
+            session.merge(Code(code="082926-01", status=CodeStatus.SUBSCRIBED))
+
+        data = client.post(
+            "/api/v1/codes/cancel/batch", headers=auth, json={"codes": ["082926-01"]}
+        ).json()["data"]
+
+        assert data["missing"] == []
+        with session_scope() as session:
+            assert session.get(Code, "082926-01").status == CodeStatus.NONE
+
+    def test_subscribe_date_style_does_not_duplicate(self, client, auth):
+        """重复订阅日期型番号不能建出第二行。
+
+        取消失败后用户往往会再点一次订阅，若这里按下划线写法新建，
+        库里就会连字符、下划线各留一条，越点越多。
+        """
+        from sqlalchemy import select
+
+        from app.database.models import Code, CodeStatus
+        from app.database.session import session_scope
+
+        with session_scope() as session:
+            session.merge(Code(code="081826-01", status=CodeStatus.NONE))
+
+        for _ in range(2):
+            client.post("/api/v1/codes/sub", headers=auth, json={"code": "081826-01"})
+
+        with session_scope() as session:
+            rows = session.scalars(
+                select(Code).where(Code.code.in_(["081826-01", "081826_01"]))
+            ).all()
+        assert [r.code for r in rows] == ["081826-01"]
+        assert rows[0].status == CodeStatus.SUBSCRIBED
+
     def test_pagination(self, client, auth):
         data = client.get("/api/v1/codes/list?page=1&size=5", headers=auth).json()["data"]
         assert data["size"] == 5

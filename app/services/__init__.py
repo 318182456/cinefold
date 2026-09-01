@@ -163,6 +163,39 @@ def search_code(keyword: str, limit: int = 50) -> list[dict]:
         return [row.to_dict() for row in rows]
 
 
+def code_variants(code: str) -> list[str]:
+    """番号在库里可能的几种写法，按优先级排。
+
+    日期型番号官方写法用下划线（032426_100），但榜单页面上印的是连字符
+    （032426-100）。榜单订阅直接拿页面上的串当主键存，接口层却先过一遍
+    get_true_code 换成下划线再查 —— 写入不归一、读取归一，同一个番号
+    两边对不上，于是「取消订阅」报番号不存在，再点订阅又建出第二行。
+
+    与其挑一种写法去改存量数据，不如查询时两种都认。
+    """
+    from app.utils import get_true_code
+
+    raw = (code or "").strip()
+    if not raw:
+        return []
+
+    out = [raw]
+    for cand in (get_true_code(raw), raw.upper(),
+                 raw.replace("_", "-"), raw.replace("-", "_")):
+        if cand and cand not in out:
+            out.append(cand)
+    return out
+
+
+def get_code_row(session, code: str) -> Code | None:
+    """按番号取行，日期型的连字符/下划线两种写法都能命中。"""
+    for cand in code_variants(code):
+        row = session.get(Code, cand)
+        if row is not None:
+            return row
+    return None
+
+
 def cache_remote_codes(items: list[dict]) -> int:
     """把远程搜到的番号情报落库，下次搜同一个番号直接走本地。
 
@@ -625,7 +658,9 @@ def subscribe_code(code: str) -> bool:
         return False
 
     with session_scope() as session:
-        row = session.get(Code, code)
+        # 同样按变体找：库里若已有连字符写法的行，不能再用下划线写法
+        # 建一条新的 —— 那正是「取消不掉、越点越多」的来源
+        row = get_code_row(session, code)
         if row is None:
             row = Code(code=code, status=CodeStatus.SUBSCRIBED)
             session.add(row)
@@ -676,7 +711,9 @@ def _drop_vanished_history(code: str) -> None:
 
 def cancel_subscribe(code: str) -> bool:
     with session_scope() as session:
-        row = session.get(Code, code)
+        # 走 get_code_row：日期型番号库里存的是连字符，接口层传进来的
+        # 已被 get_true_code 换成下划线，session.get 直查必然落空
+        row = get_code_row(session, code)
         if row is None:
             return False
         row.status = CodeStatus.NONE
@@ -692,13 +729,23 @@ def cancel_subscribe_codes(codes: list[str]) -> dict:
     if not wanted:
         return {"cancelled": [], "missing": []}
 
+    # 每个番号都把可能的写法展开，一次 IN 查完。命中的行按其真实主键
+    # 记账，同时记下「哪个输入命中了」，missing 才不会把已改的算成没找到
+    lookup: dict[str, str] = {}
+    for wanted_code in wanted:
+        for cand in code_variants(wanted_code):
+            lookup.setdefault(cand, wanted_code)
+
     with session_scope() as session:
-        rows = session.scalars(select(Code).where(Code.code.in_(wanted))).all()
+        rows = session.scalars(
+            select(Code).where(Code.code.in_(list(lookup)))
+        ).all()
         found = {row.code for row in rows}
+        hit = {lookup[row.code] for row in rows if row.code in lookup}
         for row in rows:
             row.status = CodeStatus.NONE
 
-    missing = [c for c in wanted if c not in found]
+    missing = [c for c in wanted if c not in hit]
     logger.info(f"批量取消订阅 {len(found)} 个番号，{len(missing)} 个不存在")
     return {"cancelled": sorted(found), "missing": missing}
 
