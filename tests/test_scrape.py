@@ -488,6 +488,37 @@ class Test指定硬链接目录:
 
 
 # ----------------------------------------------------------------------
+class Test路径诊断:
+    """路径不存在时要说清断在哪一层。
+
+    宿主机上看得见、容器里没有，最常见的原因是那一层没挂进容器 ——
+    只说「路径不存在」会让人以为是路径写错，对着正确的路径反复试。
+    """
+
+    def _explain(self, target):
+        from app.api.endpoints.scrape import _explain_missing
+
+        return _explain_missing(Path(target))
+
+    def test_整层没挂时提示挂载(self, tmp_path):
+        got = self._explain(tmp_path / "volume3" / "h_video" / "x.mp4")
+        assert "没挂进容器" in got
+        assert "up -d" in got
+
+    def test_只有文件名不对时不提挂载(self, tmp_path):
+        """父目录存在说明挂载没问题，再提挂载就是误导。"""
+        got = self._explain(tmp_path / "missing.mp4")
+        assert "没挂进容器" not in got
+        assert "missing.mp4" in got
+
+    def test_列出断点目录的内容(self, tmp_path):
+        (tmp_path / "Download").mkdir()
+        got = self._explain(tmp_path / "Downloads" / "x.mp4")
+        # 名字打错时，列出实际有什么就能一眼看出
+        assert "Download" in got
+
+
+# ----------------------------------------------------------------------
 class Test多源合并:
     def test_逐字段挑最全的(self):
         """first-wins 会让稀疏的那个站决定最终质量。

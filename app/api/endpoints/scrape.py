@@ -47,6 +47,55 @@ class ScrapeRequest(BaseModel):
     target_dir: str = ""
 
 
+def _explain_missing(target: Path) -> str:
+    """路径不存在时，指出到底断在哪一层。
+
+    光说「路径不存在」没法排查 —— 用户在 NAS 上看得见这个文件，
+    容器里却没有，最常见的原因是那一层根本没挂进容器，而不是路径写错。
+    实测就踩过：compose 里加了 /volume3 的挂载但容器没重建，
+    restart 不会应用新挂载，必须 up -d 重建。
+
+    逐层往上找，报出「最深的那个存在的祖先」，用户一眼就能看出是
+    第几层断的：报 / 说明整个 /volume3 没挂，报 /volume3/h_video
+    说明挂了但下面那层名字对不上。
+    """
+    existing = None
+    for parent in target.parents:
+        try:
+            if parent.exists():
+                existing = parent
+                break
+        except OSError:
+            continue
+
+    if existing is None:
+        return f"路径不存在，且找不到任何可访问的上级目录: {target}"
+
+    # 列出断点那一层实际有什么，名字打错时直接就看出来了
+    hint = ""
+    try:
+        names = sorted(p.name for p in existing.iterdir())
+        if names:
+            shown = "、".join(names[:8])
+            more = f" 等 {len(names)} 项" if len(names) > 8 else ""
+            hint = f"。该目录下现有: {shown}{more}"
+    except OSError as exc:
+        hint = f"。该目录无法列出（{exc.strerror or exc}），可能是权限问题"
+
+    # 断在最后一层（父目录在、只有这个文件/目录名不存在）时，多半是名字
+    # 写错或文件已被移走，跟挂载没关系 —— 这时再说「检查挂载」是误导
+    if existing == target.parent:
+        return f"容器内找不到: {target.name}（所在目录存在）{hint}"
+
+    return (
+        f"容器内找不到这个路径: {target}。"
+        f"最深能访问到的是 {existing}{hint}。"
+        "宿主机上有而容器里没有，通常是这一层没挂进容器 —— "
+        "改完 docker-compose.yml 的 volumes 要用 `docker compose up -d` 重建，"
+        "restart 不会应用新挂载"
+    )
+
+
 def _result_dict(result: scrape_service.ScrapeResult) -> dict:
     return {
         "code": result.code,
@@ -67,7 +116,7 @@ def preview(body: ScrapeRequest, current_user: str = Depends(get_current_user)):
     """
     target = Path(body.path)
     if not target.exists():
-        return ResponseEntity.fail(f"路径不存在: {body.path}", code=400)
+        return ResponseEntity.fail(_explain_missing(target), code=400)
 
     settings = get_settings()
     if target.is_file():
@@ -130,7 +179,7 @@ async def run(body: ScrapeRequest, current_user: str = Depends(get_current_user)
     """执行刮削。文件或目录都可以。"""
     target = Path(body.path)
     if not target.exists():
-        return ResponseEntity.fail(f"路径不存在: {body.path}", code=400)
+        return ResponseEntity.fail(_explain_missing(target), code=400)
 
     if body.dry_run:
         return preview(body, current_user)
