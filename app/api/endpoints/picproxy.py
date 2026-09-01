@@ -26,6 +26,9 @@ router = APIRouter(tags=["picproxy"])
 ALLOWED_HOSTS = (
     # jdbstatic 是 javdb 的图片 CDN，封面/预览图都在这个域名下
     "javbus.com", "javdb.com", "jdbstatic.com", "dmm.co.jp", "avbase.net",
+    # fourhoi 是 missav 的图片 CDN。missav 常是唯一给出中文标题的源，
+    # 不放行它的图，刮削试算里那些番号就只能显示成裂图
+    "fourhoi.com", "missav.com", "missav.ai",
     "javlibrary.com", "jable.tv", "c0930.com", "mgstage.com",
     "s1s1s1.com", "moodyz.com", "ideapocket.com", "madonna-av.com",
     "wanz-factory.com", "attackers.net", "premium-beauty.com",

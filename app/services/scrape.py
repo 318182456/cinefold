@@ -410,31 +410,11 @@ def scrape_group(
         if written:
             result.images_written += 1
 
-        data = nfo.NfoData(
-            code=code,
-            title=meta.get("title") or "",
-            cn_title=meta.get("cn_title") or "",
-            # 官方简介。只有 airav 给这个字段，多数番号是空的 ——
-            # 空着也没关系，AI 看点会往 plot 里拼（services/review.py，
-            # 靠 MARKER/END_MARKER 精确替换自己那段，不动官方简介）。
-            #
-            # 绝不拿标题兜底：那等于把同一句话在 Emby 上写两遍
-            plot=meta.get("outline") or "",
-            release_date=meta.get("release_date") or "",
-            duration=meta.get("duration") or "",
-            producer=meta.get("producer") or "",
-            publisher=meta.get("publisher") or "",
-            series=meta.get("series") or "",
-            genres=meta.get("genres") or "",
-            casts=meta.get("casts") or "",
-            star=meta.get("star"),
-            part=info.part,
+        data = build_nfo_data(
+            code, meta, info,
             total_parts=info_total,
-            uncensored=info.uncensored,
-            subbed=info.subbed,
             poster_file=written.get("poster", ""),
             fanart_file=written.get("fanart", ""),
-            extra_genres=_extra_genres(info),
         )
         if nfo.write(
             target.with_suffix(".nfo"), data, overwrite=settings.scrape_overwrite
@@ -450,6 +430,47 @@ def scrape_group(
         + (f", 跳过 {len(result.skipped)}" if result.skipped else "")
     )
     return result
+
+
+def build_nfo_data(
+    code: str,
+    meta: dict,
+    info: MediaFileInfo,
+    total_parts: int = 0,
+    poster_file: str = "",
+    fanart_file: str = "",
+) -> nfo.NfoData:
+    """组装一份 NFO 数据。
+
+    试算与真正写入共用这一处 —— 各写一遍迟早会对不上，那时试算展示的
+    内容就不是最终写进去的东西了，预览也就失去意义。
+    """
+    return nfo.NfoData(
+        code=code,
+        title=meta.get("title") or "",
+        cn_title=meta.get("cn_title") or "",
+        # 官方简介。只有 airav 给这个字段，多数番号是空的 ——
+        # 空着也没关系，AI 看点会往 plot 里拼（services/review.py，
+        # 靠 MARKER/END_MARKER 精确替换自己那段，不动官方简介）。
+        #
+        # 绝不拿标题兜底：那等于把同一句话在 Emby 上写两遍
+        plot=meta.get("outline") or "",
+        release_date=meta.get("release_date") or "",
+        duration=meta.get("duration") or "",
+        producer=meta.get("producer") or "",
+        publisher=meta.get("publisher") or "",
+        series=meta.get("series") or "",
+        genres=meta.get("genres") or "",
+        casts=meta.get("casts") or "",
+        star=meta.get("star"),
+        part=info.part,
+        total_parts=total_parts,
+        uncensored=info.uncensored,
+        subbed=info.subbed,
+        poster_file=poster_file,
+        fanart_file=fanart_file,
+        extra_genres=_extra_genres(info),
+    )
 
 
 def _extra_genres(info: MediaFileInfo) -> list[str]:

@@ -51,6 +51,10 @@ const canRun = computed(
 )
 const warnings = computed(() => result.value?.warnings || [])
 
+// 详情弹窗。点某条产物后放大看 NFO 全文与图片 ——
+// 列表里塞不下，塞下了也看不清
+const detail = ref(null)
+
 const trailerCount = computed(() => items.value.filter((i) => i.trailer).length)
 const noMetaCount = computed(() => items.value.filter((i) => !i.has_meta).length)
 
@@ -224,7 +228,8 @@ async function doRun() {
           v-for="(item, index) in items"
           :key="index"
           class="rounded border border-gray-800 p-2"
-          :class="item.trailer ? 'opacity-40' : ''"
+          :class="item.trailer ? 'opacity-40' : 'cursor-pointer hover:border-gray-700'"
+          @click="item.trailer || (detail = item)"
         >
           <div class="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
             <span class="font-mono text-xs text-brand">{{ item.code }}</span>
@@ -246,6 +251,7 @@ async function doRun() {
           <div v-if="item.outputs?.length" class="mt-1 border-t border-gray-800/60 pt-1">
             <p class="text-[11px] text-gray-600">
               产出 {{ item.outputs.length }} 个文件（同目录）
+              <span class="ml-1 text-brand">点开看 NFO 与图片</span>
             </p>
             <div class="mt-0.5 grid grid-cols-1 gap-x-4 gap-y-0.5 sm:grid-cols-2">
               <p v-for="(out, i) in item.outputs" :key="i" class="text-[11px]">
@@ -346,6 +352,84 @@ async function doRun() {
           </p>
         </div>
       </template>
+    </div>
+
+    <!-- 产物详情：NFO 全文与图片。
+         列表里塞不下这些，但「刮得对不对」恰恰要看内容才知道 -->
+    <div
+      v-if="detail"
+      class="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
+      @click.self="detail = null"
+    >
+      <div class="card flex max-h-[90vh] w-full max-w-5xl flex-col gap-3 overflow-y-auto">
+        <div class="flex items-start justify-between gap-3">
+          <div class="min-w-0">
+            <p class="text-sm font-medium text-gray-200">
+              <span class="font-mono text-brand">{{ detail.code }}</span>
+              <span v-if="detail.part" class="ml-1 text-xs text-gray-500">CD{{ detail.part }}</span>
+            </p>
+            <p class="mt-0.5 break-all font-mono text-[11px] text-gray-500">
+              {{ detail.target }}
+            </p>
+          </div>
+          <button class="btn-ghost shrink-0 px-2 py-1 text-xs" @click="detail = null">关闭</button>
+        </div>
+
+        <div class="grid gap-3 lg:grid-cols-2">
+          <!-- 图片 -->
+          <div class="space-y-2">
+            <p class="text-xs font-medium text-gray-400">图片</p>
+            <div v-if="detail.images?.cover" class="space-y-1">
+              <p class="text-[11px] text-gray-600">
+                封面（海报会从这张裁成竖版，背景用原图）
+              </p>
+              <img
+                :src="detail.images.cover"
+                class="max-h-56 rounded border border-gray-800 object-contain"
+                loading="lazy"
+              >
+            </div>
+            <p v-else class="text-[11px] text-gray-600">没有封面地址，刮削时也不会有图</p>
+
+            <div v-if="detail.images?.stills?.length" class="space-y-1">
+              <p class="text-[11px] text-gray-600">
+                剧照 {{ detail.images.stills.length }} 张 → extrafanart/
+              </p>
+              <div class="flex flex-wrap gap-1">
+                <img
+                  v-for="(url, i) in detail.images.stills"
+                  :key="i"
+                  :src="url"
+                  class="h-20 rounded border border-gray-800 object-cover"
+                  loading="lazy"
+                >
+              </div>
+            </div>
+          </div>
+
+          <!-- NFO 全文 -->
+          <div class="space-y-2">
+            <p class="text-xs font-medium text-gray-400">
+              NFO 内容
+              <span class="ml-1 font-normal text-gray-600">{{ detail.target.split(/[\/]/).pop().replace(/\.[^.]+$/, '.nfo') }}</span>
+            </p>
+            <pre class="max-h-96 overflow-auto rounded border border-gray-800 bg-black/40 p-2 font-mono text-[11px] leading-relaxed text-gray-300">{{ detail.nfo }}</pre>
+          </div>
+        </div>
+
+        <!-- 文件清单 -->
+        <div class="border-t border-gray-800 pt-2">
+          <p class="text-xs font-medium text-gray-400">
+            会写出 {{ detail.outputs?.length || 0 }} 个文件
+          </p>
+          <div class="mt-1 grid grid-cols-1 gap-x-4 gap-y-0.5 sm:grid-cols-2 lg:grid-cols-3">
+            <p v-for="(out, i) in detail.outputs || []" :key="i" class="text-[11px]">
+              <span class="inline-block w-14 text-gray-600">{{ OUTPUT_LABELS[out.kind] || out.kind }}</span>
+              <span class="break-all font-mono text-gray-400">{{ out.name }}</span>
+            </p>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 </template>

@@ -535,6 +535,86 @@ class Test试算产物清单:
             assert written[kind] == planned[kind]
 
 
+class Test试算内容预览:
+    """试算要能看到 NFO 的实际内容与图片，不只是文件名。
+
+    元数据抓得对不对，看文件名看不出来 —— 得看内容。
+    """
+
+    def _meta(self):
+        return {
+            "code": "SSIS-001", "title": "日文原标题", "cn_title": "中文标题",
+            "outline": "官方简介。", "release_date": "2021-02-18",
+            "genres": "美少女,戲劇", "casts": "葵つかさ",
+            "banner": "https://pics.dmm.co.jp/x-pl.jpg",
+            "still_photo": "https://pics.dmm.co.jp/1.jpg,https://pics.dmm.co.jp/2.jpg",
+            "local_banner": "",
+        }
+
+    def test_预览与实际写入用同一份数据(self):
+        """两边各造一次 NfoData 迟早会对不上，那时预览就是假的。"""
+        from app.services.scrape import build_nfo_data
+        from app.utils.mediafile import parse
+
+        info = parse(Path("SSIS-001-CD2.mp4"))
+        data = build_nfo_data("SSIS-001", self._meta(), info, total_parts=2)
+        root = ElementTree.fromstring(nfo.render(data))
+        assert root.findtext("title") == "SSIS-001 中文标题 CD2"
+        assert root.findtext("plot") == "官方简介。"
+        # 类别照样繁转简
+        assert "戏剧" in [e.text for e in root.findall("genre")]
+
+    def test_图片走代理而非源站直连(self):
+        """图源有防盗链，浏览器直连拿到的是 403。"""
+        from app.api.endpoints.scrape import _preview_images
+
+        class _S:
+            scrape_still_limit = 2
+
+        got = _preview_images(self._meta(), _S())
+        assert got["cover"].startswith("/api/v1/image-")
+        assert len(got["stills"]) == 2
+        assert all(u.startswith("/api/v1/image-") for u in got["stills"])
+
+    def test_剧照数受配置约束(self):
+        from app.api.endpoints.scrape import _preview_images
+
+        class _S:
+            scrape_still_limit = 1
+
+        assert len(_preview_images(self._meta(), _S())["stills"]) == 1
+
+    def test_没有封面时不给地址(self):
+        from app.api.endpoints.scrape import _preview_images
+
+        class _S:
+            scrape_still_limit = 3
+
+        got = _preview_images({"code": "X-1"}, _S())
+        assert got["cover"] == ""
+        assert got["stills"] == []
+
+
+class Test图源白名单:
+    def test_放行真实图源(self):
+        """missav 的图在 fourhoi.com 上，而它常是唯一给中文标题的源 ——
+        不放行就只能显示成裂图。"""
+        from app.api.endpoints.picproxy import _is_allowed
+
+        for url in (
+            "https://pics.dmm.co.jp/digital/video/x/xpl.jpg",
+            "https://fourhoi.com/abp-554/cover-n.jpg",
+            "https://cdn.avbase.net/x.jpg",
+        ):
+            assert _is_allowed(url), url
+
+    def test_挡住仿冒域名(self):
+        from app.api.endpoints.picproxy import _is_allowed
+
+        assert not _is_allowed("https://fourhoi.com.evil.com/x.jpg")
+        assert not _is_allowed("https://evil.com/x.jpg")
+
+
 class Test产物路径警告:
     """输出目录已经以分类名结尾、模板里又写一次 {category} 时，
     会得到 日本AV/日本AV/… —— 配置上很自然就会踩到，刮完才发现

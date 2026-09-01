@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends
 from loguru import logger
@@ -179,6 +180,10 @@ def preview(body: ScrapeRequest, current_user: str = Depends(get_current_user)):
                 "has_meta": bool(meta),
                 # 预告片不会被刮，列出产物只会误导
                 "outputs": [] if info.trailer else _planned_outputs(target, settings),
+                # NFO 的实际内容与图片地址。让用户直接看到会写进去什么，
+                # 而不是只看到文件名 —— 元数据抓得对不对，看内容才知道
+                "nfo": "" if info.trailer else _preview_nfo(meta, info, target),
+                "images": {} if info.trailer else _preview_images(meta, settings),
             })
 
     return ResponseEntity.ok({
@@ -215,6 +220,8 @@ def _preview_code_only(code: str, body: ScrapeRequest, settings) -> dict:
         "target": str(target),
         "has_meta": bool(meta),
         "outputs": _planned_outputs(target, settings),
+        "nfo": _preview_nfo(meta, info, target),
+        "images": _preview_images(meta, settings),
     }
     return ResponseEntity.ok({
         "items": [item],
@@ -225,6 +232,67 @@ def _preview_code_only(code: str, body: ScrapeRequest, settings) -> dict:
         # 前端据此提示「这是假设的路径，没有真实文件」
         "code_only": True,
     })
+
+
+def _preview_nfo(meta: dict, info, target: Path) -> str:
+    """渲染这个产物的 NFO 内容，原样返回 XML 文本。
+
+    与真正写入共用 build_nfo_data + nfo.render，所以看到的就是
+    最终会落盘的那份 —— 元数据抓得对不对，看文件名看不出来，
+    得看内容。
+    """
+    from app.modules.scrape import nfo
+
+    data = scrape_service.build_nfo_data(
+        info.code, meta, info,
+        poster_file=f"{target.stem}-poster.jpg",
+        fanart_file=f"{target.stem}-fanart.jpg",
+    )
+    try:
+        return nfo.render(data).decode("utf-8")
+    except Exception as exc:  # 渲染失败也要能看到原因，而不是空白
+        return f"<!-- NFO 渲染失败: {exc} -->"
+
+
+def _preview_images(meta: dict, settings) -> dict:
+    """图片的可访问地址，给前端直接显示缩略图。
+
+    走 /image-proxy 而不是直接给源站 URL：图源有防盗链，浏览器直连
+    会拿到 403。本地已缓存的走 /image-local，省一次回源。
+
+    返回的是**源图**地址。海报实际会裁成竖版，但那要下载后才知道裁哪半边，
+    试算阶段不做下载 —— 显示源图足够判断"图对不对"了。
+    """
+    from app.utils import imagecache
+
+    code = meta.get("code") or ""
+
+    def resolve(url: str, kind: str) -> str:
+        if not url:
+            return ""
+        # 缓存命中就走本地，不必再跨境
+        hit = imagecache.find_cached(url, code, kind)
+        if hit is not None:
+            return f"/api/v1/image-local?path={quote(imagecache.relative_of(hit))}"
+        return (
+            f"/api/v1/image-proxy?url={quote(url, safe='')}"
+            f"&code={quote(code)}&kind={kind}"
+        )
+
+    relative = (meta.get("local_banner") or "").split(",")[0].strip()
+    cover = ""
+    if relative:
+        cover = f"/api/v1/image-local?path={quote(relative)}"
+    else:
+        cover = resolve(meta.get("banner") or meta.get("poster") or "", "banner")
+
+    stills = [
+        resolve(u.strip(), "still")
+        for u in (meta.get("still_photo") or "").split(",")
+        if u.strip()
+    ][: max(0, settings.scrape_still_limit)]
+
+    return {"cover": cover, "stills": [s for s in stills if s]}
 
 
 def _planned_outputs(target: Path, settings) -> list[dict]:
