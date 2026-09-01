@@ -576,6 +576,39 @@ class Test试算内容预览:
         assert len(got["stills"]) == 2
         assert all(u.startswith("/api/v1/image-") for u in got["stills"])
 
+    def test_海报给裁好的背景给原图(self):
+        """源站封面多是横版双拼，显示原图看不出 Emby 里最终长什么样。
+        海报要裁、背景不裁 —— 刮削时就是这么落盘的。"""
+        from app.api.endpoints.scrape import _preview_images
+
+        class _S:
+            scrape_still_limit = 0
+
+        got = _preview_images(self._meta(), _S())
+        assert got["poster"].endswith("poster=1")
+        assert "poster=1" not in got["fanart"]
+
+    def test_本地缓存也走裁切(self):
+        from app.api.endpoints.scrape import _preview_images
+
+        class _S:
+            scrape_still_limit = 0
+
+        meta = dict(self._meta(), banner="", local_banner="SSIS-001/banner.jpg")
+        got = _preview_images(meta, _S())
+        assert got["poster"].startswith("/api/v1/image-local")
+        assert got["poster"].endswith("poster=1")
+        assert "poster=1" not in got["fanart"]
+
+    def test_裁切与刮削产物同一套逻辑(self):
+        """预览裁出来的必须和真正落盘的是同一张，否则预览没有意义。"""
+        from app.api.endpoints.picproxy import _as_poster
+
+        source = _encode(800, 538, split=True)
+        assert _as_poster(source, "RIGHT") == scrape_images.crop_poster(
+            source, "RIGHT",
+        )
+
     def test_剧照数受配置约束(self):
         from app.api.endpoints.scrape import _preview_images
 

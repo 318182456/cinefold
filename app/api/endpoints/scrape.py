@@ -260,31 +260,36 @@ def _preview_images(meta: dict, settings) -> dict:
     走 /image-proxy 而不是直接给源站 URL：图源有防盗链，浏览器直连
     会拿到 403。本地已缓存的走 /image-local，省一次回源。
 
-    返回的是**源图**地址。海报实际会裁成竖版，但那要下载后才知道裁哪半边，
-    试算阶段不做下载 —— 显示源图足够判断"图对不对"了。
+    海报给的是**裁好的竖版**（poster=1），与真正落进媒体库的那张一致 ——
+    源站封面多是横版双拼图，显示原图看不出 Emby 里最终长什么样。
+    背景（fanart）用原图，刮削时也不裁。
     """
     from app.utils import imagecache
 
     code = meta.get("code") or ""
 
-    def resolve(url: str, kind: str) -> str:
+    def resolve(url: str, kind: str, poster: bool = False) -> str:
         if not url:
             return ""
+        suffix = "&poster=1" if poster else ""
         # 缓存命中就走本地，不必再跨境
         hit = imagecache.find_cached(url, code, kind)
         if hit is not None:
-            return f"/api/v1/image-local?path={quote(imagecache.relative_of(hit))}"
+            path = quote(imagecache.relative_of(hit))
+            return f"/api/v1/image-local?path={path}{suffix}"
         return (
             f"/api/v1/image-proxy?url={quote(url, safe='')}"
-            f"&code={quote(code)}&kind={kind}"
+            f"&code={quote(code)}&kind={kind}{suffix}"
         )
 
     relative = (meta.get("local_banner") or "").split(",")[0].strip()
-    cover = ""
     if relative:
-        cover = f"/api/v1/image-local?path={quote(relative)}"
+        local = f"/api/v1/image-local?path={quote(relative)}"
+        poster, fanart = f"{local}&poster=1", local
     else:
-        cover = resolve(meta.get("banner") or meta.get("poster") or "", "banner")
+        source = meta.get("banner") or meta.get("poster") or ""
+        poster = resolve(source, "banner", poster=True)
+        fanart = resolve(source, "banner")
 
     stills = [
         resolve(u.strip(), "still")
@@ -292,7 +297,13 @@ def _preview_images(meta: dict, settings) -> dict:
         if u.strip()
     ][: max(0, settings.scrape_still_limit)]
 
-    return {"cover": cover, "stills": [s for s in stills if s]}
+    return {
+        # cover 保留原名，前端旧版本仍能显示；语义上它就是 fanart
+        "cover": fanart,
+        "poster": poster,
+        "fanart": fanart,
+        "stills": [s for s in stills if s],
+    }
 
 
 def _planned_outputs(target: Path, settings) -> list[dict]:

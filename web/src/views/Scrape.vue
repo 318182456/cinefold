@@ -379,15 +379,25 @@ async function doRun() {
           <!-- 图片 -->
           <div class="space-y-2">
             <p class="text-xs font-medium text-gray-400">图片</p>
-            <div v-if="detail.images?.cover" class="space-y-1">
-              <p class="text-[11px] text-gray-600">
-                封面（海报会从这张裁成竖版，背景用原图）
-              </p>
-              <img
-                :src="detail.images.cover"
-                class="max-h-56 rounded border border-gray-800 object-contain"
-                loading="lazy"
-              >
+            <!-- 海报与背景分开显示：这两张是不同的图，海报裁过、
+                 背景是原图，Emby 里用在不同位置 -->
+            <div v-if="detail.images?.poster || detail.images?.fanart" class="flex flex-wrap gap-3">
+              <div v-if="detail.images?.poster" class="space-y-1">
+                <p class="text-[11px] text-gray-600">海报（列表封面·已裁成竖版）</p>
+                <img
+                  :src="detail.images.poster"
+                  class="max-h-56 rounded border border-gray-800 object-contain"
+                  loading="lazy"
+                >
+              </div>
+              <div v-if="detail.images?.fanart" class="space-y-1">
+                <p class="text-[11px] text-gray-600">背景（详情页大图·原图不裁）</p>
+                <img
+                  :src="detail.images.fanart"
+                  class="max-h-56 rounded border border-gray-800 object-contain"
+                  loading="lazy"
+                >
+              </div>
             </div>
             <p v-else class="text-[11px] text-gray-600">没有封面地址，刮削时也不会有图</p>
 

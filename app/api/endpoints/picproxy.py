@@ -105,24 +105,66 @@ def _cached_response(path, request: Request) -> Response:
     )
 
 
+def _as_poster(content: bytes, side: str) -> bytes:
+    """把封面裁成竖版海报，与刮削时落盘的那张一致。
+
+    复用 scrape.images.crop_poster —— 试算要展示的是「实际会写进媒体库
+    的那张图」，自己再裁一遍就可能和真产物不一样。
+    """
+    from app.modules.scrape.images import crop_poster
+
+    return crop_poster(content, side)
+
+
+def _portrait_side(code: str) -> str:
+    """取番号的人像面。库里没有就返回空，crop_poster 会按右半边兜底。"""
+    if not code:
+        return ""
+    try:
+        from app.database.models import Code
+        from app.database.session import session_scope
+
+        with session_scope() as session:
+            row = session.get(Code, code)
+            return (row.portrait_side or "") if row is not None else ""
+    except Exception:
+        return ""
+
+
 @router.get("/image-proxy")
 async def image_proxy(
     request: Request,
     url: str,
     code: str = "",
     kind: str = "banner",
+    poster: bool = False,
 ):
     """代理一张图片。
 
     code 传番号时按 pics/<番号>/banner.jpg 缓存，与旧版目录布局一致，
     历史缓存不用迁移就能直接命中。
+
+    poster=true 时返回裁好的竖版海报（刮削试算用）—— 源站封面多是横版
+    双拼图，直接显示看不出最终落进 Emby 的是什么样。裁切结果不进缓存：
+    缓存键只有 url+code+kind，裁过的和原图会互相覆盖，而原图那份还要
+    留给灯箱看全图。
     """
     if not url:
         return Response(status_code=400, content=b"missing url")
 
     cached = imagecache.find_cached(url, code, kind)
     if cached is not None:
-        return _cached_response(cached, request)
+        if poster:
+            try:
+                return Response(
+                    content=_as_poster(cached.read_bytes(), _portrait_side(code)),
+                    media_type="image/jpeg",
+                    headers=dict(CACHE_HEADERS),
+                )
+            except OSError:
+                pass
+        else:
+            return _cached_response(cached, request)
 
     settings = get_settings()
     if not _is_allowed(url, settings.image_proxy_hosts):
@@ -137,7 +179,16 @@ async def image_proxy(
         logger.debug(f"图片代理失败 {url[:60]}: {exc}")
         return Response(status_code=404, content=b"fetch failed")
 
+    # 原图照常入缓存 —— 裁切只影响这次响应，缓存里始终是完整原图
     stored = imagecache.store(content, url, code, kind)
+
+    if poster:
+        return Response(
+            content=_as_poster(content, _portrait_side(code)),
+            media_type="image/jpeg",
+            headers=dict(CACHE_HEADERS),
+        )
+
     headers = dict(CACHE_HEADERS)
     if stored is not None:
         headers["ETag"] = imagecache.etag_for(stored)
@@ -150,15 +201,30 @@ async def image_proxy(
 
 
 @router.get("/image-local")
-def image_local(request: Request, path: str):
+def image_local(request: Request, path: str, poster: bool = False):
     """直接返回已缓存的图片。
 
     path 是库里 local_banner 存的相对路径（如 JUR-119/banner.jpg），
     老库迁进来后这一列就有值，走这里读盘比再拼一次源站 URL 省事。
+
+    poster=true 时裁成竖版海报，与刮削产物一致。番号从路径的目录名取
+    （缓存布局就是 pics/<番号>/banner.jpg），拿它查人像面。
     """
     target = imagecache.resolve_relative(path)
     if target is None:
         return Response(status_code=404, content=b"not found")
+
+    if poster:
+        try:
+            side = _portrait_side(target.parent.name)
+            return Response(
+                content=_as_poster(target.read_bytes(), side),
+                media_type="image/jpeg",
+                headers=dict(CACHE_HEADERS),
+            )
+        except OSError:
+            return Response(status_code=404, content=b"not found")
+
     return _cached_response(target, request)
 
 
