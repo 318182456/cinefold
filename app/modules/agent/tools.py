@@ -149,7 +149,9 @@ def tool_list_actors(args: dict) -> dict:
     keyword = (args.get("keyword") or "").strip()
 
     with session_scope() as session:
-        query = select(Actor)
+        # 只算真订阅：actor 表同时存着爬虫库导入的资料缓存，
+        # 不筛的话回答「你订阅了多少演员」会多报上千条
+        query = select(Actor).where(Actor.subscribed.is_(True))
         if keyword:
             like = f"%{keyword}%"
             query = query.where(or_(Actor.name.ilike(like), Actor.name_2.ilike(like)))

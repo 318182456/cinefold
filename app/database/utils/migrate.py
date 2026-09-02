@@ -120,6 +120,12 @@ NOT_NULL_FALLBACK: dict[str, dict[str, Any]] = {
     "history": {"code": ""},
 }
 
+# 过了 ROW_FILTERS 的行要补的常量列。老库没有这些列，不补的话会落成
+# 建表默认值 —— actor.subscribed 默认假，等于把搬过来的真实订阅静默关掉。
+CONSTANT_COLUMNS: dict[str, dict[str, Any]] = {
+    "actor": {"subscribed": True},
+}
+
 
 @dataclass
 class TableResult:
@@ -310,6 +316,12 @@ def _iter_batches(
             rows = [_row_to_dict(row, columns, table) for row in chunk]
             if keep is not None:
                 rows = [row for row in rows if keep(row)]
+            # 补在过滤之后：常量的含义是「留下来的这些是什么」，
+            # 被 ROW_FILTERS 丢掉的行不该也不会拿到这个值
+            constants = CONSTANT_COLUMNS.get(table)
+            if constants:
+                for row in rows:
+                    row.update(constants)
             yield rows
 
 

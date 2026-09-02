@@ -53,6 +53,37 @@ def _kept_names(db_path) -> list[str]:
         engine.dispose()
 
 
+def _kept_rows(db_path) -> list[dict]:
+    """同 _kept_names，但要看整行 —— 常量列补得对不对得看字段。"""
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        source_columns = {c["name"] for c in inspect(engine).get_columns("actor")}
+        columns = [c.name for c in Actor.__table__.columns if c.name in source_columns]
+        rows = []
+        for batch in mig._iter_batches(engine, Actor, columns):
+            rows.extend(batch)
+        return rows
+    finally:
+        engine.dispose()
+
+
+def test_搬过来的演员标成已订阅(tmp_path):
+    """subscribed 是新库才有的列，老库没有。
+
+    不显式补上就会落成建表默认值（假），搬完一看订阅还在，
+    演员订阅任务却一个都不跑 —— 静默失效比搬丢了还难查。
+    """
+    db = tmp_path / "old.db"
+    _make_source(db, with_limit_date=True, rows=[
+        ("真实订阅", "http://x/1.jpg", "2024-01-01"),
+        ("资料缓存", None, None),
+    ])
+
+    rows = _kept_rows(db)
+    assert [r["name"] for r in rows] == ["真实订阅"]
+    assert rows[0]["subscribed"] is True
+
+
 def test_只搬带起始日期的演员(tmp_path):
     db = tmp_path / "old.db"
     _make_source(db, with_limit_date=True, rows=[

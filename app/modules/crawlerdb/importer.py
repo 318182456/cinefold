@@ -421,10 +421,18 @@ def fetch_casts(limit: int = 0) -> list[dict]:
     return list(merged.values())
 
 
+# 导入只写资料，这几列归用户和订阅接口管，爬虫库一律不碰
+ACTOR_PROTECTED_FIELDS = frozenset({"name", "limit_date", "subscribed"})
+
+
 def import_casts(limit: int = 0) -> int:
     """导入演员，返回落库条数。
 
-    与番号一样只补空字段：本地的 limit_date 是用户自己设的订阅起点，
+    导入进来的演员是资料缓存（头像、别名），供搜索和作品页用，
+    **不是订阅** —— 新建的行 subscribed 一律为假，已有的行不动这一列。
+    否则演员订阅任务每轮会拿全库上千个演员去刷新作品。
+
+    与番号一样只补空字段：limit_date 是用户自己设的订阅起点，
     photo 也可能手工换过，不能被爬虫库冲掉。
     """
     from app.database.models.actor import Actor
@@ -448,12 +456,13 @@ def import_casts(limit: int = 0) -> int:
                     row = session.get(Actor, name)
                     touched = False
                     if row is None:
-                        row = Actor(name=name)
+                        # subscribed 显式写死为假：导入的是资料，不是订阅
+                        row = Actor(name=name, subscribed=False)
                         session.add(row)
                         touched = True
 
                     for key, value in item.items():
-                        if key == "name" or not value:
+                        if key in ACTOR_PROTECTED_FIELDS or not value:
                             continue
                         if hasattr(row, key) and not getattr(row, key):
                             setattr(row, key, value)

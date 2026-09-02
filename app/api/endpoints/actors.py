@@ -23,11 +23,20 @@ def list_actors(
     keyword: str = "",
     page: int = 1,
     size: int = 15,
+    subscribed: bool = True,
     current_user: str = Depends(get_current_user),
 ):
+    """演员列表。
+
+    默认只列已订阅的。actor 表里还有爬虫库导入的资料缓存，那些不是订阅，
+    列出来会让人以为自己订了上千个演员；subscribed=false 可查全表。
+    """
     with session_scope() as session:
         query = select(Actor)
         count_query = select(func.count()).select_from(Actor)
+        if subscribed:
+            query = query.where(Actor.subscribed.is_(True))
+            count_query = count_query.where(Actor.subscribed.is_(True))
         if keyword:
             pattern = f"%{keyword}%"
             condition = Actor.name.like(pattern) | Actor.name_2.like(pattern)
@@ -57,26 +66,10 @@ def subscribe(body: ActorRequest, current_user: str = Depends(get_current_user))
 @router.post("/actors/cancel")
 def cancel(body: ActorRequest, current_user: str = Depends(get_current_user)):
     from app import services
+    # 取消只翻标记不删行，所以失败等于「本来就没订阅」
     if not services.cancel_actor(body.name):
-        return ResponseEntity.fail("演员不存在", code=404)
+        return ResponseEntity.fail("该演员未在订阅中", code=404)
     return ResponseEntity.ok(message=f"已取消订阅 {body.name}")
-
-
-class PurgeRequest(BaseModel):
-    # 默认只试算。真要删必须显式传 false，避免误触
-    dry_run: bool = True
-
-
-@router.post("/actors/purge-migrated")
-def purge_migrated(body: PurgeRequest, current_user: str = Depends(get_current_user)):
-    """清理迁移残留的伪订阅演员（没有起始日期的记录）。"""
-    from app import services
-    result = services.purge_migrated_actors(dry_run=body.dry_run)
-    if result["dry_run"]:
-        message = f"试算：{result['matched']} 条待清理，保留 {result['kept']} 条真实订阅"
-    else:
-        message = f"已清理 {result['deleted']} 条，保留 {result['kept']} 条真实订阅"
-    return ResponseEntity.ok(result, message=message)
 
 
 @router.get("/actors/rank")
@@ -90,6 +83,8 @@ def rank(limit: int = 30, current_user: str = Depends(get_current_user)):
     except (ImportError, AttributeError):
         pass
 
+    # 抓不到榜单时拿本地演员兜底。这里要的是「有哪些演员」，
+    # 资料缓存同样算数，所以不按 subscribed 筛
     with session_scope() as session:
         rows = session.scalars(select(Actor).limit(limit)).all()
         return ResponseEntity.ok({"items": [row.to_dict() for row in rows]})

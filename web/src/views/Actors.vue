@@ -1,7 +1,7 @@
 <script setup>
 import { onMounted, ref } from 'vue'
 import {
-  listActors, subscribeActor, cancelActor, getActorCodes, proxyImage, purgeMigratedActors,
+  listActors, subscribeActor, cancelActor, getActorCodes, proxyImage,
 } from '@/api'
 import { useToast } from '@/composables/useToast'
 import EmptyState from '@/components/EmptyState.vue'
@@ -20,34 +20,6 @@ const newDate = ref('')
 const selected = ref(null)
 const codes = ref([])
 const loadingCodes = ref(false)
-
-// 迁移残留：老库的 actor 表是演员资料缓存，搬过来后全成了"已订阅"。
-// 真实订阅一定带 limit_date，没有的就是残留。
-const purge = ref(null)
-const purging = ref(false)
-
-async function checkPurge() {
-  try {
-    purge.value = await purgeMigratedActors(true)
-  } catch {
-    // 老版本后端没有这个接口，静默跳过即可
-    purge.value = null
-  }
-}
-
-async function doPurge() {
-  purging.value = true
-  try {
-    const data = await purgeMigratedActors(false)
-    toast.success(`已清理 ${data.deleted} 条，保留 ${data.kept} 条真实订阅`)
-    purge.value = null
-    load()
-  } catch (err) {
-    toast.error(err.message)
-  } finally {
-    purging.value = false
-  }
-}
 
 async function load() {
   loading.value = true
@@ -100,10 +72,7 @@ async function showCodes(name) {
   }
 }
 
-onMounted(() => {
-  load()
-  checkPurge()
-})
+onMounted(load)
 </script>
 
 <template>
@@ -123,25 +92,6 @@ onMounted(() => {
       <p class="text-xs text-gray-600">
         填写起始日期后，只订阅该日期之后发行的作品
       </p>
-    </div>
-
-    <!-- 迁移残留提示 -->
-    <div
-      v-if="purge && purge.matched"
-      class="card space-y-2 border-amber-900/60 bg-amber-950/20"
-    >
-      <p class="text-sm font-medium text-amber-300">检测到迁移残留</p>
-      <p class="text-xs text-gray-400">
-        有 {{ purge.matched }} 条演员记录没有起始日期，是数据迁移时从老库的演员资料表
-        搬过来的，并非你主动订阅。它们会让演员订阅任务每轮都去刷新作品。
-        清理后将保留 {{ purge.kept }} 条真实订阅。
-      </p>
-      <p v-if="purge.samples?.length" class="truncate text-[11px] text-gray-600">
-        例如：{{ purge.samples.join('、') }}
-      </p>
-      <button class="btn-primary w-fit" :disabled="purging" @click="doPurge">
-        {{ purging ? '清理中…' : `清理这 ${purge.matched} 条` }}
-      </button>
     </div>
 
     <!-- 搜索 -->

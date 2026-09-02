@@ -67,6 +67,8 @@ def update_database() -> None:
         ("code", "portrait_side", "VARCHAR(8)"),
         ("actor", "name_2", "VARCHAR(255)"),
         ("actor", "limit_date", "VARCHAR(32)"),
+        # 用户主动订阅才为真。默认假，存量行由 backfill_actor_subscribed 回填
+        ("actor", "subscribed", "BOOLEAN NOT NULL DEFAULT FALSE"),
         ("history", "save_path", "TEXT"),
         # 种子来源站。存量行为空，按「不是 BT 源」处理，不会被误限速
         ("history", "site", "VARCHAR(64)"),
@@ -116,6 +118,40 @@ def update_database() -> None:
     ]
     for table, column in indexes:
         check_and_create_index(engine, table, column)
+
+    backfill_actor_subscribed()
+
+
+def backfill_actor_subscribed() -> int:
+    """把存量演员里的真实订阅标出来，返回回填条数。
+
+    subscribed 这一列是后加的，加上时全表默认假。在它之前，判断订阅与否
+    只能看 limit_date 有没有值 —— subscribe_actor 一定会填，爬虫库导入
+    一定不填。所以有 limit_date 的就是用户订阅，照这个规则回填一次。
+
+    只在列刚建好、全表都是假时跑；之后 subscribed 由订阅接口维护，
+    再回填会把用户取消掉的订阅重新打开。
+    """
+    from sqlalchemy import func, select, update
+    from app.database.models import Actor
+
+    with session_scope() as session:
+        already = session.scalar(
+            select(func.count()).select_from(Actor).where(Actor.subscribed.is_(True))
+        ) or 0
+        if already:
+            return 0
+
+        result = session.execute(
+            update(Actor)
+            .where(Actor.limit_date.is_not(None), Actor.limit_date != "")
+            .values(subscribed=True)
+        )
+        filled = result.rowcount or 0
+
+    if filled:
+        logger.info(f"  演员订阅标记回填 {filled} 条")
+    return filled
 
 
 def insert_first_user() -> str:

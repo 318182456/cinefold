@@ -553,9 +553,15 @@ ACTOR_SUBSCRIBE_LIMIT = 50
 
 
 def run_run_actor() -> int:
-    """演员订阅：把已订阅演员的新作品加入订阅队列。"""
+    """演员订阅：把已订阅演员的新作品加入订阅队列。
+
+    只跑 subscribed 为真的行。actor 表里还躺着爬虫库导入的上千条资料缓存，
+    不按这一列筛就等于每轮替全库演员刷新作品。
+    """
     with session_scope() as session:
-        actors = session.scalars(select(Actor)).all()
+        actors = session.scalars(
+            select(Actor).where(Actor.subscribed.is_(True))
+        ).all()
         actor_names = [(a.name, a.limit_date) for a in actors]
 
     if not actor_names:
@@ -820,51 +826,30 @@ def subscribe_actor(name: str, limit_date: str = "") -> bool:
     with session_scope() as session:
         row = session.get(Actor, name)
         if row is None:
-            session.add(Actor(name=name, limit_date=limit_date or default_date))
+            session.add(Actor(
+                name=name, limit_date=limit_date or default_date, subscribed=True,
+            ))
         else:
+            # 爬虫库导入过的演员这里已有一行（资料缓存，subscribed 为假），
+            # 订阅就是把它翻成真，不必也不该重新建行
             row.limit_date = limit_date or row.limit_date or default_date
+            row.subscribed = True
     send_subscribe_actor_message(name)
     return True
 
 
 def cancel_actor(name: str) -> bool:
-    with session_scope() as session:
-        row = session.get(Actor, name)
-        if row is None:
-            return False
-        session.delete(row)
-    return True
+    """取消订阅。留着行本身，只把订阅标记翻成假。
 
-
-def purge_migrated_actors(dry_run: bool = True) -> dict:
-    """清掉迁移带进来的伪订阅演员。
-
-    老版本的 actor 表是演员资料缓存，迁移时整表搬了过来，在新版语义下
-    全都成了"已订阅"，演员订阅任务每轮都会拿它们去刷番号。
-    真实订阅一定带 limit_date（subscribe_actor 为空时会填当天），
-    没有这一列值的就是迁移残留。
+    这一行同时是演员资料缓存（头像、别名），搜索和作品页还要用；
+    删掉的话下一轮爬虫库导入照样会把它写回来，反而白删一次。
     """
     with session_scope() as session:
-        condition = (Actor.limit_date.is_(None)) | (Actor.limit_date == "")
-        rows = session.scalars(select(Actor).where(condition)).all()
-        matched = len(rows)
-        samples = [row.name for row in rows[:20]]
-        kept = session.scalar(
-            select(func.count()).select_from(Actor).where(~condition)
-        ) or 0
-
-        if not dry_run:
-            for row in rows:
-                session.delete(row)
-            logger.info(f"清理迁移残留演员 {matched} 条，保留真实订阅 {kept} 条")
-
-    return {
-        "matched": matched,
-        "deleted": 0 if dry_run else matched,
-        "kept": kept,
-        "dry_run": dry_run,
-        "samples": samples,
-    }
+        row = session.get(Actor, name)
+        if row is None or not row.subscribed:
+            return False
+        row.subscribed = False
+    return True
 
 
 # ======================================================================
@@ -1690,7 +1675,11 @@ def dashboard_stats() -> dict:
             "downloading": by_status.get(CodeStatus.DOWNLOADING, 0),
             "downloaded": by_status.get(CodeStatus.DOWNLOADED, 0),
             "completed": by_status.get(CodeStatus.COMPLETED, 0),
-            "actors": session.scalar(select(func.count()).select_from(Actor)) or 0,
+            # 只数真订阅，资料缓存不算 —— 这个数字对外叫「已订阅演员」
+            "actors": session.scalar(
+                select(func.count()).select_from(Actor)
+                .where(Actor.subscribed.is_(True))
+            ) or 0,
             "history": session.scalar(select(func.count()).select_from(History)) or 0,
         }
 

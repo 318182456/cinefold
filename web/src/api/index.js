@@ -215,8 +215,6 @@ export const subscribeActor = (name, limitDate) =>
   http.post('/actors/sub', { name, limit_date: limitDate })
 export const cancelActor = (name) => http.post('/actors/cancel', { name })
 export const getActorRank = () => http.get('/actors/rank')
-export const purgeMigratedActors = (dryRun = true) =>
-  http.post('/actors/purge-migrated', { dry_run: dryRun })
 export const getActorCodes = (name) => http.get('/actors/codes', { params: { name } })
 
 // ---------------------------------------------------------------- 系统

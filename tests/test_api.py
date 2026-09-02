@@ -1125,6 +1125,128 @@ class TestActorSubscribeScope:
         with session_scope() as session:
             row = session.get(Actor, "新演员")
             assert row.limit_date == datetime.now().strftime("%Y-%m-%d")
+            assert row.subscribed is True
+
+
+class TestImportedActorsAreNotSubscriptions:
+    """爬虫库导入的演员是资料缓存，不是订阅。
+
+    actor 表一行既可能是用户订阅，也可能是导入的资料。两者只靠 subscribed
+    区分 —— 混了的话演员订阅任务每轮会拿全库上千个演员去刷新作品，
+    某天晚上就是这么凭空冒出 1333 条「已订阅」的。
+    """
+
+    def _clean(self, *names):
+        from app.database.base import DBBase
+        from app.database.models import Actor
+        from app.database.session import engine, session_scope
+
+        DBBase.metadata.create_all(engine)
+        with session_scope() as session:
+            for name in names:
+                row = session.get(Actor, name)
+                if row is not None:
+                    session.delete(row)
+
+    def _import(self, monkeypatch, rows):
+        from app.modules.crawlerdb import importer
+        monkeypatch.setattr(importer, "_query", lambda *a, **k: rows)
+        return importer.import_casts()
+
+    def test_import_creates_unsubscribed_rows(self, monkeypatch):
+        from app.database.models import Actor
+        from app.database.session import session_scope
+
+        self._clean("导入演员")
+        self._import(monkeypatch, [
+            {"name": "导入演员", "cn_name": "导入演员", "photo": "a.jpg"},
+        ])
+
+        with session_scope() as session:
+            row = session.get(Actor, "导入演员")
+            assert row.subscribed is False
+            assert row.photo == "a.jpg"      # 资料照常入库
+            assert not row.limit_date        # 订阅起点归用户管，导入不填
+
+    def test_import_does_not_touch_existing_subscription(self, monkeypatch):
+        """已订阅的演员被导入扫到时，订阅标记和起始日期都不能被冲掉。"""
+        from app import services
+        from app.database.models import Actor
+        from app.database.session import session_scope
+
+        self._clean("已订阅演员")
+        services.subscribe_actor("已订阅演员", "2024-01-01")
+        self._import(monkeypatch, [
+            {"name": "已订阅演员", "cn_name": "别名", "photo": "b.jpg"},
+        ])
+
+        with session_scope() as session:
+            row = session.get(Actor, "已订阅演员")
+            assert row.subscribed is True
+            assert row.limit_date == "2024-01-01"
+            assert row.photo == "b.jpg"      # 空着的资料字段照样补上
+
+    def test_subscribe_flips_imported_row(self, monkeypatch):
+        """订阅导入过的演员是翻标记，不是新建行 —— 资料要留着。"""
+        from app import services
+        from app.database.models import Actor
+        from app.database.session import session_scope
+
+        self._clean("待订阅演员")
+        self._import(monkeypatch, [
+            {"name": "待订阅演员", "cn_name": None, "photo": "c.jpg"},
+        ])
+        services.subscribe_actor("待订阅演员", "2024-05-01")
+
+        with session_scope() as session:
+            row = session.get(Actor, "待订阅演员")
+            assert row.subscribed is True
+            assert row.limit_date == "2024-05-01"
+            assert row.photo == "c.jpg"
+
+    def test_cancel_keeps_row_as_profile(self, monkeypatch):
+        """取消订阅只翻标记：行还要当资料缓存用，删了下轮导入也会写回来。"""
+        from app import services
+        from app.database.models import Actor
+        from app.database.session import session_scope
+
+        self._clean("待取消演员")
+        services.subscribe_actor("待取消演员", "2024-01-01")
+        assert services.cancel_actor("待取消演员") is True
+
+        with session_scope() as session:
+            row = session.get(Actor, "待取消演员")
+            assert row is not None
+            assert row.subscribed is False
+
+        # 本来就没订阅的，取消应当报失败而不是静默成功
+        assert services.cancel_actor("待取消演员") is False
+
+    def test_actor_task_skips_imported(self, monkeypatch):
+        """演员订阅任务只跑真订阅 —— 这是 1333 条刷新的直接来源。"""
+        from app import services
+        from app.database.models import Actor
+        from app.database.session import session_scope
+
+        self._clean("任务订阅演员", "任务导入演员")
+        services.subscribe_actor("任务订阅演员", "2024-01-01")
+        self._import(monkeypatch, [
+            {"name": "任务导入演员", "cn_name": None, "photo": "d.jpg"},
+        ])
+
+        visited = []
+        monkeypatch.setattr(
+            services, "_subscribe_actor_new_works",
+            lambda name, limit_date: visited.append(name) or 0,
+        )
+        services.run_run_actor()
+
+        assert "任务订阅演员" in visited
+        assert "任务导入演员" not in visited
+
+        # 库里确实两条都在，任务只是没去跑导入的那条
+        with session_scope() as session:
+            assert session.get(Actor, "任务导入演员") is not None
 
 
 class TestBtAutoDownload:

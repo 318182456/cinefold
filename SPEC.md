@@ -54,8 +54,33 @@ name            演员名（主键）
 name_2          别名
 photo           头像
 limit_date      订阅起始日期
+subscribed      是否用户主动订阅
 create_time / update_time
 ```
+
+**这张表一行有两种身份，靠 `subscribed` 区分：**
+
+- `subscribed = true` —— 用户主动订阅，`run_actors` 每轮拿它去刷新作品
+- `subscribed = false` —— 演员资料缓存（头像、别名），只供搜索和作品页读
+
+**导入不等于订阅。** 任何批量导入（爬虫库 `import_casts`、SQLite→PG 迁移、
+今后新增的数据源）写进 actor 表的行，一律 `subscribed = false`；
+只有 `POST /actors/sub` 走的 `subscribe_actor` 才能把它置真。
+
+违反这条的后果是实测过的：爬虫库导入每轮全量灌进上千条演员，
+在旧语义（有行即订阅）下全成了「已订阅」，`run_actors` 于是每晚
+替全库演员刷新作品 —— 界面上凭空多出 1333 条订阅，就是这么来的。
+
+配套的几处约束：
+
+- `import_casts` 有 `ACTOR_PROTECTED_FIELDS`（`name` / `limit_date` /
+  `subscribed`），导入只补资料字段，这三列一概不碰
+- `cancel_actor` 只把标记翻假，不删行 —— 行本身还是资料缓存，
+  删了下轮导入照样写回来
+- 对外报「已订阅演员」数量的地方（列表页、看板统计、AI 助手）
+  都要按 `subscribed` 筛，否则会把资料缓存一起算进去
+- 番号侧的同类约束见 `cache_remote_codes`：导入不动 `status`，
+  新建的行落 `CodeStatus.NONE`，同样是「导入不等于订阅」
 
 ### History（下载历史）
 ```
