@@ -293,7 +293,21 @@ qb 卡死（WebAPI 不响应但进程还在）时重启它的容器。`QBitTorre
 另有 `cache_photos` / `save_image` / `translate_titles` / `pt_wait` / `transfer_seeds` / `push_job` / `start_scheduler` / `restart_scheduler`。
 
 固定间隔任务中，`transfer_seeds`（转移做种，默认 60 分钟，`SEED_TRANSFER_INTERVAL` 可调）
-在 `SEED_TRANSFER_ENABLED` 关闭时直接返回，不打下载器接口。
+在 `SEED_TRANSFER_ENABLED` 关闭时直接返回，不打下载器接口。每个固定间隔任务都有
+对应的 `*_INTERVAL` 配置项（分钟数），没有配置项的任务在任务页上改不了 —— 改了
+也没处存，重启就退回默认值。
+
+### 自然语言排班
+
+`app/services/schedule.py` 把「每天凌晨 4 点」这类说法翻成 cron，任务页用它做
+输入。规则优先、AI 兜底：常见说法走本地正则（不发请求，AI 没配也能用），规则
+认不出来才问 AI；两条路都不认就返回 `None`，由调用方提示换个说法，绝不猜一个
+表达式存进去 —— 排班猜错了不报错，只会在某个没人盯着的时刻悄悄跑错。
+
+`describe_cron` / `describe_interval` 做反向回读，供界面显示与编辑时预填。
+两个方向必须互为逆运算（见 `tests/test_schedule.py::test_roundtrip_is_stable`）：
+界面预填的就是回读文本，回读的说法要是翻不回原来的 cron，用户什么都没改、
+只点了保存，排班就悄悄变了。
 
 ## 8. 过滤与排序 `utils/filters`
 

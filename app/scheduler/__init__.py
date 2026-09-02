@@ -453,11 +453,20 @@ JOBS: dict[str, dict] = {
 
 # 固定间隔任务，不走 crontab
 INTERVAL_JOBS: dict[str, dict] = {
-    "pt_wait": {"func": pt_wait, "name": "同步下载状态", "minutes": 5},
+    "pt_wait": {
+        "func": pt_wait, "name": "同步下载状态", "minutes": 5,
+        "interval_key": "download_sync_interval",
+    },
     # 一轮最多翻 50 条，翻完即空转。间隔短一些，新入库的番号不用等半小时
     # 才有中文标题；库里积压的存量也能更快消化
-    "translate_titles": {"func": translate_titles, "name": "翻译标题", "minutes": 10},
-    "cache_photos": {"func": cache_photos, "name": "缓存封面", "minutes": 20},
+    "translate_titles": {
+        "func": translate_titles, "name": "翻译标题", "minutes": 10,
+        "interval_key": "translate_interval",
+    },
+    "cache_photos": {
+        "func": cache_photos, "name": "缓存封面", "minutes": 20,
+        "interval_key": "photo_cache_interval",
+    },
     # watchdog 实时监听的兜底。NAS / Docker 绑定挂载上 inotify 事件经常收不到，
     # 那种环境下这个兜底才是实际起作用的路径，所以间隔做成可配置
     # （WATCHDIR_SYNC_INTERVAL），minutes 只是没配置时的默认值
@@ -469,11 +478,13 @@ INTERVAL_JOBS: dict[str, dict] = {
     # 时间戳，一小时的精度对这个用途完全够，而每轮要拉下载器全量种子清单
     "scan_orphans": {
         "func": scan_orphans, "name": "孤儿关联扫描", "minutes": 60,
+        "interval_key": "orphan_scan_interval",
     },
     # 存量记录的体积/字幕回填。每轮一批，探完就不再动 ——
     # 全填满之后这个任务基本是空转，留着是为了接住新增的漏网记录
     "refresh_link_sizes": {
         "func": refresh_link_sizes, "name": "媒体关联体积回填", "minutes": 30,
+        "interval_key": "link_refresh_interval",
     },
     # 开关（SEED_TRANSFER_ENABLED）关着时直接返回，不打下载器接口
     "transfer_seeds": {
@@ -614,19 +625,76 @@ def stop_scheduler() -> None:
 
 
 def list_jobs() -> list[dict]:
-    """供 API 展示任务列表。"""
+    """供 API 展示任务列表。
+
+    带上排班的可编辑信息：kind 区分 cron 与固定间隔（两者的输入与存法
+    都不一样），schedule 是当前值，schedule_text 是翻成人话的说法 ——
+    页面显示后者，用户读得懂才改得对。
+    """
     if _scheduler is None:
         return []
-    return [
-        {
+
+    from app.services.schedule import describe_cron, describe_interval
+
+    settings = get_settings()
+    out = []
+    for job in _scheduler.get_jobs():
+        item = {
             "id": job.id,
             "name": job.name,
             "next_run": job.next_run_time.strftime("%Y-%m-%d %H:%M:%S")
             if job.next_run_time else "",
             "trigger": str(job.trigger),
+            # 默认不可编辑：注册表里查不到的任务（理论上不该有）宁可只读，
+            # 也不要给个改不动的输入框
+            "editable": False,
         }
-        for job in _scheduler.get_jobs()
-    ]
+
+        if job.id in JOBS:
+            cron = getattr(settings, JOBS[job.id]["cron_key"], "")
+            item.update(
+                kind="cron",
+                schedule=cron,
+                schedule_text=describe_cron(cron),
+                editable=bool(JOBS[job.id]["cron_key"]),
+            )
+        elif job.id in INTERVAL_JOBS:
+            minutes = _interval_of(settings, job.id)
+            item.update(
+                kind="interval",
+                schedule=str(minutes),
+                schedule_text=describe_interval(minutes),
+                # 没有 interval_key 的任务，间隔写死在代码里没处存，
+                # 改了重启就没了 —— 不如不给改
+                editable=bool(INTERVAL_JOBS[job.id].get("interval_key")),
+            )
+        out.append(item)
+    return out
+
+
+def _interval_of(settings, job_id: str) -> int:
+    """固定间隔任务当前的实际间隔（分钟）。"""
+    meta = INTERVAL_JOBS[job_id]
+    key = meta.get("interval_key")
+    if key:
+        configured = getattr(settings, key, 0)
+        if isinstance(configured, int) and configured > 0:
+            return configured
+    return meta["minutes"]
+
+
+def schedule_key_of(job_id: str) -> tuple[str, str] | None:
+    """任务对应的配置项，返回 (配置名, 类型)。改不了的任务返回 None。
+
+    类型是 "cron" 或 "interval"，决定了存进去的是表达式还是分钟数。
+    """
+    if job_id in JOBS:
+        key = JOBS[job_id]["cron_key"]
+        return (key, "cron") if key else None
+    if job_id in INTERVAL_JOBS:
+        key = INTERVAL_JOBS[job_id].get("interval_key")
+        return (key, "interval") if key else None
+    return None
 
 
 def push_job(job_id: str) -> bool:

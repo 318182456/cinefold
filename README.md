@@ -394,7 +394,28 @@ REVIEW_FILL_TIME='35 * * * *' # 补漏时间，默认每小时一轮
 | 补抓字幕 | `0 4 * * *` | 给媒体库里没字幕的影片补抓，需 `SUBTITLE_ENABLED=True` |
 | 补生成影评 | `35 * * * *` | 给媒体库里没影评的影片补生成，每轮上限 `REVIEW_FILL_LIMIT`，需 `REVIEW_ENABLED=True` |
 
-任务页可手动触发任意任务。
+任务页可手动触发任意任务，也可以直接改执行周期 —— 点「改周期」，用大白话
+写就行（`每小时`、`每 30 分钟`、`每天凌晨 4 点`、`每周一早上 9 点`、`工作日中午`），
+不用会写 cron。输入时下方会实时回读成「每天 04:00」这样，确认没理解错再保存，
+保存后立即生效。
+
+常见说法由内置规则直接翻译，不发网络请求；规则没认出来的说法才会交给 AI
+（配了 `OPENAI_*` 或 `AGENT_*` 时）。两条路都没认出来会提示换个说法，不会
+猜一个塞进去。会写 cron 的话，直接把表达式填进去也照样收。
+
+上表的周期都对应一个配置项，页面上改与手写 `.env` 完全等价。cron 类的是表达式，
+固定间隔类的是分钟数：
+
+```bash
+DOWNLOAD_SYNC_INTERVAL=5    # 同步下载状态
+TRANSLATE_INTERVAL=10       # 翻译标题
+PHOTO_CACHE_INTERVAL=20     # 缓存封面
+LINK_REFRESH_INTERVAL=30    # 媒体关联体积回填
+WATCHDIR_SYNC_INTERVAL=30   # 监控目录对账
+ORPHAN_SCAN_INTERVAL=60     # 孤儿关联扫描
+SEED_TRANSFER_INTERVAL=60   # 转移做种
+UPDATE_CHECK_INTERVAL=360   # 自动更新检查
+```
 
 ---
 

@@ -224,6 +224,10 @@ export const getLogs = (lines = 300, keyword = '') =>
   http.get('/logs', { params: { lines, keyword } })
 export const listCron = () => http.get('/cron')
 export const runTask = (jobId) => http.post('/task', null, { params: { job_id: jobId } })
+// 排班：preview 只翻译不保存，update 才落盘
+export const previewSchedule = (jobId, text) =>
+  http.post('/cron/preview', { job_id: jobId, text })
+export const updateSchedule = (jobId, text) => http.post('/cron', { job_id: jobId, text })
 export const testConnection = (target) => http.get('/test', { params: { target } })
 export const listPtSites = () => http.get('/ptsites')
 export const getTelegramReceive = () => http.get('/telegram/receive')

@@ -163,6 +163,107 @@ def run_task(job_id: str, current_user: str = Depends(get_current_user)):
     return ResponseEntity.ok(message="任务已触发")
 
 
+class ScheduleRequest(BaseModel):
+    job_id: str
+    # 自然语言的说法（「每小时」「每天凌晨4点」），也接受直接写 cron
+    text: str
+
+
+@router.post("/cron/preview")
+def preview_schedule(
+    body: ScheduleRequest, current_user: str = Depends(get_current_user)
+):
+    """把用户输入的说法翻成 cron，只回显不保存。
+
+    单开一个预览接口，是为了让用户在按下保存之前就看见「每天 04:00」这样
+    的回读 —— 排班改错了不会报错，只会在某个没人盯着的时刻悄悄跑错，
+    事后极难发现。先看清楚再存，比存完再自己去算安全得多。
+    """
+    from app.scheduler import schedule_key_of
+    from app.services.schedule import (
+        describe_cron, describe_interval, parse_interval, parse_schedule,
+    )
+
+    target = schedule_key_of(body.job_id)
+    if target is None:
+        return ResponseEntity.fail("这个任务的执行周期不支持修改", code=400)
+
+    _, kind = target
+    if kind == "interval":
+        minutes = parse_interval(body.text)
+        if not minutes:
+            return ResponseEntity.fail(_UNPARSED_HINT, code=400)
+        return ResponseEntity.ok({
+            "kind": kind,
+            "schedule": str(minutes),
+            "schedule_text": describe_interval(minutes),
+            "source": "规则",
+        })
+
+    parsed = parse_schedule(body.text)
+    if not parsed:
+        return ResponseEntity.fail(_UNPARSED_HINT, code=400)
+    cron, source = parsed
+    return ResponseEntity.ok({
+        "kind": kind,
+        "schedule": cron,
+        "schedule_text": describe_cron(cron),
+        "source": source,
+    })
+
+
+# 认不出来时给例子而不是干巴巴一句「格式错误」——用户不知道该怎么改，
+# 才是这个功能最容易卡住的地方
+_UNPARSED_HINT = (
+    "没看懂这个执行周期，换个说法试试："
+    "「每小时」「每 30 分钟」「每天凌晨 4 点」「每周一早上 9 点」"
+)
+
+
+@router.post("/cron")
+def update_schedule(
+    body: ScheduleRequest, current_user: str = Depends(get_current_user)
+):
+    """改一个任务的执行周期。
+
+    存的仍是配置项（cron 表达式或分钟数），跟手写 .env 完全等价 ——
+    这里只是把「人话 → 配置值」这步搬到了界面上。存完重建调度器立即生效。
+    """
+    from app.scheduler import restart_scheduler, schedule_key_of
+    from app.services.schedule import (
+        describe_cron, describe_interval, parse_interval, parse_schedule,
+    )
+
+    target = schedule_key_of(body.job_id)
+    if target is None:
+        return ResponseEntity.fail("这个任务的执行周期不支持修改", code=400)
+
+    key, kind = target
+
+    if kind == "interval":
+        minutes = parse_interval(body.text)
+        if not minutes:
+            return ResponseEntity.fail(_UNPARSED_HINT, code=400)
+        value, readable = minutes, describe_interval(minutes)
+    else:
+        parsed = parse_schedule(body.text)
+        if not parsed:
+            return ResponseEntity.fail(_UNPARSED_HINT, code=400)
+        value, readable = parsed[0], describe_cron(parsed[0])
+
+    save_settings({key.upper(): value})
+    get_settings(reload=True)
+    restart_scheduler()
+
+    from loguru import logger
+    logger.info(f"[排班] {body.job_id} 改为 {value}（{readable}）")
+
+    return ResponseEntity.ok(
+        {"schedule": str(value), "schedule_text": readable},
+        message=f"已改为{readable}",
+    )
+
+
 @router.get("/test")
 def test_connection(target: str, current_user: str = Depends(get_current_user)):
     """测试外部服务连接。target: qbittorrent / transmission / emby / ..."""

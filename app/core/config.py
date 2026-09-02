@@ -279,6 +279,15 @@ class Settings:
     # 几周都填不完。改成每小时后成本仍受每轮上限约束，只是把同样的额度摊
     # 到全天。错开整点跑，避开其它任务扎堆
     review_fill_time: str = "35 * * * *"
+
+    # 固定间隔任务的间隔（分钟）。这几个原先把间隔写死在 INTERVAL_JOBS 里，
+    # 没有配置项就没处存 —— 任务页想改也落不了盘，重启就退回默认值。
+    # 提出来之后这几个任务在页面上才是可编辑的
+    download_sync_interval: int = 5
+    translate_interval: int = 10
+    photo_cache_interval: int = 20
+    orphan_scan_interval: int = 60
+    link_refresh_interval: int = 30
     # --- 外部爬虫库导入 ---
     # PostgreSQL 连接串，为空则整个功能不启用（任务不注册、页面不显示）
     crawler_db_dsn: str = ""
@@ -587,6 +596,11 @@ def load_settings() -> Settings:
         warm_cache_time=_env("WARM_CACHE_TIME", "*/25 * * * *").strip("'\""),
         subtitle_fill_time=_env("SUBTITLE_FILL_TIME", "0 4 * * *").strip("'\""),
         review_fill_time=_env("REVIEW_FILL_TIME", "35 * * * *").strip("'\""),
+        download_sync_interval=_env_int("DOWNLOAD_SYNC_INTERVAL", 5),
+        translate_interval=_env_int("TRANSLATE_INTERVAL", 10),
+        photo_cache_interval=_env_int("PHOTO_CACHE_INTERVAL", 20),
+        orphan_scan_interval=_env_int("ORPHAN_SCAN_INTERVAL", 60),
+        link_refresh_interval=_env_int("LINK_REFRESH_INTERVAL", 30),
         crawler_db_dsn=_env("CRAWLER_DB_DSN", "").strip("'\""),
         crawler_db_time=_env("CRAWLER_DB_TIME", "").strip("'\""),
         crawler_db_limit=_env_int("CRAWLER_DB_LIMIT", 5000),
