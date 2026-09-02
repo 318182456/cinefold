@@ -454,7 +454,9 @@ JOBS: dict[str, dict] = {
 # 固定间隔任务，不走 crontab
 INTERVAL_JOBS: dict[str, dict] = {
     "pt_wait": {"func": pt_wait, "name": "同步下载状态", "minutes": 5},
-    "translate_titles": {"func": translate_titles, "name": "翻译标题", "minutes": 30},
+    # 一轮最多翻 50 条，翻完即空转。间隔短一些，新入库的番号不用等半小时
+    # 才有中文标题；库里积压的存量也能更快消化
+    "translate_titles": {"func": translate_titles, "name": "翻译标题", "minutes": 10},
     "cache_photos": {"func": cache_photos, "name": "缓存封面", "minutes": 20},
     # watchdog 实时监听的兜底。NAS / Docker 绑定挂载上 inotify 事件经常收不到，
     # 那种环境下这个兜底才是实际起作用的路径，所以间隔做成可配置

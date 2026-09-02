@@ -288,7 +288,7 @@ qb 卡死（WebAPI 不响应但进程还在）时重启它的容器。`QBitTorre
 | `run_actors` | `0 21 * * *` | 演员订阅 |
 | `run_codes_task` | `0 22 * * *` | 订阅下载 |
 | `fill_subtitles` | `0 4 * * *` | 补抓字幕（`SUBTITLE_ENABLED` 关闭时直接返回） |
-| `fill_reviews` | `30 4 * * *` | 补生成 AI 影评（`REVIEW_ENABLED` 关闭时直接返回） |
+| `fill_reviews` | `35 * * * *` | 补生成 AI 影评（`REVIEW_ENABLED` 关闭时直接返回） |
 
 另有 `cache_photos` / `save_image` / `translate_titles` / `pt_wait` / `transfer_seeds` / `push_job` / `start_scheduler` / `restart_scheduler`。
 

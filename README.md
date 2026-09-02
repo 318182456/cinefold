@@ -316,7 +316,7 @@ SUBTITLE_FILL_TIME='0 4 * * *'  # 补漏时间
 REVIEW_ENABLED=true
 REVIEW_PROVIDER=auto          # auto / agent / translate
 REVIEW_FILL_LIMIT=20          # 定时补漏每轮最多处理几部
-REVIEW_FILL_TIME='30 4 * * *' # 补漏时间，默认排在补抓字幕之后
+REVIEW_FILL_TIME='35 * * * *' # 补漏时间，默认每小时一轮
 ```
 
 用哪套 AI 由 `REVIEW_PROVIDER` 决定：
@@ -389,10 +389,10 @@ REVIEW_FILL_TIME='30 4 * * *' # 补漏时间，默认排在补抓字幕之后
 | 同步新片 | `45 */5 * * *` | — |
 | 补全缺图 | `30 */12 * * *` | 补详情与封面 |
 | 同步下载状态 | 每 5 分钟 | 固定间隔 |
-| 翻译标题 | 每 30 分钟 | 固定间隔 |
+| 翻译标题 | 每 10 分钟 | 固定间隔 |
 | 转移做种 | 每 60 分钟 | 固定间隔，需 `SEED_TRANSFER_ENABLED=True` |
 | 补抓字幕 | `0 4 * * *` | 给媒体库里没字幕的影片补抓，需 `SUBTITLE_ENABLED=True` |
-| 补生成影评 | `30 4 * * *` | 给媒体库里没影评的影片补生成，需 `REVIEW_ENABLED=True` |
+| 补生成影评 | `35 * * * *` | 给媒体库里没影评的影片补生成，每轮上限 `REVIEW_FILL_LIMIT`，需 `REVIEW_ENABLED=True` |
 
 任务页可手动触发任意任务。
 

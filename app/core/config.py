@@ -274,8 +274,11 @@ class Settings:
     # 榜单缓存 30 分钟过期，预热间隔必须比它短，否则用户还是会撞上冷缓存
     warm_cache_time: str = "*/25 * * * *"
     subtitle_fill_time: str = "0 4 * * *"
-    # 影评补漏。默认排在字幕之后，两个任务都要打外部接口，错开跑
-    review_fill_time: str = "30 4 * * *"
+    # 影评补漏。每小时一轮 —— 一轮只生成 REVIEW_FILL_LIMIT 部（默认 20），
+    # 一天一轮的话新入库的片子要排到明天凌晨才有影评，媒体库存量大时更是
+    # 几周都填不完。改成每小时后成本仍受每轮上限约束，只是把同样的额度摊
+    # 到全天。错开整点跑，避开其它任务扎堆
+    review_fill_time: str = "35 * * * *"
     # --- 外部爬虫库导入 ---
     # PostgreSQL 连接串，为空则整个功能不启用（任务不注册、页面不显示）
     crawler_db_dsn: str = ""
@@ -583,7 +586,7 @@ def load_settings() -> Settings:
         download_schedule_time=_env("DOWNLOAD_SCHEDULE_TIME", "0 22 * * *").strip("'\""),
         warm_cache_time=_env("WARM_CACHE_TIME", "*/25 * * * *").strip("'\""),
         subtitle_fill_time=_env("SUBTITLE_FILL_TIME", "0 4 * * *").strip("'\""),
-        review_fill_time=_env("REVIEW_FILL_TIME", "30 4 * * *").strip("'\""),
+        review_fill_time=_env("REVIEW_FILL_TIME", "35 * * * *").strip("'\""),
         crawler_db_dsn=_env("CRAWLER_DB_DSN", "").strip("'\""),
         crawler_db_time=_env("CRAWLER_DB_TIME", "").strip("'\""),
         crawler_db_limit=_env_int("CRAWLER_DB_LIMIT", 5000),
