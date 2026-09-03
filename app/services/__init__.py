@@ -1311,6 +1311,11 @@ def fill_lack_codes_by_list(codes: list[str]) -> int:
             if row is None:
                 continue
             for key, value in detail.items():
+                # code 是主键，且各站返回的番号未必和查询用的一致
+                # （theporndb 会把 HMN-918 规范成 HMDNV-918）。
+                # 写回去等于改主键，撞上已存在的行会让整批回滚
+                if key == "code":
+                    continue
                 if value and hasattr(row, key):
                     setattr(row, key, value)
             count += 1
