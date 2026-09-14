@@ -4,6 +4,8 @@
 用户得有个办法当场要求重译，这组用例盯的就是那条路径。
 """
 
+import pytest
+
 
 class TestManualTranslate:
     def _seed(self, code="MT-001", title="日文タイトル", cn=""):
@@ -122,6 +124,90 @@ class TestRefusalDetection:
         from app.modules.translate.translateai import looks_like_refusal
 
         assert looks_like_refusal("配送途中", "配送途中") is False
+
+    # 下面这组是 2026-09-14 线上误杀的真实样本。原先用关键词表判拒绝
+    # （含「违反」「抱歉」），而这些词在片名里本来就合法且高频 ——
+    # 「校則違反」是 JAV 的常见题材词，一整类片子的译文全被毙掉。
+    #
+    # 代价不止丢译文：丢了算一次失败，攒够 TRANSLATE_FAILURE_LIMIT 就
+    # 触发 give_up 跳过本轮剩余番号；purge_refused_translations 每轮还
+    # 拿同一个判断扫全库，就算侥幸存进去也会被清空，永远修不好。
+    #
+    # 所以这组用例守的是「别再退回按词匹配」。
+    @pytest.mark.parametrize(
+        "source, translated",
+        [
+            (
+                "校則違反の連帯責任！男子がわざと校則違反、罰として男女とも"
+                "下半身丸出し半裸で登校！私が通う超進学校の校則は厳しすぎる。",
+                "违反校规连带责任！男生故意犯规，作为惩罚男女生下半身全裸半裸"
+                "上学！我就读的超级升学名校校规极其严苛。",
+            ),
+            (
+                "【4K】校則違反ブルマ女子生徒と禁断の中出し性交 宮西光",
+                "【4K】违反校规体操服学生与禁断的内射性交 宫西光",
+            ),
+            (
+                "【4K】校則違反スク水女子生徒と禁断の中出し性交 真白ふわり",
+                "【4K】与违反校规泳装的学生进行禁断的中出性交 真白芙羽",
+            ),
+            (
+                "校則違反スク水を着た彼女に誘惑されて、何度も中出しセックス"
+                "……THE BEST 8時間",
+                "被穿着违反校规泳装的她诱惑，一次又一次地内射做爱……"
+                "THE BEST 8小时",
+            ),
+            (
+                "【4K】学校一の美少女で敏感体質な女子生徒に校則違反の水着で"
+                "誘惑されて…果林と何度も中出しセックス 北岡果林",
+                "【4K】被学校第一美少女、拥有敏感身体的女学生穿着违反校规的"
+                "泳衣诱惑我……与果林一次又一次地内射做爱 北冈果林",
+            ),
+            # 「抱歉」出现在片名中段，不是开头的道歉话术
+            (
+                "本物降臨★即凍結の商品★奇跡の復活★高額深謝★★"
+                "最近の子の発育が凄すぎる★",
+                "真实出现★立即冻结的商品★奇迹复活★高价深感抱歉★★"
+                "最近孩子的发育太惊人了★",
+            ),
+        ],
+    )
+    def test_titles_containing_refusal_words_survive(self, source, translated):
+        """片名里出现「违反」「抱歉」不等于这是一句拒绝。"""
+        from app.modules.translate.translateai import looks_like_refusal
+
+        assert looks_like_refusal(translated, source) is False
+
+    @pytest.mark.parametrize(
+        "refusal",
+        [
+            "抱歉，我无法翻译这个内容。",
+            "很抱歉，我不能提供该内容的翻译。",
+            "我无法为您提供翻译服务。",
+            "无法翻译该内容，因为它违反了内容政策。",
+            "该请求已被拦截。",
+            "I cannot translate this content.",
+            "I'm sorry, but I can't assist with that.",
+            "Sorry, I am unable to provide a translation for this.",
+            "As an AI language model, I cannot help with this request.",
+            "Unfortunately, this request violates our content policy.",
+        ],
+    )
+    def test_refusal_phrasings_still_caught(self, refusal):
+        """收紧误杀之后，真正的拒绝话术一条都不能放过去。"""
+        from app.modules.translate.translateai import looks_like_refusal
+
+        assert looks_like_refusal(refusal, JA_TITLE) is True
+
+    def test_refusal_verb_needs_an_object(self):
+        """「无法」「不能」单独出现是正常片名，紧跟「翻译」才是拒绝。"""
+        from app.modules.translate.translateai import looks_like_refusal
+
+        # 片名里的「无法」「不能」
+        assert looks_like_refusal("无法忍受的痴汉电车", "我慢できない痴漢電車") is False
+        assert looks_like_refusal("不能说的秘密", "言えない秘密") is False
+        # 搭配上宾语就是拒绝
+        assert looks_like_refusal("无法翻译此内容", JA_TITLE) is True
 
     def test_client_returns_empty_on_refusal(self, monkeypatch):
         """识别出拒绝后 translate() 要返回空串，好让工厂降级到下一家。"""

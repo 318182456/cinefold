@@ -37,47 +37,139 @@ PROMPT = (
 # 换提示词没用：实测那是对请求正文的关键词扫描，不是模型在做判断，改成
 # 「机械转写、勿评判」照样原样拒绝。所以只能认出来、丢掉，返回空串让工厂
 # 降级到百度/Google —— 那两家是翻译 API，不对内容作道德判断。
-REFUSAL_MARKERS = (
-    "prohibited",
-    "sensitive words",
+# 判拒绝只看「整句像不像拒绝」，不看「有没有出现某个词」。
+#
+# 原先是一张关键词表（含「违反」「抱歉」「敏感词」），命中即丢。问题是这些
+# 词在片名里本来就合法，而且还是高频词 —— 实测被误杀的正常译文：
+#
+#     违反校规连带责任！男生故意犯规，作为惩罚男女生下半身全裸半裸上学！
+#     【4K】违反校规体操服学生与禁断的内射性交 宫西光
+#     真实出现★立即冻结的商品★奇迹复活★高价深感抱歉★★…
+#
+# 「违反校规」是 JAV 里极高频的题材词，这等于把一整类片子的译文全毙了。
+# 连锁反应还不止丢译文：丢了就算一次失败，攒够 TRANSLATE_FAILURE_LIMIT
+# 会触发 give_up，把本轮剩下的番号全部跳过（日志里那句「翻译连续失败，
+# 本轮提前结束」）。一批同题材的片子进来，能把整轮翻译打停。
+#
+# 而且 purge_refused_translations 每轮翻译前扫全库，用的是同一个判断 ——
+# 就算某次侥幸存进去了，下一轮也会被清成空串，永远修不好。
+#
+# 所以改成看句式：拒绝说明是一句完整的话，「抱歉，我无法…」「I cannot…」
+# 出现在开头；片名里的「违反」「抱歉」是夹在中间的词。位置和搭配才是
+# 区分点，单个词不是。
+
+# 一、整段拒绝的强特征。这些短语在片名里不可能出现，命中即判拒绝，
+# 不看位置 —— 都是网关/模型的固定话术
+_HARD_MARKERS = (
     "could not be submitted",
     "content policy",
     "content_policy",
-    "violate",
-    "violates",
+    "sensitive words",
+    "prohibited",
+    "as an ai language model",
+    "i cannot assist",
+    "i can't assist",
+    "i cannot help with",
+    "i'm not able to provide",
+    "i am not able to provide",
+    "违反了内容政策",
+    "违反使用政策",
+    "不符合内容政策",
+    "无法完成翻译",
+    "无法翻译该内容",
+    "无法翻译这个",
+    "我不能翻译",
+    "我无法翻译",
+    "已被拦截",
+    "请求被拒绝",
+)
+
+# 二、开头式拒绝。拒绝说明几乎总是以道歉/自陈开场，而片名不会 ——
+# 「深感抱歉★」出现在片名中段，「抱歉，我无法…」出现在开头。
+# 只看前若干字符，避开中段误杀
+_PREFIX_MARKERS = (
+    "抱歉",
+    "很抱歉",
+    "对不起",
+    "sorry",
     "i cannot",
     "i can't",
     "i'm unable",
     "i am unable",
+    "i'm sorry",
+    "i am sorry",
+    "unfortunately",
     "as an ai",
-    "无法翻译",
-    "无法处理",
-    "无法提供",
-    "不能提供",
-    "抱歉",
-    "违反",
-    "敏感词",
-    "敏感内容",
-    "已被拦截",
 )
 
+# 开头判定的取样长度。中文拒绝话术开头那句「抱歉，我无法翻译…」不会超过
+# 这个量级；取太长又会把片名中段的词圈进来
+_PREFIX_WINDOW = 12
+
+# 三、「拒绝动词 + 翻译/内容」的搭配。散落的「无法」「不能」在片名里常见
+# （「无法忍受」「不能说的秘密」），但紧跟着「翻译」「提供」「协助」就是
+# 在说这次请求本身
+_REFUSAL_PAIRS = (
+    ("无法", ("翻译", "提供", "处理", "协助", "满足", "完成")),
+    ("不能", ("翻译", "提供", "协助", "满足")),
+    ("不便", ("翻译", "提供")),
+)
+
+# 搭配词之间允许隔多远。「无法为您提供翻译」中间隔了 3 个字，
+# 放宽到 6 足够覆盖常见句式，又不至于把整段片名连起来误判
+_PAIR_WINDOW = 6
+
 # 译文顶多比原文长个几倍；成段的说明文字必然远超这个量级。
-# 用它兜住没被上面关键词命中的长篇拒绝/解释
+# 用它兜住没被上面几关命中的长篇拒绝/解释
 MAX_LENGTH_RATIO = 4
 MIN_LENGTH_FLOOR = 40
 
 
+def _has_refusal_pair(text: str) -> bool:
+    """是不是出现了「拒绝动词 + 翻译/提供」这种紧邻搭配。"""
+    for verb, objects in _REFUSAL_PAIRS:
+        start = 0
+        while True:
+            idx = text.find(verb, start)
+            if idx < 0:
+                break
+            window = text[idx + len(verb): idx + len(verb) + _PAIR_WINDOW]
+            if any(obj in window for obj in objects):
+                return True
+            start = idx + len(verb)
+    return False
+
+
 def looks_like_refusal(text: str, source: str = "") -> bool:
-    """判断这段回复是拒绝说明而不是译文。"""
+    """判断这段回复是拒绝说明而不是译文。
+
+    宁可漏判也不要误判：漏判顶多让一句拒绝显示在卡片上，用户看见了能
+    手动重翻；误判则是把正常译文丢掉，而且会计入连续失败拖停整轮，
+    存量清洗那一轮还会反复把它清空 —— 后者的代价大得多。
+    """
     if not text:
         return True
 
-    lowered = text.lower()
-    if any(marker in lowered for marker in REFUSAL_MARKERS):
+    lowered = text.lower().strip()
+
+    # 一、强特征，命中即判
+    if any(marker in lowered for marker in _HARD_MARKERS):
         return True
 
-    # 标题里本来就没几个 ASCII 字母，整段几乎全是英文散文的，基本是拒绝
-    # 说明。原文是英文标题的情况交给长度比那关，别在这里误杀
+    # 二、开头式拒绝，只看开头那一小截
+    head = lowered[:_PREFIX_WINDOW]
+    if any(head.startswith(marker) for marker in _PREFIX_MARKERS):
+        return True
+    # 英文话术常以「I'm sorry, but ...」「Sorry, I ...」开头，标点后仍算开头
+    if any(marker in head for marker in ("sorry", "i cannot", "i can't", "unfortunately")):
+        return True
+
+    # 三、拒绝动词 + 翻译/提供 的搭配
+    if _has_refusal_pair(lowered):
+        return True
+
+    # 四、长度兜底：整段几乎全是英文散文的长文本，基本是拒绝说明。
+    # 原文是英文标题的情况也交给这一关，别在前面按词误杀
     if source:
         limit = max(MIN_LENGTH_FLOOR, len(source) * MAX_LENGTH_RATIO)
         if len(text) > limit:
