@@ -1,6 +1,8 @@
 """AI 翻译。走 OpenAI 兼容接口，可对接任何兼容服务。"""
 from __future__ import annotations
 
+import re
+
 import httpx
 from loguru import logger
 
@@ -65,7 +67,10 @@ _HARD_MARKERS = (
     "content policy",
     "content_policy",
     "sensitive words",
-    "prohibited",
+    # 「prohibited」单独一个词太宽 —— 片名里的「禁止された」译过来就可能
+    # 撞上。只认它在网关话术里的固定搭配
+    "prohibited content",
+    "is prohibited",
     "as an ai language model",
     "i cannot assist",
     "i can't assist",
@@ -82,75 +87,85 @@ _HARD_MARKERS = (
     "我无法翻译",
     "已被拦截",
     "请求被拒绝",
+    # 「动词 + 提供/协助 + 翻译」这类整句搭配。逐条都是完整短语，片名里
+    # 不会出现 —— 与当初那张「违反」「抱歉」的单词表是两回事
+    "不能提供该内容",
+    "不能提供翻译",
+    "无法提供翻译",
+    "提供翻译服务",
+    "不能协助",
+    "没办法处理这个",
+    "无法处理这个请求",
+    "i cannot translate",
+    "can't translate this",
+    "cannot provide a translation",
+    "unable to provide a translation",
+    "not able to provide a translation",
 )
-
-# 二、开头式拒绝。拒绝说明几乎总是以道歉/自陈开场，而片名不会 ——
-# 「深感抱歉★」出现在片名中段，「抱歉，我无法…」出现在开头。
-# 只看前若干字符，避开中段误杀
-_PREFIX_MARKERS = (
-    "抱歉",
-    "很抱歉",
-    "对不起",
-    "sorry",
-    "i cannot",
-    "i can't",
-    "i'm unable",
-    "i am unable",
-    "i'm sorry",
-    "i am sorry",
-    "unfortunately",
-    "as an ai",
-)
-
-# 开头判定的取样长度。中文拒绝话术开头那句「抱歉，我无法翻译…」不会超过
-# 这个量级；取太长又会把片名中段的词圈进来
-_PREFIX_WINDOW = 12
-
-# 三、「拒绝动词 + 翻译/内容」的搭配。散落的「无法」「不能」在片名里常见
-# （「无法忍受」「不能说的秘密」），但紧跟着「翻译」「提供」「协助」就是
-# 在说这次请求本身
-# 宾语只留真正属于拒绝语境的那几个。「满足」「处理」「完成」都拿掉了 ——
-# 「与丈夫做爱无法满足的欲求不满人妻」是欲求不满题材的常见片名，
-# 「无法满足」在这里是片名的一部分，不是在说这次请求（实测误杀）。
-# 宾语列得越全，误杀越多；这张表宁可窄。
-_REFUSAL_PAIRS = (
-    ("无法", ("翻译", "协助")),
-    ("不能", ("翻译", "协助")),
-    ("不便", ("翻译",)),
-)
-
-# 搭配词之间允许隔多远。「无法为您提供翻译」中间隔了 3 个字，
-# 放宽到 6 足够覆盖常见句式，又不至于把整段片名连起来误判
-_PAIR_WINDOW = 6
-
-# 搭配关只在短文本上生效。拒绝说明是一句完整的话，通常几十字以内；
-# 正常片名动辄上百字，里面碰巧凑出「无法…翻译」的概率不低。
-# 长文本交给后面的长度比那关去判，别在这里按搭配误杀
-_PAIR_MAX_LENGTH = 60
 
 # 译文顶多比原文长个几倍；成段的说明文字必然远超这个量级。
-# 用它兜住没被上面几关命中的长篇拒绝/解释
+# 用它兜住没被前面几关命中的长篇拒绝/解释
 MAX_LENGTH_RATIO = 4
 MIN_LENGTH_FLOOR = 40
 
 
-def _has_refusal_pair(text: str) -> bool:
-    """是不是出现了「拒绝动词 + 翻译/提供」这种紧邻搭配。"""
-    for verb, objects in _REFUSAL_PAIRS:
-        start = 0
-        while True:
-            idx = text.find(verb, start)
-            if idx < 0:
-                break
-            window = text[idx + len(verb): idx + len(verb) + _PAIR_WINDOW]
-            if any(obj in window for obj in objects):
-                return True
-            start = idx + len(verb)
-    return False
+# 推理模型漏出来的思考痕迹。都是英文元话语 —— 模型在讨论「该怎么翻」
+# 而不是在给译文，正常译文里不会出现这些搭配
+_THINKING_MARKERS = (
+    "wait, let me",
+    "let me reconsider",
+    "let me think",
+    "on second thought",
+    "i should translate",
+    "the translation would be",
+    "翻译如下：",
+    "以下是翻译",
+)
+
+
+# 二、结构判据：原文是日文，译文却几乎全是英文散文。
+#
+# 这一条比词表可靠得多，而且不依赖「拒绝」二字怎么写：网关和模型的拒绝
+# 说明基本都是英文整句（The prompt could not be submitted... / I'm sorry,
+# but I can't...），而日文片名的中文译文里几乎不会出现成串的英文单词 ——
+# 顶多夹个「THE BEST」「VR」这种标记。
+#
+# 判据用「英文单词数」而不是「ASCII 字符占比」：片名里的 4K、8時間、
+# 番号会贡献大量 ASCII 数字，但英文**单词**很少。
+_ENGLISH_WORD_RE = re.compile(r"[A-Za-z]{2,}")
+
+# 超过这么多个英文单词就认为是英文散文。片名里的 THE BEST、VR、SEX
+# 这类标记通常不超过五六个
+_MAX_ENGLISH_WORDS = 8
+
+# 日文原文里假名的占比达到这个数，才认为「原文确实是日文」。
+# 原文本身就是英文标题时不适用这一关
+_MIN_KANA_RATIO = 0.15
+
+
+def _looks_like_english_prose(text: str, source: str) -> bool:
+    """原文是日文，回来的却是一段英文散文。"""
+    if not source:
+        return False
+
+    kana = len(re.findall(r"[぀-ヿ]", source))
+    if kana / max(len(source), 1) < _MIN_KANA_RATIO:
+        # 原文没多少假名（可能本来就是英文标题），这一关不适用
+        return False
+
+    return len(_ENGLISH_WORD_RE.findall(text)) > _MAX_ENGLISH_WORDS
 
 
 def looks_like_refusal(text: str, source: str = "") -> bool:
-    """判断这段回复是拒绝说明而不是译文。
+    """判断这段回复不是译文（拒绝说明、网关提示、模型的自言自语）。
+
+    这里只是兜底。主判据在 translate() 里 —— 网关拦截时 usage.total_tokens
+    为 0，那是客观信号，不用猜。
+
+    这个函数守的是拿不到 usage 的场合，所以判据一律选「结构上不可能是
+    片名」的那种，绝不按词猜。按词猜的教训有三批：「违反」「抱歉」
+    「对不起」「无法满足」全是合法的片名用词，每加一个词表条目就误杀
+    一批正常译文。
 
     宁可漏判也不要误判：漏判顶多让一句拒绝显示在卡片上，用户看见了能
     手动重翻；误判则是把正常译文丢掉，而且会计入连续失败拖停整轮，
@@ -161,24 +176,26 @@ def looks_like_refusal(text: str, source: str = "") -> bool:
 
     lowered = text.lower().strip()
 
-    # 一、强特征，命中即判
+    # 一、固定话术。这些整句只可能出自网关/模型，片名里不会出现 ——
+    # 注意都是完整短语而不是单个词，「violate」这种单词一律不进这张表
     if any(marker in lowered for marker in _HARD_MARKERS):
         return True
 
-    # 二、开头式拒绝，只看开头那一小截
-    head = lowered[:_PREFIX_WINDOW]
-    if any(head.startswith(marker) for marker in _PREFIX_MARKERS):
-        return True
-    # 英文话术常以「I'm sorry, but ...」「Sorry, I ...」开头，标点后仍算开头
-    if any(marker in head for marker in ("sorry", "i cannot", "i can't", "unfortunately")):
-        return True
-
-    # 三、拒绝动词 + 翻译/协助 的搭配，只在短文本上判
-    if len(lowered) <= _PAIR_MAX_LENGTH and _has_refusal_pair(lowered):
+    # 二、推理模型把思考过程吐出来了：
+    #
+    #     步骤
+    #     Wait, let me reconsider. あゆみ is a Japanese name.
+    #
+    # 既不是译文也不是拒绝。特征是英文元话语 —— 模型在讨论「该怎么翻」
+    # 而不是在翻
+    if any(marker in lowered for marker in _THINKING_MARKERS):
         return True
 
-    # 四、长度兜底：整段几乎全是英文散文的长文本，基本是拒绝说明。
-    # 原文是英文标题的情况也交给这一关，别在前面按词误杀
+    # 三、原文是日文，回来的却是一段英文散文
+    if _looks_like_english_prose(text, source):
+        return True
+
+    # 四、长度兜底：译文顶多比原文长个几倍，成段的说明文字远超这个量级
     if source:
         limit = max(MIN_LENGTH_FLOOR, len(source) * MAX_LENGTH_RATIO)
         if len(text) > limit:
@@ -242,7 +259,8 @@ class TranslateAI:
                     },
                 )
                 response.raise_for_status()
-                choices = response.json().get("choices") or []
+                body = response.json()
+                choices = body.get("choices") or []
 
             if not choices:
                 return ""
@@ -259,6 +277,27 @@ class TranslateAI:
                 return ""
 
             result = (message.get("content") or "").strip()
+
+            # 网关拦截的确定性信号：模型压根没跑，token 消耗为 0。
+            #
+            # 这比任何词表都可靠 —— 真翻译了就必然烧 token，返回 0 说明
+            # 请求在网关那层就被关键词扫描拦下了，回来的那段文字是网关
+            # 自己写的说明，不是模型的输出。
+            #
+            # 之前一直靠猜「这段话像不像拒绝」，结果是打不完的补丁：片名
+            # 可以是任何内容，「违反」「抱歉」「对不起」「无法满足」都是
+            # 合法的片名用词，按词判必然误杀（实测三批，每批都是正常译文）。
+            # 而这个字段是客观的。
+            #
+            # 只在 content 非空时看它：有些网关正常响应也不回 usage，
+            # 那种情况下 0 是「没报告」而不是「没消耗」，不能当拦截论处。
+            usage = (body.get("usage") or {}) if isinstance(body, dict) else {}
+            if result and usage and usage.get("total_tokens") == 0:
+                logger.warning(
+                    f"AI 翻译被网关拦截（token 消耗为 0），已丢弃: {result[:60]}"
+                )
+                return ""
+
             if looks_like_refusal(result, text):
                 logger.warning(f"AI 翻译疑似返回拒绝说明而非译文，已丢弃: {result[:80]}")
                 return ""

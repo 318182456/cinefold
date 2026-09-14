@@ -199,15 +199,24 @@ class TestRefusalDetection:
 
         assert looks_like_refusal(refusal, JA_TITLE) is True
 
-    def test_refusal_verb_needs_an_object(self):
-        """「无法」「不能」单独出现是正常片名，紧跟「翻译」才是拒绝。"""
+    def test_bare_refusal_verbs_are_not_enough(self):
+        """「无法」「不能」单独出现一律放行 —— 它们是常见的片名用词。
+
+        判据改成整句话术之后，这里不再看「动词+宾语」的搭配（那一版
+        把「无法满足」误杀了），只认完整短语。
+        """
         from app.modules.translate.translateai import looks_like_refusal
 
-        # 片名里的「无法」「不能」
-        assert looks_like_refusal("无法忍受的痴汉电车", "我慢できない痴漢電車") is False
-        assert looks_like_refusal("不能说的秘密", "言えない秘密") is False
-        # 搭配上宾语就是拒绝
-        assert looks_like_refusal("无法翻译此内容", JA_TITLE) is True
+        for good, src in [
+            ("无法忍受的痴汉电车", "我慢できない痴漢電車"),
+            ("不能说的秘密", "言えない秘密"),
+            ("无法满足的人妻", "満たされない人妻"),
+            ("我无法停止高潮", "イキが止まらない"),
+        ]:
+            assert looks_like_refusal(good, src) is False, good
+
+        # 完整话术才判拒绝
+        assert looks_like_refusal("我无法翻译这个标题。", JA_TITLE) is True
 
     def test_long_title_with_refusal_words_survives(self):
         """长片名里凑出「无法…」不算拒绝。
@@ -227,6 +236,73 @@ class TestRefusalDetection:
             "欲求不満妻 街に出てナンパされ 行きずりのセックスを楽しむ"
         )
         assert looks_like_refusal(title, source) is False
+
+    # 2026-09-14 的第三批误杀：「对不起」开头的片名。「ごめんなさい…」是
+    # JAV 的高频标题句式，而原先把道歉词本身当成拒绝信号。真正的拒绝是
+    # 「道歉 + 拒绝动作」，光道歉的那是片名。
+    @pytest.mark.parametrize(
+        "translated",
+        [
+            "对不起，我是个好色的女人…被看穿情欲而堕落的肉体／高桥结香",
+            "对不起……。大白天就裸求索取",
+            "对不起…我忍不住在里面高潮了【可爱爆发中偶像脸两人】",
+            "对不起，亲爱的… 持临时驾照的巨乳新婚妻子瞒着丈夫与大屌教练堕入不伦 与田铃",
+            "对不起。我已经只能对年上男人那种缠绵执着的SEX有感觉了。 叶山さゆり",
+            "对不起，我要高潮了！优雅敏感的人妻下半身却很淫荡。恳求直接插入，就这样内射！",
+            "对不起男友！我想让你看着我和别的男人做！！ - 紺野咲",
+            "对不起 漏尿美容院 用禁欲使少女身体隐隐作痛的慢慢逼疯失禁油压按摩 根尾明里",
+            "抱歉我来晚了 邻居人妻的诱惑",
+        ],
+    )
+    def test_apology_opening_titles_survive(self, translated):
+        """光是道歉不算拒绝 —— 后面得跟着「无法/不能」才算。"""
+        from app.modules.translate.translateai import looks_like_refusal
+
+        assert looks_like_refusal(translated, "ごめんなさい…" * 6) is False
+
+    @pytest.mark.parametrize(
+        "refusal",
+        [
+            "对不起，我无法翻译这个内容。",
+            "抱歉，我不能提供该内容的翻译。",
+            "很抱歉，由于内容限制我不能协助。",
+            "非常抱歉，我没办法处理这个请求。",
+            "I'm sorry, but I can't assist with that.",
+            "Sorry, I am unable to provide a translation.",
+        ],
+    )
+    def test_apology_plus_refusal_still_caught(self, refusal):
+        """道歉后面跟上拒绝动作，仍然要判成拒绝。"""
+        from app.modules.translate.translateai import looks_like_refusal
+
+        assert looks_like_refusal(refusal, JA_TITLE) is True
+
+    def test_thinking_trace_is_rejected(self):
+        """推理模型把自言自语吐出来了，那不是译文。
+
+        实测样本里夹着中文碎片，乍看还挺像回事 —— 比拒绝说明更难发现，
+        因为拒绝至少一眼看得出不对。
+        """
+        from app.modules.translate.translateai import looks_like_refusal
+
+        trace = (
+            "步骤\n"
+            "Wait, let me reconsider. あゆみ is a Japanese name.\n"
+            "步\n"
+            "Actually, あゆみ as a name"
+        )
+        assert looks_like_refusal(trace, "あゆみの日本語タイトル") is True
+
+    def test_thinking_markers_dont_hit_normal_titles(self):
+        """元话语标记别误伤正常译文。"""
+        from app.modules.translate.translateai import looks_like_refusal
+
+        for good, src in [
+            ("我实际上很喜欢这样", "実は好き"),
+            ("步的女人", "歩く女"),
+            ("等一下，别停下来", "待って、止めないで"),
+        ]:
+            assert looks_like_refusal(good, src) is False, good
 
     def test_refusal_object_list_stays_narrow(self):
         """「无法满足」「无法处理」「无法完成」都是正常片名用词。"""
@@ -986,3 +1062,86 @@ class TestTencentTranslate:
             names = [t.__class__.__name__ for t in factory.get_translators()]
 
         assert names == ["TranslateAI", "Tencent", "Baidu", "Google"]
+
+
+class TestGatewayTokenSignal:
+    """网关拦截的确定性信号：usage.total_tokens == 0。
+
+    这是主判据，looks_like_refusal 只是兜底。理由：片名可以是任何内容，
+    按词猜「像不像拒绝」必然误杀（线上三批，每批都是正常译文被丢掉），
+    而 token 消耗是客观的 —— 模型真跑了就必然烧 token，返回 0 说明请求
+    在网关那层就被关键词扫描拦下了，回来的文字是网关自己写的。
+    """
+
+    def _client(self):
+        from app.modules.translate.translateai import TranslateAI
+
+        return TranslateAI(url="http://x/v1", model="m", api_key="k")
+
+    def _respond(self, monkeypatch, content: str, usage: dict | None):
+        import httpx
+
+        body = {
+            "choices": [{"message": {"content": content}, "finish_reason": "stop"}],
+        }
+        if usage is not None:
+            body["usage"] = usage
+
+        def fake_post(self, url, **kw):
+            return httpx.Response(200, json=body, request=httpx.Request("POST", url))
+
+        monkeypatch.setattr(httpx.Client, "post", fake_post)
+
+    def test_zero_tokens_is_treated_as_blocked(self, monkeypatch):
+        """token 为 0 —— 哪怕内容看着像正常译文，也不能当译文收下。"""
+        self._respond(monkeypatch, "违反校规的女学生", {"total_tokens": 0})
+        assert self._client().translate("校則違反の女子生徒") == ""
+
+    def test_normal_usage_passes_through(self, monkeypatch):
+        """正常消耗了 token，就按译文收下。"""
+        self._respond(monkeypatch, "违反校规的女学生", {"total_tokens": 42})
+        assert self._client().translate("校則違反の女子生徒") == "违反校规的女学生"
+
+    def test_missing_usage_does_not_block(self, monkeypatch):
+        """有些网关正常响应也不回 usage。
+
+        那种情况下「没有 usage」是「没报告」而不是「没消耗」，不能当成
+        拦截 —— 否则接上这类网关会一条都翻不出来。
+        """
+        self._respond(monkeypatch, "违反校规的女学生", None)
+        assert self._client().translate("校則違反の女子生徒") == "违反校规的女学生"
+
+    def test_empty_content_still_empty(self, monkeypatch):
+        """内容本来就是空的，不必扯到 token 上。"""
+        self._respond(monkeypatch, "", {"total_tokens": 0})
+        assert self._client().translate("校則違反の女子生徒") == ""
+
+
+class TestStructuralRefusalHeuristics:
+    """兜底判据只认「结构上不可能是片名」的形态，不按词猜。"""
+
+    def test_english_prose_for_japanese_source(self):
+        """原文是日文，回来一段英文散文 —— 那不是译文。"""
+        from app.modules.translate.translateai import looks_like_refusal
+
+        prose = (
+            "This content appears to describe explicit material involving "
+            "school settings which I would rather not render into Chinese."
+        )
+        assert looks_like_refusal(prose, "校則違反ブルマ女子生徒と禁断の中出し性交") is True
+
+    def test_english_markers_in_titles_are_fine(self):
+        """片名里的 THE BEST / VR / 4K 这类标记不算英文散文。"""
+        from app.modules.translate.translateai import looks_like_refusal
+
+        for good, src in [
+            ("被穿着违反校规泳装的她诱惑……THE BEST 8小时", "校則違反スク水……THE BEST 8時間"),
+            ("【VR】【4K】我的女友 SEX 合集", "【VR】【4K】僕の彼女 SEX コレクション"),
+        ]:
+            assert looks_like_refusal(good, src) is False, good
+
+    def test_english_source_is_exempt(self):
+        """原文本来就是英文标题时，英文译文不该被这一关误判。"""
+        from app.modules.translate.translateai import looks_like_refusal
+
+        assert looks_like_refusal("The Best Collection 8 Hours", "The Best Collection 8 Hours") is False

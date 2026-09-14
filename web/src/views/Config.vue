@@ -65,6 +65,32 @@ const medialinkHooks = computed(() => [
 ])
 
 // MDCng 的 Body 模板。反斜杠不转义也能解析，无需用户处理
+// 每家翻译是否配好。判据必须与后端 translate.get_translators() 一致 ——
+// 这里说「使用中」而后端实际没启用，比不显示状态更误导人
+const TRANSLATE_PROVIDERS = [
+  { key: 'ai', label: 'AI', need: ['openai_url', 'openai_api_key'] },
+  { key: 'tencent', label: '腾讯', need: ['tencent_secret_id', 'tencent_secret_key'] },
+  { key: 'baidu', label: '百度', need: ['baidu_app_id', 'baidu_api_key'] },
+  { key: 'google', label: 'Google', need: ['google_api_key'] },
+]
+
+// 密码字段回显是掩码（一串 *），那也算「已配置」—— 它代表库里存着值，
+// 只是没明文发给前端
+function filled(key) {
+  return Boolean(String(form[key] ?? '').trim())
+}
+
+const translateStatus = computed(() =>
+  Object.fromEntries(
+    TRANSLATE_PROVIDERS.map((p) => [p.key, p.need.every(filled)]),
+  ),
+)
+
+// 降级链概览：实际会按哪个顺序尝试
+const translateChain = computed(() =>
+  TRANSLATE_PROVIDERS.filter((p) => translateStatus.value[p.key]),
+)
+
 const SCRAPE_BODY_TEMPLATE =
   '{"event":"{{ event }}","number":"{{ number }}",'
   + '"source_path":"{{ source_path }}"}'
@@ -619,20 +645,54 @@ const GROUPS = [
     cat: 'assist',
     title: '翻译与 AI',
     sections: [
+      // 翻译按「一家一张卡」拆开。九个字段平铺在一起时看不出哪几个属于
+      // 同一家，也看不出实际配了几家；拆开后每张卡是一个独立的选择，
+      // 卡头还能标出「使用中 / 未配置」，降级链的现状一眼可见
       {
-        title: '翻译',
-        hint: '按 AI → 腾讯 → 百度 → Google 依次降级，前一家没出结果就换下一家。'
-          + '片名露骨时 AI 网关常拒绝翻译，建议至少配一家传统翻译接口兜底',
+        title: '翻译降级链',
+        panel: 'translate-chain',
+        hint: '按 AI → 腾讯 → 百度 → Google 依次尝试，前一家没出结果就换下一家。'
+          + '四家都是可选的，配哪家用哪家',
+        fields: [],
+      },
+      {
+        title: 'AI 翻译',
+        provider: 'ai',
+        hint: 'OpenAI 兼容接口。质量最好，但片名露骨时网关常连着 200 回一句'
+          + '拒绝说明而不是译文 —— 所以别只配这一家',
         fields: [
-          { k: 'openai_url', label: 'AI 翻译接口' },
-          { k: 'openai_model', label: 'AI 模型' },
-          { k: 'openai_api_key', label: 'AI API Key', t: 'password' },
-          { k: 'tencent_secret_id', label: '腾讯翻译 SecretId' },
-          { k: 'tencent_secret_key', label: '腾讯翻译 SecretKey', t: 'password' },
-          { k: 'tencent_region', label: '腾讯翻译地域', ph: 'ap-guangzhou' },
-          { k: 'baidu_app_id', label: '百度翻译 AppID' },
-          { k: 'baidu_api_key', label: '百度翻译 Key', t: 'password' },
-          { k: 'google_api_key', label: 'Google 翻译 Key', t: 'password' },
+          { k: 'openai_url', label: '接口地址', ph: 'https://api.openai.com/v1' },
+          { k: 'openai_model', label: '模型', ph: 'gpt-4o-mini' },
+          { k: 'openai_api_key', label: 'API Key', t: 'password' },
+        ],
+      },
+      {
+        title: '腾讯翻译',
+        provider: 'tencent',
+        hint: '每月 500 万字符免费。密钥在腾讯云「访问管理 → API 密钥管理」签发，'
+          + '需授权 QcloudTMTFullAccess',
+        fields: [
+          { k: 'tencent_secret_id', label: 'SecretId' },
+          { k: 'tencent_secret_key', label: 'SecretKey', t: 'password' },
+          { k: 'tencent_region', label: '地域', ph: 'ap-guangzhou' },
+        ],
+      },
+      {
+        title: '百度翻译',
+        provider: 'baidu',
+        hint: '有免费额度，日译中质量一般',
+        fields: [
+          { k: 'baidu_app_id', label: 'AppID' },
+          { k: 'baidu_api_key', label: 'Key', t: 'password' },
+        ],
+      },
+      {
+        title: 'Google 翻译',
+        provider: 'google',
+        hint: '质量最好，但没有免费额度 —— 项目必须在 Cloud Console 绑定结算账号，'
+          + '否则每次调用都返回 403',
+        fields: [
+          { k: 'google_api_key', label: 'API Key', t: 'password' },
         ],
       },
       {
@@ -1024,7 +1084,19 @@ onUnmounted(stopUpgradePoll)
       <div v-for="group in GROUPS" v-show="activeGroup === group.key" :key="group.key" class="space-y-4">
         <div v-for="section in group.sections" :key="section.title" class="card space-y-3">
           <div>
-            <p class="text-sm font-medium text-gray-300">{{ section.title }}</p>
+            <div class="flex items-center gap-2">
+              <p class="text-sm font-medium text-gray-300">{{ section.title }}</p>
+              <!-- 翻译各家标出是否生效，省得对着一堆空框猜配没配 -->
+              <span
+                v-if="section.provider"
+                class="rounded px-1.5 py-0.5 text-[10px]"
+                :class="translateStatus[section.provider]
+                  ? 'bg-emerald-950/60 text-emerald-400'
+                  : 'bg-gray-800 text-gray-500'"
+              >
+                {{ translateStatus[section.provider] ? '使用中' : '未配置' }}
+              </span>
+            </div>
             <p v-if="section.hint" class="mt-0.5 text-[11px] text-gray-600">
               {{ section.hint }}
             </p>
@@ -1039,6 +1111,38 @@ onUnmounted(stopUpgradePoll)
               :options="field.k === 'primary_site' ? ptSiteOptions : null"
             />
           </div>
+
+          <!-- 翻译降级链概览：把四张卡的配置状态汇总成一句话 -->
+          <template v-if="section.panel === 'translate-chain'">
+            <div
+              v-if="translateChain.length"
+              class="flex flex-wrap items-center gap-1.5 rounded border border-gray-800 bg-gray-900/40 p-2.5"
+            >
+              <span class="text-[11px] text-gray-500">实际顺序：</span>
+              <template v-for="(p, i) in translateChain" :key="p.key">
+                <span class="rounded bg-emerald-950/60 px-1.5 py-0.5 text-[11px] text-emerald-400">
+                  {{ p.label }}
+                </span>
+                <span v-if="i < translateChain.length - 1" class="text-[11px] text-gray-600">→</span>
+              </template>
+            </div>
+            <div v-else class="rounded border border-amber-900/60 bg-amber-950/30 p-2.5">
+              <p class="text-xs text-amber-400">还没配任何翻译接口</p>
+              <p class="mt-0.5 text-[11px] text-gray-500">
+                标题会一直显示日文原文，「翻译标题」那个定时任务也不会做事
+              </p>
+            </div>
+            <div
+              v-if="translateChain.length === 1 && translateChain[0].key === 'ai'"
+              class="rounded border border-amber-900/60 bg-amber-950/30 p-2.5"
+            >
+              <p class="text-xs text-amber-400">只配了 AI 一家</p>
+              <p class="mt-0.5 text-[11px] text-gray-500">
+                片名露骨时 AI 网关经常拒绝翻译，那批标题就永远没有译文了。
+                建议再配一家传统翻译接口兜底 —— 它们不对内容作道德判断
+              </p>
+            </div>
+          </template>
 
           <!-- 媒体联动：webhook 地址与接入说明 -->
           <template v-if="section.panel === 'medialink'">
