@@ -139,6 +139,31 @@ def looks_like_refusal(text: str, source: str = "") -> bool:
     )
 
 
+def is_junk_title(text: str) -> bool:
+    """这段文字能不能当标题存进 cn_title。
+
+    在 looks_like_refusal 之上多一条：**含换行即脏**。这是唯一被允许的
+    结构规则，因为它看的是形状而不是用词 —— 原文标题是单行，译文里出现
+    换行，只可能是模型把译文之外的东西一并吐了出来。实测存量里就有：
+
+        …女大学生…
+        - 提示：
+          - 此为标题（title）。
+          - 女子大生通常翻译为"女大学生"。
+          - 代码（DSAM-006）应保留在翻译后的标题末尾…
+
+    整段都进了 cn_title，而它一个整句话术都不命中。
+
+    不合进 looks_like_refusal：影评模块拿那个函数校验的是多行 JSON，
+    加进去会把正常影评全毙掉。这个函数只给标题用。
+    """
+    if not text or not text.strip():
+        return True
+    if "\n" in text.strip():
+        return True
+    return looks_like_refusal(text)
+
+
 # 模型爱套代码围栏
 _FENCE_RE = re.compile(r"```[a-zA-Z]*\s*|```")
 
@@ -154,6 +179,7 @@ def parse_translation(raw: str) -> tuple[str, str]:
         error    模型走了正规拒绝通道
         no-json  整段都没有可解析的对象 —— 散文、拒绝、标注、半截 JSON
         no-zh    解出了对象但没有 zh 字段
+        multiline zh 里有换行 —— 标题是单行，多出来的是说明
     """
     if not raw:
         return "", "no-json"
@@ -170,9 +196,12 @@ def parse_translation(raw: str) -> tuple[str, str]:
         if obj.get("error"):
             return "", "error"
         zh = obj.get("zh")
-        if isinstance(zh, str) and zh.strip():
-            return zh.strip(), ""
-        return "", "no-zh"
+        if not (isinstance(zh, str) and zh.strip()):
+            return "", "no-zh"
+        # 契约说 zh 只放译文。标题是单行，zh 里有换行就是把说明塞进来了
+        if "\n" in zh.strip():
+            return "", "multiline"
+        return zh.strip(), ""
     return "", "no-json"
 
 

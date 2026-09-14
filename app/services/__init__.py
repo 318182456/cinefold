@@ -1177,9 +1177,13 @@ def purge_refused_translations() -> int:
     存量得清一遍，否则它既显示在页面上，又因为 cn_title 非空而永远不会
     被定时任务重翻。清成空串即可 —— 下一轮 translate_codes 会自然重试。
 
+    判「脏」用 is_junk_title：整句拒绝话术，或含换行（标题是单行，多出来
+    的是模型附带的说明）。JSON 契约之前存下来的「译文 + 提示」混合体
+    靠后一条清掉，清成空串后下一轮按新契约重翻。
+
     带熔断：一轮要清的量超过阈值就整批放弃（见 _PURGE_MAX_RATIO）。
     """
-    from app.modules.translate.translateai import looks_like_refusal
+    from app.modules.translate.translateai import is_junk_title
 
     suspects: list[tuple[str, str]] = []
     with session_scope() as session:
@@ -1189,7 +1193,7 @@ def purge_refused_translations() -> int:
         total = len(rows)
         for row in rows:
             # 原文一并传进去，长度比那关才有判断依据
-            if looks_like_refusal(row.cn_title, row.title or ""):
+            if is_junk_title(row.cn_title):
                 suspects.append((row.code, row.cn_title))
 
     if not suspects:
@@ -1236,7 +1240,7 @@ def translate_code_title(code: str) -> dict:
     卡片就一直挂着那句烂译文，用户没有任何办法要求重译。这里不看 cn_title
     有没有值，一律重新翻一遍并覆盖。
     """
-    from app.modules.translate.translateai import looks_like_refusal
+    from app.modules.translate.translateai import is_junk_title
     from app.utils import get_true_code
 
     row_code = get_true_code(code) or code
@@ -1266,7 +1270,7 @@ def translate_code_title(code: str) -> dict:
     if not translated:
         # 旧译文本身就是被误存下来的拒绝说明时，清掉它 —— 留着只是让卡片
         # 继续顶着那句英文，还会因为 cn_title 非空而躲过定时任务的重翻
-        if old and looks_like_refusal(old, title):
+        if old and is_junk_title(old):
             with session_scope() as session:
                 row = session.get(Code, row_code)
                 if row is not None:

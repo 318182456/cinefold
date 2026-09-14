@@ -1239,6 +1239,8 @@ class TestJsonContract:
             ('{"zh": "【VR】我的女友在', "no-json"),
             # 解出了对象但没按契约给 zh
             ('{"translation": "x"}', "no-zh"),
+            # zh 里塞了说明：标题是单行
+            ('{"zh": "女大学生的派对神作\\n- 提示：\\n  - 此为标题（title）。"}', "multiline"),
             ('{"zh": ""}', "no-zh"),
             ("", "no-json"),
         ],
@@ -1280,3 +1282,66 @@ class TestJsonContract:
         """模型没走 error 通道、把拒绝话术塞进 zh —— 整句话术仍能认出。"""
         client = self._client_with(monkeypatch, '{"zh": "我无法翻译这个标题。"}')
         assert client.translate("校則違反の女子生徒") == ""
+
+
+class TestJunkTitleCleanup:
+    """JSON 契约之前存下来的「译文 + 提示」混合体，靴用「标题不会有换行」清掉。
+
+    实测存量样本：
+
+        …女大学生…
+        - 提示：
+          - 此为标题（title）。
+          - 女子大生通常翻译为"女大学生"。
+          - パ。是パーティ（party）的缩写。
+          - 代码（DSAM-006）应保留在翻译后的标题末尾…
+
+    它一个整句话术都不命中，只有换行这一个形状特征。这是唯一被允许的
+    结构规则 —— 看的是形状不是用词，原文单行、译文多行只可能是模型加料。
+    """
+
+    JUNK = (
+        "女大学生的派对神作 (DSAM-006)\n"
+        "- 提示：\n"
+        "  - 此为标题（title）。\n"
+        "  - 女子大生通常翻译为\u201c女大学生\u201d。\n"
+        "  - 代码（DSAM-006）应保留在翻译后的标题末尾。"
+    )
+
+    def test_multiline_is_junk_single_line_is_not(self):
+        from app.modules.translate.translateai import is_junk_title
+
+        assert is_junk_title(self.JUNK) is True
+        # 同样的开头，单行就是正常标题
+        assert is_junk_title("女大学生的派对神作 (DSAM-006)") is False
+        # 首尾空白/换行不算
+        assert is_junk_title("  女大学生的派对神作\n") is False
+        # 整句话术仍然算脏
+        assert is_junk_title(REFUSAL) is True
+        assert is_junk_title("") is True
+
+    def test_purge_clears_multiline_junk(self):
+        """存量里的混合体清成空串，下一轮按新契约重翻；正常译文不动。"""
+        from app import services
+        from app.database.base import DBBase
+        from app.database.models import Code
+        from app.database.session import engine, session_scope
+
+        DBBase.metadata.create_all(engine)
+        with session_scope() as session:
+            session.query(Code).delete()
+            for i in range(30):
+                session.add(Code(code=f"JK-G{i:02d}", title="タイトル", cn_title="正常译文"))
+            session.add(Code(code="JK-BAD", title="女子大生パ。神回", cn_title=self.JUNK))
+
+        assert services.purge_refused_translations() == 1
+        with session_scope() as session:
+            assert session.get(Code, "JK-BAD").cn_title == ""
+            assert session.get(Code, "JK-G00").cn_title == "正常译文"
+
+    def test_review_validation_unaffected_by_newlines(self):
+        """影评模块校验的是多行 JSON，换行规则绝不能漏进 looks_like_refusal。"""
+        from app.modules.translate.translateai import looks_like_refusal
+
+        review_json = '{\n  "summary": "一段影评",\n  "points": ["a", "b"]\n}'
+        assert looks_like_refusal(review_json) is False
