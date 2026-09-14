@@ -29,6 +29,14 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
+    # 内存兜底。默认注释掉：刮削和全量探测本就有瞬时高峰，写死上限一旦
+    # 估低，OOM killer 会在扫到一半时把进程干掉，比多占点内存难受得多。
+    # 镜像里已经压过 glibc 的 arena 与 trim 阈值（见 Dockerfile），正常
+    # 情况下水位不会再随运行天数漂移。
+    #
+    # 确实需要硬限制时（比如 NAS 上还跑着别的服务）再放开，按库的规模
+    # 给足余量 —— 2g 对应几万条记录的库，更大的库要往上调。
+    # mem_limit: 2g
 
   postgres:
     profiles: ["postgres"]

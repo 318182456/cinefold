@@ -57,6 +57,20 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     CONFIG_DIR=/data/config \
     LOG_DIR=/data/logs
 
+# glibc 的 malloc 默认按线程分配 arena，64 位上每个 arena 先占住 64MB 虚拟
+# 地址空间，用多少提交多少。探测类任务全是 max_workers=16 的临时线程池
+# （medialink / orphan 共 7 处），建了销、销了建，每轮都可能摊上新 arena；
+# 加上 free() 出来的块留在 arena 里不还给内核，进程 RSS 只涨不落 —— 跑上
+# 几天看到的是历史峰值水位，不是当前真实用量。
+#
+# arena 上限压到 2：并发探测本就卡在网络 IO 上，不靠 arena 数量提吞吐，
+# 换来的是水位不再随线程池轮次漂移。trim 阈值钉在 128KB，不让它随运行期
+# 自适应上调（上限能到 32MB），free 出来的大块才会及时还给内核。
+#
+# 这两个只影响内存归还策略，不改变任何业务行为
+ENV MALLOC_ARENA_MAX=2 \
+    MALLOC_TRIM_THRESHOLD_=131072
+
 # 别换成 nginx-light：bookworm 起 nginx-light / -core / -full 都退化成
 # 空的 metapackage，装的是同一个 nginx 二进制，省不了体积，还在 trixie 里
 # 被移除了。curl 只给 HEALTHCHECK 用，换成 python 探测会拖慢健康检查
