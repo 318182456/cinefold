@@ -1130,15 +1130,62 @@ class TestStructuralRefusalHeuristics:
         )
         assert looks_like_refusal(prose, "校則違反ブルマ女子生徒と禁断の中出し性交") is True
 
-    def test_english_markers_in_titles_are_fine(self):
-        """片名里的 THE BEST / VR / 4K 这类标记不算英文散文。"""
+    # 判据必须是「净增」而不是「英文单词总数」。片名自带的英文标记在原文
+    # 里同样存在，翻译时原样保留是正确行为 —— 按总数判会误杀，实测
+    # 「【VR】庆祝 小熊猫VR 8周年…Happy Valentine's Day 特别BOX」有 9 个
+    # 英文单词却净增 0。
+    @pytest.mark.parametrize(
+        "translated, source",
+        [
+            (
+                "被穿着违反校规泳装的她诱惑……THE BEST 8小时",
+                "校則違反スク水……THE BEST 8時間",
+            ),
+            ("【VR】【4K】我的女友 SEX 合集", "【VR】【4K】僕の彼女 SEX コレクション"),
+            (
+                "【VR】庆祝 小熊猫VR 8周年感谢！！SP Re:【一枚硬币】开始的情人节"
+                "特别企划2nd 人气女优的Happy Valentine's Day 特别BOX 1",
+                "【VR】祝 レッサーパンダVR 8周年感謝！！SP Re:【ワンコイン】から"
+                "始まるバレンタイン特別企画2nd 人気女優のHappy Valentine's Day 特別BOX 1",
+            ),
+        ],
+    )
+    def test_english_markers_carried_over_are_fine(self, translated, source):
+        """原文里就有的英文标记，译文保留不算问题。"""
         from app.modules.translate.translateai import looks_like_refusal
 
-        for good, src in [
-            ("被穿着违反校规泳装的她诱惑……THE BEST 8小时", "校則違反スク水……THE BEST 8時間"),
-            ("【VR】【4K】我的女友 SEX 合集", "【VR】【4K】僕の彼女 SEX コレクション"),
-        ]:
-            assert looks_like_refusal(good, src) is False, good
+        assert looks_like_refusal(translated, source) is False
+
+    def test_counts_only_newly_added_english(self):
+        """直接验证净增的算法本身。"""
+        from app.modules.translate.translateai import _extra_english_words
+
+        # 原文里就有的，净增 0
+        assert _extra_english_words(
+            "【VR】全新篇章 THE BEST", "【VR】BLAND NEW CHAPTER THE BEST"
+        ) == 0
+        # 凭空多出来的才算
+        assert _extra_english_words("这是 Simplified Chinese Translation", "これは") == 3
+
+    def test_model_echoes_source_with_label(self):
+        """模型把原文、标注、译文一起吐出来了。
+
+        实测：
+            【VR】BLAND NEW CHAPTER めるにゃん
+            **Simplified Chinese Translation:**
+            【VR】全新篇章 めるにゃん
+
+        整段存进 cn_title 就是三行。净增英文只有 3 个（刚好不触发阈值），
+        得靠标注话术认出来。
+        """
+        from app.modules.translate.translateai import looks_like_refusal
+
+        dirty = (
+            "【VR】BLAND NEW CHAPTER めるにゃん\n"
+            "**Simplified Chinese Translation:**\n"
+            "【VR】全新篇章 めるにゃん"
+        )
+        assert looks_like_refusal(dirty, "【VR】BLAND NEW CHAPTER めるにゃん") is True
 
     def test_english_source_is_exempt(self):
         """原文本来就是英文标题时，英文译文不该被这一关误判。"""

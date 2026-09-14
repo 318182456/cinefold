@@ -120,40 +120,44 @@ _THINKING_MARKERS = (
     "the translation would be",
     "翻译如下：",
     "以下是翻译",
+    # 模型把原文和译文一起吐出来，中间夹一行标注：
+    #
+    #   【VR】BLAND NEW CHAPTER めるにゃん
+    #   **Simplified Chinese Translation:**
+    #   【VR】全新篇章 めるにゃん
+    #
+    # 整段存进 cn_title 就是原文+标注+译文三行。这类标注是固定话术，
+    # 片名里不会出现
+    "chinese translation",
+    "translation:",
+    "translated text",
+    "译文：",
 )
 
 
-# 二、结构判据：原文是日文，译文却几乎全是英文散文。
+# 二、结构判据：译文里凭空多出了原文没有的英文。
 #
-# 这一条比词表可靠得多，而且不依赖「拒绝」二字怎么写：网关和模型的拒绝
-# 说明基本都是英文整句（The prompt could not be submitted... / I'm sorry,
-# but I can't...），而日文片名的中文译文里几乎不会出现成串的英文单词 ——
-# 顶多夹个「THE BEST」「VR」这种标记。
+# 关键是算「净增」而不是「总数」：片名自带的英文标记（VR、4K、THE BEST、
+# Happy Valentine's Day、BOX…）在原文里同样存在，翻译时原样保留是正确
+# 行为，不该因此被判成拒绝。实测「【VR】庆祝 小熊猫VR 8周年…Happy
+# Valentine's Day 特别BOX」有 9 个英文单词，但净增是 0 —— 按总数判会
+# 误杀，按净增判就放行。
 #
-# 判据用「英文单词数」而不是「ASCII 字符占比」：片名里的 4K、8時間、
-# 番号会贡献大量 ASCII 数字，但英文**单词**很少。
+# 而网关拒绝、模型的英文自述、以及「**Simplified Chinese Translation:**」
+# 这类标注，都是原文里没有的词，净增很高。
 _ENGLISH_WORD_RE = re.compile(r"[A-Za-z]{2,}")
 
-# 超过这么多个英文单词就认为是英文散文。片名里的 THE BEST、VR、SEX
-# 这类标记通常不超过五六个
-_MAX_ENGLISH_WORDS = 8
-
-# 日文原文里假名的占比达到这个数，才认为「原文确实是日文」。
-# 原文本身就是英文标题时不适用这一关
-_MIN_KANA_RATIO = 0.15
+# 允许凭空多出几个英文单词。留一点余量给音译（人名、品牌）和模型偶尔
+# 补的一两个词，超过就不像译文了
+_MAX_EXTRA_ENGLISH_WORDS = 3
 
 
-def _looks_like_english_prose(text: str, source: str) -> bool:
-    """原文是日文，回来的却是一段英文散文。"""
-    if not source:
-        return False
-
-    kana = len(re.findall(r"[぀-ヿ]", source))
-    if kana / max(len(source), 1) < _MIN_KANA_RATIO:
-        # 原文没多少假名（可能本来就是英文标题），这一关不适用
-        return False
-
-    return len(_ENGLISH_WORD_RE.findall(text)) > _MAX_ENGLISH_WORDS
+def _extra_english_words(text: str, source: str) -> int:
+    """译文里有、原文里没有的英文单词数。"""
+    in_source = {w.lower() for w in _ENGLISH_WORD_RE.findall(source)}
+    return sum(
+        1 for w in _ENGLISH_WORD_RE.findall(text) if w.lower() not in in_source
+    )
 
 
 def looks_like_refusal(text: str, source: str = "") -> bool:
@@ -191,8 +195,8 @@ def looks_like_refusal(text: str, source: str = "") -> bool:
     if any(marker in lowered for marker in _THINKING_MARKERS):
         return True
 
-    # 三、原文是日文，回来的却是一段英文散文
-    if _looks_like_english_prose(text, source):
+    # 三、译文里凭空多出一堆原文没有的英文
+    if source and _extra_english_words(text, source) > _MAX_EXTRA_ENGLISH_WORDS:
         return True
 
     # 四、长度兜底：译文顶多比原文长个几倍，成段的说明文字远超这个量级
