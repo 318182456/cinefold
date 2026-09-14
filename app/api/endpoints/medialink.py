@@ -78,6 +78,38 @@ def _exists(path: str) -> bool:
 _EXISTS_TTL = 30.0
 _exists_cache: dict[str, tuple[float, bool]] = {}
 
+# 缓存条目数的硬上限。key 是完整文件路径，库大了单条就上百字节，
+# 而 TTL 过期只影响读取判定、不会让条目消失 —— 写入时不主动清的话，
+# 这两个字典会随着"探测过多少不同路径"单调增长，只有重启才回落。
+# 常驻进程跑上几天就是几十 MB 白占着。
+#
+# 取 20000：全量探测一轮是 _FILTER_BACKFILL_CAP(5000) 条，
+# 留四倍余量，正常用法下淘汰不会被触发，大库也不至于失去缓存意义。
+_CACHE_MAX = 20000
+
+
+def _evict(cache: dict[str, tuple[float, bool]], now: float) -> None:
+    """清掉过期条目；仍然超限就按写入时间丢掉最旧的一批。
+
+    调用点在每次写入之前，所以单次只需摊掉自己那一份增量。先扫过期是
+    因为它同时也是"该丢的"，扫不动了才动用上限 —— 后者会误伤未过期的
+    条目，但那只是让下次探测回到没有缓存时的行为，不影响正确性。
+    """
+    if len(cache) < _CACHE_MAX:
+        return
+
+    for key in [k for k, v in cache.items() if now - v[0] >= _EXISTS_TTL]:
+        cache.pop(key, None)
+
+    if len(cache) < _CACHE_MAX:
+        return
+
+    # 整批都还新鲜（一轮大规模探测就会这样），按时间戳丢掉最旧的四分之一。
+    # 不逐条丢是因为那样每次写入都要重排一遍，成本压在热路径上
+    victims = sorted(cache, key=lambda k: cache[k][0])[: len(cache) // 4 + 1]
+    for key in victims:
+        cache.pop(key, None)
+
 
 def _exists_cached(path: str) -> bool:
     now = time.monotonic()
@@ -85,6 +117,7 @@ def _exists_cached(path: str) -> bool:
     if hit is not None and now - hit[0] < _EXISTS_TTL:
         return hit[1]
     value = _exists(path)
+    _evict(_exists_cache, now)
     _exists_cache[path] = (now, value)
     return value
 
@@ -111,6 +144,7 @@ def _has_subtitle_cached(path: str) -> bool:
     from app.services.subtitle import has_subtitle
 
     value = has_subtitle(path)
+    _evict(_subtitle_cache, now)
     _subtitle_cache[path] = (now, value)
     return value
 
