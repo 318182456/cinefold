@@ -1092,6 +1092,11 @@ def translate_codes(limit: int = 50) -> int:
     _streak = {"n": 0}
     _streak_lock = threading.Lock()
     give_up = threading.Event()
+    # 停下来的原因分开记：服务不可用是「别再打了」，连续失败是「大概率
+    # 有问题，收工观察」。两者给用户的提示不一样
+    unavailable = threading.Event()
+
+    from app.modules.translate.translateai import TranslateUnavailable
 
     def run(item: tuple[str, str]) -> tuple[str, str]:
         code, title = item
@@ -1099,6 +1104,13 @@ def translate_codes(limit: int = 50) -> int:
             return code, ""
         try:
             translated = translate_title(title)
+        except TranslateUnavailable as exc:
+            # 服务本身挂了，不必攒够阈值 —— 立刻停。日志里出现过网关 503
+            # 时一口气打了 13 次的情况，再打只是给已经挂掉的服务加压
+            logger.debug(f"[{code}] 翻译服务不可用: {exc}")
+            unavailable.set()
+            give_up.set()
+            return code, ""
         except Exception as exc:
             logger.debug(f"[{code}] 翻译失败: {exc}")
             translated = ""
@@ -1119,7 +1131,9 @@ def translate_codes(limit: int = 50) -> int:
     with ThreadPoolExecutor(max_workers=workers) as pool:
         results = [(c, t) for c, t in pool.map(run, pending) if t]
 
-    if give_up.is_set():
+    if unavailable.is_set():
+        logger.warning("翻译服务不可用，本轮提前结束（已翻 %d 条）" % len(results))
+    elif give_up.is_set():
         logger.warning("翻译连续失败，本轮提前结束，请检查翻译服务是否可用")
 
     if not results:
@@ -1142,6 +1156,19 @@ def translate_codes(limit: int = 50) -> int:
     return count
 
 
+# 一轮最多允许清掉多少比例的译文。超过就一条都不清，只告警。
+#
+# 这个函数每轮翻译前扫全库，判断逻辑但凡有偏差就会批量误清 —— 实测
+# looks_like_refusal 把「违反」「无法满足」当成拒绝词时，一轮清掉了 92 条
+# 正常译文，而日志只有一行 INFO，用户根本不知道库被洗了一遍。
+#
+# 真正的拒绝说明是少数（网关偶发拦截），占比高必然意味着判断出了问题，
+# 不是库里真有那么多拒绝。宁可留着几条脏数据等人工发现，也不能静默清空。
+_PURGE_MAX_RATIO = 0.2
+# 样本太小时比例没有意义（3 条里清 1 条就 33%），给一个绝对下限兜底
+_PURGE_MIN_ABSOLUTE = 20
+
+
 def purge_refused_translations() -> int:
     """清掉之前被当成译文存进库的拒绝说明。
 
@@ -1149,26 +1176,48 @@ def purge_refused_translations() -> int:
     submitted...」会连着 200 一起被写进 cn_title，卡片上就顶着这句英文。
     存量得清一遍，否则它既显示在页面上，又因为 cn_title 非空而永远不会
     被定时任务重翻。清成空串即可 —— 下一轮 translate_codes 会自然重试。
+
+    带熔断：一轮要清的量超过阈值就整批放弃（见 _PURGE_MAX_RATIO）。
     """
     from app.modules.translate.translateai import looks_like_refusal
 
-    cleared_codes = []
+    suspects: list[tuple[str, str]] = []
     with session_scope() as session:
         rows = session.scalars(
             select(Code).where(Code.cn_title.isnot(None), Code.cn_title != "")
         ).all()
+        total = len(rows)
         for row in rows:
             # 原文一并传进去，长度比那关才有判断依据
             if looks_like_refusal(row.cn_title, row.title or ""):
-                row.cn_title = ""
-                cleared_codes.append(row.code)
+                suspects.append((row.code, row.cn_title))
 
-    cleared = len(cleared_codes)
-    if cleared:
+    if not suspects:
+        return 0
+
+    # 超过阈值就一条都不清。判断逻辑坏掉时，这里是最后一道拦截 ——
+    # 越过去就是整库译文被洗掉，而且没有备份可回滚
+    limit = max(_PURGE_MIN_ABSOLUTE, int(total * _PURGE_MAX_RATIO))
+    if len(suspects) > limit:
+        logger.error(
+            f"疑似拒绝说明有 {len(suspects)} 条（共 {total} 条译文），"
+            f"超过单轮上限 {limit}，本轮一条都不清 —— "
+            f"这多半是拒绝识别出了问题而非库里真有这么多，"
+            f"请人工确认。样例：{suspects[0][1][:60]}"
+        )
+        return 0
+
+    cleared_codes = [code for code, _ in suspects]
+    with session_scope() as session:
         for code in cleared_codes:
-            patch_listing_cache(code, cn_title="")
-        logger.info(f"已清掉 {cleared} 条被当成译文存下的拒绝说明")
-    return cleared
+            row = session.get(Code, code)
+            if row is not None:
+                row.cn_title = ""
+
+    for code in cleared_codes:
+        patch_listing_cache(code, cn_title="")
+    logger.info(f"已清掉 {len(cleared_codes)} 条被当成译文存下的拒绝说明")
+    return len(cleared_codes)
 
 
 def _only_ai_translator() -> bool:

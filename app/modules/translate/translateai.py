@@ -109,15 +109,24 @@ _PREFIX_WINDOW = 12
 # 三、「拒绝动词 + 翻译/内容」的搭配。散落的「无法」「不能」在片名里常见
 # （「无法忍受」「不能说的秘密」），但紧跟着「翻译」「提供」「协助」就是
 # 在说这次请求本身
+# 宾语只留真正属于拒绝语境的那几个。「满足」「处理」「完成」都拿掉了 ——
+# 「与丈夫做爱无法满足的欲求不满人妻」是欲求不满题材的常见片名，
+# 「无法满足」在这里是片名的一部分，不是在说这次请求（实测误杀）。
+# 宾语列得越全，误杀越多；这张表宁可窄。
 _REFUSAL_PAIRS = (
-    ("无法", ("翻译", "提供", "处理", "协助", "满足", "完成")),
-    ("不能", ("翻译", "提供", "协助", "满足")),
-    ("不便", ("翻译", "提供")),
+    ("无法", ("翻译", "协助")),
+    ("不能", ("翻译", "协助")),
+    ("不便", ("翻译",)),
 )
 
 # 搭配词之间允许隔多远。「无法为您提供翻译」中间隔了 3 个字，
 # 放宽到 6 足够覆盖常见句式，又不至于把整段片名连起来误判
 _PAIR_WINDOW = 6
+
+# 搭配关只在短文本上生效。拒绝说明是一句完整的话，通常几十字以内；
+# 正常片名动辄上百字，里面碰巧凑出「无法…翻译」的概率不低。
+# 长文本交给后面的长度比那关去判，别在这里按搭配误杀
+_PAIR_MAX_LENGTH = 60
 
 # 译文顶多比原文长个几倍；成段的说明文字必然远超这个量级。
 # 用它兜住没被上面几关命中的长篇拒绝/解释
@@ -164,8 +173,8 @@ def looks_like_refusal(text: str, source: str = "") -> bool:
     if any(marker in head for marker in ("sorry", "i cannot", "i can't", "unfortunately")):
         return True
 
-    # 三、拒绝动词 + 翻译/提供 的搭配
-    if _has_refusal_pair(lowered):
+    # 三、拒绝动词 + 翻译/协助 的搭配，只在短文本上判
+    if len(lowered) <= _PAIR_MAX_LENGTH and _has_refusal_pair(lowered):
         return True
 
     # 四、长度兜底：整段几乎全是英文散文的长文本，基本是拒绝说明。
@@ -176,6 +185,18 @@ def looks_like_refusal(text: str, source: str = "") -> bool:
             return True
 
     return False
+
+
+class TranslateUnavailable(Exception):
+    """翻译服务本身不可用（网关 5xx、超时、连不上）。
+
+    与「这条内容被拒」分开：两者在上层的处置完全相反 —— 服务挂了该立刻
+    停掉整轮，再打也是白打（实测网关 503 时一口气打了 13 次）；单条被拒
+    只该跳过这一条，继续翻剩下的。
+
+    原先两种情况都返回空串，上层区分不了，只能靠「连续失败」计数一起兜，
+    于是网关挂掉要攒够阈值才停，而内容被拒又会把那个配额吃掉。
+    """
 
 
 class TranslateAI:
@@ -242,6 +263,16 @@ class TranslateAI:
                 logger.warning(f"AI 翻译疑似返回拒绝说明而非译文，已丢弃: {result[:80]}")
                 return ""
             return result
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code
+            # 5xx 与 429 是服务侧的问题，重试同样的请求没有意义；
+            # 4xx（除 429）多半是请求本身不对，算这一条的失败
+            if status >= 500 or status == 429:
+                raise TranslateUnavailable(f"网关返回 {status}") from exc
+            logger.warning(f"AI 翻译异常: {exc}")
+            return ""
+        except (httpx.TimeoutException, httpx.ConnectError, httpx.ReadError) as exc:
+            raise TranslateUnavailable(f"连不上翻译服务: {exc}") from exc
         except Exception as exc:
             logger.warning(f"AI 翻译异常: {exc}")
             return ""

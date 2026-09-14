@@ -209,6 +209,121 @@ class TestRefusalDetection:
         # 搭配上宾语就是拒绝
         assert looks_like_refusal("无法翻译此内容", JA_TITLE) is True
 
+    def test_long_title_with_refusal_words_survives(self):
+        """长片名里凑出「无法…」不算拒绝。
+
+        2026-09-14 的第二批误杀：「仅靠与丈夫做爱无法满足的欲求不满人妻」
+        —— 欲求不满是常见题材，「无法满足」是片名的一部分。拒绝说明都是
+        短句，长文本交给长度比那关判，别在搭配关上误杀。
+        """
+        from app.modules.translate.translateai import looks_like_refusal
+
+        title = (
+            "搭讪人妻 精液中出 16人 5小时 仅靠与丈夫做爱无法满足的欲求不满人妻 "
+            "走上街头被搭讪 享受萍水相逢的性爱 用浓厚精子灌满沾满淫液的骚穴的色情人妻"
+        )
+        source = (
+            "ナンパ人妻 精液中出し 16人 5時間 夫とのセックスだけでは満たされない"
+            "欲求不満妻 街に出てナンパされ 行きずりのセックスを楽しむ"
+        )
+        assert looks_like_refusal(title, source) is False
+
+    def test_refusal_object_list_stays_narrow(self):
+        """「无法满足」「无法处理」「无法完成」都是正常片名用词。"""
+        from app.modules.translate.translateai import looks_like_refusal
+
+        for good, src in [
+            ("无法满足的人妻", "満たされない人妻"),
+            ("无法处理的巨乳", "持て余す巨乳"),
+            ("无法完成的任务", "終わらない任務"),
+            ("无法停止的痉挛绝顶", "止まらない痙攣絶頂"),
+        ]:
+            assert looks_like_refusal(good, src) is False, good
+
+
+class TestServiceUnavailable:
+    """网关 5xx / 超时要和「这条内容被拒」分开。
+
+    两者在上层的处置相反：服务挂了该立刻停整轮（实测 503 时一口气打了
+    13 次），内容被拒只该跳过这一条。原先都返回空串，上层区分不了。
+    """
+
+    def _client(self):
+        from app.modules.translate.translateai import TranslateAI
+
+        return TranslateAI(url="http://x/v1", model="m", api_key="k")
+
+    @pytest.mark.parametrize("status", [500, 502, 503, 429])
+    def test_server_errors_raise_unavailable(self, status, monkeypatch):
+        import httpx
+
+        from app.modules.translate.translateai import TranslateUnavailable
+
+        def boom(*a, **kw):
+            req = httpx.Request("POST", "http://x/v1/chat/completions")
+            resp = httpx.Response(status, request=req)
+            raise httpx.HTTPStatusError(str(status), request=req, response=resp)
+
+        monkeypatch.setattr(httpx.Client, "post", boom)
+        with pytest.raises(TranslateUnavailable):
+            self._client().translate("テスト")
+
+    @pytest.mark.parametrize("status", [400, 401, 403])
+    def test_client_errors_return_empty(self, status, monkeypatch):
+        """4xx 多半是请求本身不对，算这一条的失败，不是服务挂了。"""
+        import httpx
+
+        def boom(*a, **kw):
+            req = httpx.Request("POST", "http://x/v1/chat/completions")
+            resp = httpx.Response(status, request=req)
+            raise httpx.HTTPStatusError(str(status), request=req, response=resp)
+
+        monkeypatch.setattr(httpx.Client, "post", boom)
+        assert self._client().translate("テスト") == ""
+
+    def test_timeout_raises_unavailable(self, monkeypatch):
+        import httpx
+
+        from app.modules.translate.translateai import TranslateUnavailable
+
+        def boom(*a, **kw):
+            raise httpx.TimeoutException("timeout")
+
+        monkeypatch.setattr(httpx.Client, "post", boom)
+        with pytest.raises(TranslateUnavailable):
+            self._client().translate("テスト")
+
+    def test_factory_falls_back_when_one_is_down(self, monkeypatch):
+        """某一家挂了不代表下一家也挂，照常降级。"""
+        from app.modules import translate as factory
+        from app.modules.translate.translateai import TranslateUnavailable
+
+        class Down:
+            def translate(self, t):
+                raise TranslateUnavailable("挂了")
+
+        class Up:
+            def translate(self, t):
+                return "译文"
+
+        monkeypatch.setattr(factory, "get_translators", lambda: [Down(), Up()])
+        assert factory.translate("テスト") == "译文"
+
+    def test_factory_raises_when_all_are_down(self):
+        """每一家都不可用才算整条链路不通。"""
+        from app.modules import translate as factory
+        from app.modules.translate.translateai import TranslateUnavailable
+
+        class Down:
+            def translate(self, t):
+                raise TranslateUnavailable("挂了")
+
+        import unittest.mock as mock
+
+        with mock.patch.object(factory, "get_translators", lambda: [Down(), Down()]):
+            with pytest.raises(TranslateUnavailable):
+                factory.translate("テスト")
+
     def test_client_returns_empty_on_refusal(self, monkeypatch):
         """识别出拒绝后 translate() 要返回空串，好让工厂降级到下一家。"""
         from app.modules.translate import translateai
@@ -671,3 +786,67 @@ class TestListingCachePatch:
             assert row is not None
             # create_time 是 get_rank_cache 判 TTL 的依据，不能被刷新
             assert row.create_time == before
+
+
+class TestPurgeCircuitBreaker:
+    """存量清洗要有上限。
+
+    purge_refused_translations 每轮翻译前扫全库，判断逻辑但凡有偏差就会
+    批量误清 —— 2026-09-14 线上一轮清掉了 92 条正常译文，而日志只有一行
+    INFO。真正的拒绝说明是少数，占比高必然意味着判断出了问题。
+    """
+
+    def _seed(self, good: int, bad: int):
+        from app.database.base import DBBase
+        from app.database.models import Code
+        from app.database.session import engine, session_scope
+
+        DBBase.metadata.create_all(engine)
+        with session_scope() as session:
+            session.query(Code).delete()
+            for i in range(good):
+                session.add(
+                    Code(code=f"PG-{i:03d}", title="日文タイトル", cn_title="正常译文")
+                )
+            for i in range(bad):
+                session.add(
+                    Code(code=f"PB-{i:03d}", title="日文タイトル", cn_title="抱歉，我无法翻译")
+                )
+
+    def _empty_count(self) -> int:
+        from app.database.models import Code
+        from app.database.session import session_scope
+
+        with session_scope() as session:
+            return (
+                session.query(Code)
+                .filter((Code.cn_title == "") | (Code.cn_title.is_(None)))
+                .count()
+            )
+
+    def test_small_batch_is_cleared(self):
+        """少量拒绝说明照常清掉 —— 熔断不该把正常功能也挡住。"""
+        from app import services
+
+        self._seed(good=100, bad=5)
+        assert services.purge_refused_translations() == 5
+
+    def test_oversized_batch_clears_nothing(self, monkeypatch):
+        """判断逻辑坏掉时，一条都不清，库必须原样留着。"""
+        from app import services
+        from app.modules.translate import translateai
+
+        self._seed(good=100, bad=0)
+        # 模拟判断逻辑出错：所有译文都被判成拒绝
+        monkeypatch.setattr(translateai, "looks_like_refusal", lambda t, s="": True)
+
+        assert services.purge_refused_translations() == 0
+        # 关键断言：库没被洗
+        assert self._empty_count() == 0
+
+    def test_absolute_floor_protects_small_libraries(self):
+        """小库里比例天然偏高，绝对下限兜住，别让它清不动。"""
+        from app import services
+
+        self._seed(good=2, bad=1)
+        assert services.purge_refused_translations() == 1
