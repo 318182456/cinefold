@@ -33,6 +33,7 @@ SENSITIVE_KEYS = {
     "mteam_api_key", "wechat_corp_secret", "wechat_token",
     "wechat_encoding_aes_key", "telegram_bot_token", "secret_key",
     "cloudnas_password", "baidu_api_key", "google_api_key", "openai_api_key",
+    "tencent_secret_key",
     "agent_api_key",
     "github_token", "oidc_client_secret", "medialink_webhook_token",
     # 连接串里通常内嵌账号密码
@@ -364,6 +365,12 @@ class Settings:
     baidu_api_key: str = ""
     baidu_app_id: str = ""
     google_api_key: str = ""
+    # 腾讯云机器翻译。SecretId / SecretKey 在腾讯云访问管理里签发，
+    # 需要给子账号授权 QcloudTMTFullAccess（或只读的翻译权限）
+    tencent_secret_id: str = ""
+    tencent_secret_key: str = ""
+    # 地域。翻译服务各地域独立计费，就近选能少几十毫秒
+    tencent_region: str = "ap-guangzhou"
     openai_url: str = ""
     openai_model: str = ""
     openai_api_key: str = ""
@@ -643,6 +650,9 @@ def load_settings() -> Settings:
         baidu_api_key=_env("BAIDU_API_KEY"),
         baidu_app_id=_env("BAIDU_APP_ID"),
         google_api_key=_env("GOOGLE_API_KEY"),
+        tencent_secret_id=_env("TENCENT_SECRET_ID"),
+        tencent_secret_key=_env("TENCENT_SECRET_KEY"),
+        tencent_region=_env("TENCENT_REGION", "ap-guangzhou"),
         openai_url=_env("OPENAI_URL"),
         openai_model=_env("OPENAI_MODEL"),
         openai_api_key=_env("OPENAI_API_KEY"),

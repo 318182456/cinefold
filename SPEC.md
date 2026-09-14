@@ -175,7 +175,21 @@ create_time / update_time
 - `wechat` — 企业微信，含 `WXBizMsgCrypt3` 加解密
 
 ### 翻译 `modules/translate/`
-- `baidu` · `google` · `translateai`（OpenAI 兼容）
+- `translateai`（OpenAI 兼容）· `tencent` · `baidu` · `google`
+
+工厂按 **AI → 腾讯 → 百度 → Google** 依次降级（`translate.translate`）。
+顺序的理由不是质量排序：片名普遍露骨，AI 网关常连着 200 回一句拒绝说明
+而非译文（见 `translateai` 的 REFUSAL 注释），而后三家是翻译 API，不作
+内容判断 —— AI 之后那一档才是实际把活干完的。
+
+`tencent` 手写 TC3-HMAC-SHA256 签名，不引腾讯 SDK（只调一个接口，不值得
+拖一串依赖）。签名格式极挑剔，规范请求串少一个换行就是 SignatureFailure
+且错误信息不指出差在哪，所以 `tests/test_manual_translate.py` 里钉了一条
+与官方 SDK 交叉验证出来的签名用例。
+
+`TranslateUnavailable` 区分「服务挂了」与「这条被拒」：5xx / 429 / 超时 /
+连不上抛它，4xx 仍返回空串。工厂照常逐家降级，**全部**不可用才向上抛，
+调用方收到即停整轮，不必攒失败计数。
 
 ### 字幕 `modules/subtitle/`
 统一接口：`search(code)` → `SubtitleItem | None`，按 `SUBTITLE_SITES` 顺序命中即停。

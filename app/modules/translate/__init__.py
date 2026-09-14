@@ -1,6 +1,13 @@
 """翻译工厂。
 
-按 AI → 百度 → Google 顺序尝试，前者失败自动降级。
+按 AI → 腾讯 → 百度 → Google 顺序尝试，前者失败自动降级。
+
+腾讯排在三家传统翻译的最前面：AI 那档经常被网关以内容为由拦下（片名
+普遍露骨，见 translateai 里那串 REFUSAL 注释），而腾讯/百度/Google 是
+翻译 API，不对内容作道德判断，照翻不误 —— 所以 AI 之后这一档才是实际
+把活干完的那个。三家里腾讯每月 500 万字符免费且日译中质量尚可，百度
+免费额度也够但质量一般，Google 质量最好却没有免费额度（必须绑结算），
+按「先免费、后质量」排下来就是这个顺序。
 """
 from __future__ import annotations
 
@@ -16,6 +23,10 @@ def get_translators() -> list:
     if settings.openai_url and settings.openai_api_key:
         from app.modules.translate.translateai import TranslateAI
         translators.append(TranslateAI())
+
+    if settings.tencent_secret_id and settings.tencent_secret_key:
+        from app.modules.translate.tencent import Tencent
+        translators.append(Tencent())
 
     if settings.baidu_app_id and settings.baidu_api_key:
         from app.modules.translate.baidu import Baidu

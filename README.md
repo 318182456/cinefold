@@ -15,7 +15,7 @@
 | PT 站点 | M-Team · Rousi · PTT · NicePT · 自定义 BT 源 |
 | 资源站 | JavDB · JavBus · JavLibrary · 厂牌官网（9 家） |
 | 通知 | Telegram · 企业微信（含指令回调） |
-| 翻译 | OpenAI 兼容接口 · 百度 · Google |
+| 翻译 | OpenAI 兼容接口 · 腾讯 · 百度 · Google（依次降级） |
 | 字幕 | SubtitleCat · GitHub 字幕库，入库自动抓，只认简体中文 |
 | AI 影评 | 按元数据与演员/厂牌历史标签生成看点，写进 NFO 与 Emby 简介 |
 | AI 助手 | 侧边悬浮对话，问情况 · 操作 qb/tr 任务（需确认） |
@@ -304,6 +304,41 @@ SUBTITLE_FILL_TIME='0 4 * * *'  # 补漏时间
 
 > JAV 字幕的现实情况：能用的站就这么几个。OpenSubtitles、字幕库、SubHD 这类
 > 以院线片为主，番号命中率极低，接了也是白跑请求，所以没接。
+
+---
+
+## 标题翻译
+
+日文标题翻成中文，配了哪家就用哪家，按 **AI → 腾讯 → 百度 → Google**
+依次降级，前一家没出结果就换下一家。
+
+```bash
+# AI（OpenAI 兼容接口）——质量最好，但片名露骨时常被网关拦下
+OPENAI_URL=https://api.example.com/v1
+OPENAI_API_KEY=sk-xxx
+OPENAI_MODEL=gpt-4o-mini
+
+# 腾讯云机器翻译——每月 500 万字符免费
+TENCENT_SECRET_ID=AKIDxxx
+TENCENT_SECRET_KEY=xxx
+TENCENT_REGION=ap-guangzhou   # 可选，默认广州
+
+# 百度翻译
+BAIDU_APP_ID=xxx
+BAIDU_API_KEY=xxx
+
+# Google 翻译——质量最好，但无免费额度，需绑定结算账号
+GOOGLE_API_KEY=xxx
+```
+
+顺序是按「先免费、后质量」定的，但真正的理由在 AI 这一档：片名普遍露骨，
+AI 网关经常连着 HTTP 200 回一句拒绝说明而不是译文。腾讯/百度/Google 是
+翻译 API，不对内容作道德判断，照翻不误 —— 所以 AI 之后那一档才是实际把
+活干完的那个，建议至少配一家。
+
+腾讯的密钥在腾讯云「访问管理 → API 密钥管理」签发，需要给账号授权
+`QcloudTMTFullAccess`。欠费、未授权、免费额度用尽这几种账号级错误只会在
+日志里提示一次，不会每条番号刷一行。
 
 ---
 

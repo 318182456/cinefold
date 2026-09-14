@@ -850,3 +850,139 @@ class TestPurgeCircuitBreaker:
 
         self._seed(good=2, bad=1)
         assert services.purge_refused_translations() == 1
+
+
+class TestTencentTranslate:
+    """腾讯云机器翻译。
+
+    降级链里 AI 之后的主力：片名普遍露骨，AI 网关常以内容为由拦下，而
+    腾讯是翻译 API 不作道德判断，照翻不误。
+
+    签名走 TC3-HMAC-SHA256 手写（不引 SDK），格式极其挑剔 —— 规范请求串
+    少一个换行就是 SignatureFailure，且错误信息不会告诉你差在哪。下面这条
+    签名用例的期望值是拿腾讯官方 SDK 交叉验证出来的，改签名逻辑时它会第一
+    个报警。
+    """
+
+    def _client(self):
+        from app.modules.translate.tencent import Tencent
+
+        return Tencent(
+            secret_id="AKIDzTESTSECRETIDEXAMPLE0000000000",
+            secret_key="TestSecretKeyExample000000000000",
+            region="ap-guangzhou",
+        )
+
+    def test_signature_matches_official_sdk(self):
+        """签名必须与腾讯官方 SDK 算出的逐字节一致。
+
+        期望值来自 tencentcloud-sdk-python-common 的 Sign.sign_tc3，
+        用同样的密钥/时间戳/payload 跑出来的结果（SDK 只用于验证，
+        没有进 requirements）。
+        """
+        import json
+
+        body = json.dumps(
+            {"SourceText": "テスト", "Source": "ja", "Target": "zh", "ProjectId": 0},
+            ensure_ascii=False,
+        )
+        auth = self._client()._authorization(body, 1700000000)
+        signature = auth.split("Signature=")[1]
+
+        assert signature == (
+            "d90dddb241dce44a4a14c31725b6c760555268f30a34f32903947eb17da6381f"
+        )
+
+    def test_authorization_header_shape(self):
+        """Authorization 的结构也别改坏了。"""
+        auth = self._client()._authorization("{}", 1700000000)
+
+        assert auth.startswith("TC3-HMAC-SHA256 Credential=")
+        assert "/2023-11-14/tmt/tc3_request" in auth
+        assert "SignedHeaders=content-type;host;x-tc-action" in auth
+
+    def test_disabled_without_credentials(self):
+        """凭据不全就不启用，别发一个必然 401 的请求。"""
+        from app.modules.translate.tencent import Tencent
+
+        assert Tencent(secret_id="", secret_key="").enabled is False
+        assert Tencent(secret_id="only-id", secret_key="").enabled is False
+        assert Tencent(secret_id="i", secret_key="k").enabled is True
+
+    def test_successful_translation(self, monkeypatch):
+        import httpx
+
+        def fake_post(self, url, **kw):
+            return httpx.Response(
+                200,
+                json={"Response": {"TargetText": "测试", "RequestId": "r"}},
+                request=httpx.Request("POST", url),
+            )
+
+        monkeypatch.setattr(httpx.Client, "post", fake_post)
+        assert self._client().translate("テスト") == "测试"
+
+    def test_api_error_returns_empty(self, monkeypatch):
+        """接口报错要返回空串，好让工厂降级到下一家。"""
+        import httpx
+
+        def fake_post(self, url, **kw):
+            return httpx.Response(
+                200,
+                json={"Response": {"Error": {"Code": "InvalidParameter", "Message": "bad"}}},
+                request=httpx.Request("POST", url),
+            )
+
+        monkeypatch.setattr(httpx.Client, "post", fake_post)
+        assert self._client().translate("テスト") == ""
+
+    def test_account_error_warns_once(self, monkeypatch, caplog):
+        """欠费/未授权是账号级问题，每条番号都会撞，只提示一次。"""
+        import httpx
+
+        from app.modules.translate.tencent import Tencent
+
+        Tencent._fatal_warned.clear()
+
+        def fake_post(self, url, **kw):
+            return httpx.Response(
+                200,
+                json={
+                    "Response": {
+                        "Error": {
+                            "Code": "FailedOperation.NoFreeAmount",
+                            "Message": "no free amount",
+                        }
+                    }
+                },
+                request=httpx.Request("POST", url),
+            )
+
+        monkeypatch.setattr(httpx.Client, "post", fake_post)
+        client = self._client()
+        for _ in range(5):
+            assert client.translate("テスト") == ""
+
+        assert "FailedOperation.NoFreeAmount" in Tencent._fatal_warned
+        Tencent._fatal_warned.clear()
+
+    def test_factory_order_puts_tencent_after_ai(self):
+        """降级链顺序：AI → 腾讯 → 百度 → Google。"""
+        from unittest import mock
+
+        from app.core.config import Settings
+        from app.modules import translate as factory
+
+        settings = Settings(
+            openai_url="http://x",
+            openai_api_key="k",
+            tencent_secret_id="i",
+            tencent_secret_key="k",
+            baidu_app_id="a",
+            baidu_api_key="b",
+            google_api_key="g",
+        )
+        with mock.patch.object(factory, "get_settings", lambda: settings):
+            names = [t.__class__.__name__ for t in factory.get_translators()]
+
+        assert names == ["TranslateAI", "Tencent", "Baidu", "Google"]
