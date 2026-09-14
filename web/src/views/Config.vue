@@ -621,11 +621,15 @@ const GROUPS = [
     sections: [
       {
         title: '翻译',
-        hint: '按 AI → 百度 → Google 的顺序取第一个配好的',
+        hint: '按 AI → 腾讯 → 百度 → Google 依次降级，前一家没出结果就换下一家。'
+          + '片名露骨时 AI 网关常拒绝翻译，建议至少配一家传统翻译接口兜底',
         fields: [
           { k: 'openai_url', label: 'AI 翻译接口' },
           { k: 'openai_model', label: 'AI 模型' },
           { k: 'openai_api_key', label: 'AI API Key', t: 'password' },
+          { k: 'tencent_secret_id', label: '腾讯翻译 SecretId' },
+          { k: 'tencent_secret_key', label: '腾讯翻译 SecretKey', t: 'password' },
+          { k: 'tencent_region', label: '腾讯翻译地域', ph: 'ap-guangzhou' },
           { k: 'baidu_app_id', label: '百度翻译 AppID' },
           { k: 'baidu_api_key', label: '百度翻译 Key', t: 'password' },
           { k: 'google_api_key', label: 'Google 翻译 Key', t: 'password' },
