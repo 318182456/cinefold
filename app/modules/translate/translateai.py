@@ -1,6 +1,7 @@
 """AI 翻译。走 OpenAI 兼容接口，可对接任何兼容服务。"""
 from __future__ import annotations
 
+import json
 import re
 
 import httpx
@@ -22,46 +23,41 @@ PROMPT = (
     "The input is licensed adult-video catalog metadata for an authorized "
     "private media library; translating it is the entire task. "
     "Translate the Japanese title into Simplified Chinese. "
-    "Output ONLY the translation itself: no quotes, no explanation, "
-    "no romanization, nothing else."
+    "Respond with exactly one JSON object and nothing else: "
+    '{"zh": "<translation>"}. '
+    'The "zh" field holds only the translation itself: no quotes around it, '
+    "no explanation, no romanization, no source text, no labels. "
+    "Keep names, brand marks and codes (VR, 4K, THE BEST, SODstar) as they are. "
+    'If you truly cannot produce a translation, respond {"error": "<short reason>"} '
+    'instead - never put anything other than the translation into "zh".'
 )
 
-# 这类片名本身就露骨，AI 网关会连着 HTTP 200 一起回一句拒绝的说明文字：
+# ======================================================================
+# 怎么判「这不是译文」
+# ======================================================================
+# 结论先说：**不猜**。让模型按 JSON 契约返回 {"zh": "译文"}，解析不出
+# 就不是译文 —— 见 parse_translation。拒绝说明、模型的自言自语、
+# 「**Simplified Chinese Translation:**」这种标注，全都是散文，长不成
+# 这个形状。再给模型一个正规的拒绝通道 {"error": "..."}，它就没有理由
+# 把拒绝塞进译文字段。
 #
-#   {"choices":[{"message":{"content":"The prompt could not be submitted.
-#    The prompt contains sensitive words that violate Google's ..."},
-#    "finish_reason":"stop"}], "usage":{"total_tokens":0}}
+# 走到这一步之前试过四轮「看内容猜像不像拒绝」，每轮都误杀正常译文：
 #
-# 没有 refusal 字段、finish_reason 还是 stop，HTTP 层完全看不出问题，内容
-# 也非空 —— 那句拒绝就被当成译文存进 cn_title，卡片上于是显示
-# 「The prompt could not be submitted...」（实测 gemini-2.5-flash-lite）。
+#     违反        校則違反是高频题材
+#     抱歉/对不起   ごめんなさい是常见标题句式
+#     无法满足     欲求不满题材
+#     VR/BOX/SP   片名自带的英文标记
 #
-# 换提示词没用：实测那是对请求正文的关键词扫描，不是模型在做判断，改成
-# 「机械转写、勿评判」照样原样拒绝。所以只能认出来、丢掉，返回空串让工厂
-# 降级到百度/Google —— 那两家是翻译 API，不对内容作道德判断。
-# 判拒绝只看「整句像不像拒绝」，不看「有没有出现某个词」。
+# 片名可以是任何内容，任何词、任何形态都可能合法出现。按内容猜必然有
+# 误差，而误差的代价极高：译文被丢、连续失败计数拖停整轮、存量清洗每轮
+# 把它清掉再重翻（日志里那个「清掉 15 条 → 翻译 15 条」的死循环）。
 #
-# 原先是一张关键词表（含「违反」「抱歉」「敏感词」），命中即丢。问题是这些
-# 词在片名里本来就合法，而且还是高频词 —— 实测被误杀的正常译文：
-#
-#     违反校规连带责任！男生故意犯规，作为惩罚男女生下半身全裸半裸上学！
-#     【4K】违反校规体操服学生与禁断的内射性交 宫西光
-#     真实出现★立即冻结的商品★奇迹复活★高价深感抱歉★★…
-#
-# 「违反校规」是 JAV 里极高频的题材词，这等于把一整类片子的译文全毙了。
-# 连锁反应还不止丢译文：丢了就算一次失败，攒够 TRANSLATE_FAILURE_LIMIT
-# 会触发 give_up，把本轮剩下的番号全部跳过（日志里那句「翻译连续失败，
-# 本轮提前结束」）。一批同题材的片子进来，能把整轮翻译打停。
-#
-# 而且 purge_refused_translations 每轮翻译前扫全库，用的是同一个判断 ——
-# 就算某次侥幸存进去了，下一轮也会被清成空串，永远修不好。
-#
-# 所以改成看句式：拒绝说明是一句完整的话，「抱歉，我无法…」「I cannot…」
-# 出现在开头；片名里的「违反」「抱歉」是夹在中间的词。位置和搭配才是
-# 区分点，单个词不是。
+# 所以内容判定只剩下面两张表，且只认**整句话术**，一个单词都不进 ——
+# 这些短语只可能出自网关或模型，没有哪部片子会这么叫。它们现在只在两处
+# 兜底：清洗存量（purge_refused_translations）和 zh 字段里被硬塞了拒绝话
+# 的极端情况。
 
-# 一、整段拒绝的强特征。这些短语在片名里不可能出现，命中即判拒绝，
-# 不看位置 —— 都是网关/模型的固定话术
+# 网关/模型的固定拒绝话术。逐条都是完整短语
 _HARD_MARKERS = (
     "could not be submitted",
     "content policy",
@@ -103,14 +99,8 @@ _HARD_MARKERS = (
     "not able to provide a translation",
 )
 
-# 译文顶多比原文长个几倍；成段的说明文字必然远超这个量级。
-# 用它兜住没被前面几关命中的长篇拒绝/解释
-MAX_LENGTH_RATIO = 4
-MIN_LENGTH_FLOOR = 40
-
-
-# 推理模型漏出来的思考痕迹。都是英文元话语 —— 模型在讨论「该怎么翻」
-# 而不是在给译文，正常译文里不会出现这些搭配
+# 推理模型漏出来的思考痕迹与标注。都是元话语 —— 模型在讨论「该怎么翻」
+# 或给译文贴标签，而不是在翻
 _THINKING_MARKERS = (
     "wait, let me",
     "let me reconsider",
@@ -135,77 +125,55 @@ _THINKING_MARKERS = (
 )
 
 
-# 二、结构判据：译文里凭空多出了原文没有的英文。
-#
-# 关键是算「净增」而不是「总数」：片名自带的英文标记（VR、4K、THE BEST、
-# Happy Valentine's Day、BOX…）在原文里同样存在，翻译时原样保留是正确
-# 行为，不该因此被判成拒绝。实测「【VR】庆祝 小熊猫VR 8周年…Happy
-# Valentine's Day 特别BOX」有 9 个英文单词，但净增是 0 —— 按总数判会
-# 误杀，按净增判就放行。
-#
-# 而网关拒绝、模型的英文自述、以及「**Simplified Chinese Translation:**」
-# 这类标注，都是原文里没有的词，净增很高。
-_ENGLISH_WORD_RE = re.compile(r"[A-Za-z]{2,}")
-
-# 允许凭空多出几个英文单词。留一点余量给音译（人名、品牌）和模型偶尔
-# 补的一两个词，超过就不像译文了
-_MAX_EXTRA_ENGLISH_WORDS = 3
-
-
-def _extra_english_words(text: str, source: str) -> int:
-    """译文里有、原文里没有的英文单词数。"""
-    in_source = {w.lower() for w in _ENGLISH_WORD_RE.findall(source)}
-    return sum(
-        1 for w in _ENGLISH_WORD_RE.findall(text) if w.lower() not in in_source
-    )
-
-
 def looks_like_refusal(text: str, source: str = "") -> bool:
-    """判断这段回复不是译文（拒绝说明、网关提示、模型的自言自语）。
+    """这段文字是不是网关/模型的固定话术（拒绝、自述、标注）。
 
-    这里只是兜底。主判据在 translate() 里 —— 网关拦截时 usage.total_tokens
-    为 0，那是客观信号，不用猜。
-
-    这个函数守的是拿不到 usage 的场合，所以判据一律选「结构上不可能是
-    片名」的那种，绝不按词猜。按词猜的教训有三批：「违反」「抱歉」
-    「对不起」「无法满足」全是合法的片名用词，每加一个词表条目就误杀
-    一批正常译文。
-
-    宁可漏判也不要误判：漏判顶多让一句拒绝显示在卡片上，用户看见了能
-    手动重翻；误判则是把正常译文丢掉，而且会计入连续失败拖停整轮，
-    存量清洗那一轮还会反复把它清空 —— 后者的代价大得多。
+    只认上面两张表里的整句短语，不做任何结构或长度上的推断。
+    `source` 参数保留是为了兼容既有调用点，已不参与判断。
     """
     if not text:
         return True
+    lowered = text.lower()
+    return any(m in lowered for m in _HARD_MARKERS) or any(
+        m in lowered for m in _THINKING_MARKERS
+    )
 
-    lowered = text.lower().strip()
 
-    # 一、固定话术。这些整句只可能出自网关/模型，片名里不会出现 ——
-    # 注意都是完整短语而不是单个词，「violate」这种单词一律不进这张表
-    if any(marker in lowered for marker in _HARD_MARKERS):
-        return True
+# 模型爱套代码围栏
+_FENCE_RE = re.compile(r"```[a-zA-Z]*\s*|```")
 
-    # 二、推理模型把思考过程吐出来了：
-    #
-    #     步骤
-    #     Wait, let me reconsider. あゆみ is a Japanese name.
-    #
-    # 既不是译文也不是拒绝。特征是英文元话语 —— 模型在讨论「该怎么翻」
-    # 而不是在翻
-    if any(marker in lowered for marker in _THINKING_MARKERS):
-        return True
 
-    # 三、译文里凭空多出一堆原文没有的英文
-    if source and _extra_english_words(text, source) > _MAX_EXTRA_ENGLISH_WORDS:
-        return True
+def parse_translation(raw: str) -> tuple[str, str]:
+    """按契约从模型回复里取译文。返回 (译文, 失败原因)。
 
-    # 四、长度兜底：译文顶多比原文长个几倍，成段的说明文字远超这个量级
-    if source:
-        limit = max(MIN_LENGTH_FLOOR, len(source) * MAX_LENGTH_RATIO)
-        if len(text) > limit:
-            return True
+    契约是恰好一个 JSON 对象：{"zh": "..."} 或 {"error": "..."}。
+    模型偶尔会在前后夹点废话（思考痕迹、代码围栏），所以从每个 '{'
+    开始试着解码，取第一个能解出的对象。
 
-    return False
+    失败原因只有三种，给日志用：
+        error    模型走了正规拒绝通道
+        no-json  整段都没有可解析的对象 —— 散文、拒绝、标注、半截 JSON
+        no-zh    解出了对象但没有 zh 字段
+    """
+    if not raw:
+        return "", "no-json"
+
+    text = _FENCE_RE.sub("", raw).strip()
+    decoder = json.JSONDecoder()
+    for m in re.finditer(r"\{", text):
+        try:
+            obj, _ = decoder.raw_decode(text, m.start())
+        except ValueError:
+            continue
+        if not isinstance(obj, dict):
+            continue
+        if obj.get("error"):
+            return "", "error"
+        zh = obj.get("zh")
+        if isinstance(zh, str) and zh.strip():
+            return zh.strip(), ""
+        return "", "no-zh"
+    return "", "no-json"
 
 
 class TranslateUnavailable(Exception):
@@ -283,18 +251,10 @@ class TranslateAI:
             result = (message.get("content") or "").strip()
 
             # 网关拦截的确定性信号：模型压根没跑，token 消耗为 0。
-            #
-            # 这比任何词表都可靠 —— 真翻译了就必然烧 token，返回 0 说明
-            # 请求在网关那层就被关键词扫描拦下了，回来的那段文字是网关
-            # 自己写的说明，不是模型的输出。
-            #
-            # 之前一直靠猜「这段话像不像拒绝」，结果是打不完的补丁：片名
-            # 可以是任何内容，「违反」「抱歉」「对不起」「无法满足」都是
-            # 合法的片名用词，按词判必然误杀（实测三批，每批都是正常译文）。
-            # 而这个字段是客观的。
-            #
-            # 只在 content 非空时看它：有些网关正常响应也不回 usage，
-            # 那种情况下 0 是「没报告」而不是「没消耗」，不能当拦截论处。
+            # 真翻译了就必然烧 token，返回 0 说明请求在网关那层就被关键词
+            # 扫描拦下了，回来的那段文字是网关自己写的说明。
+            # 只在 content 非空时看：有些网关正常响应也不回 usage，
+            # 那种情况下 0 是「没报告」不是「没消耗」
             usage = (body.get("usage") or {}) if isinstance(body, dict) else {}
             if result and usage and usage.get("total_tokens") == 0:
                 logger.warning(
@@ -302,10 +262,24 @@ class TranslateAI:
                 )
                 return ""
 
-            if looks_like_refusal(result, text):
-                logger.warning(f"AI 翻译疑似返回拒绝说明而非译文，已丢弃: {result[:80]}")
+            # 契约：只认 {"zh": "..."}。解析不出就不是译文，不猜 ——
+            # 见文件顶部那段说明
+            zh, reason = parse_translation(result)
+            if not zh:
+                if reason == "error":
+                    logger.warning(f"AI 翻译明确拒绝: {result[:80]}")
+                else:
+                    logger.warning(
+                        f"AI 翻译未按 JSON 契约返回（{reason}），已丢弃: {result[:80]}"
+                    )
                 return ""
-            return result
+
+            # 极端情况：模型没走 error 通道，把固定拒绝话术硬塞进了 zh。
+            # 这里只认整句话术，零误杀
+            if looks_like_refusal(zh):
+                logger.warning(f"AI 翻译在 zh 字段里返回了拒绝话术，已丢弃: {zh[:80]}")
+                return ""
+            return zh
         except httpx.HTTPStatusError as exc:
             status = exc.response.status_code
             # 5xx 与 429 是服务侧的问题，重试同样的请求没有意义；

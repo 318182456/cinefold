@@ -530,6 +530,18 @@ class TestPromptHardening:
         assert "simplified chinese" in lowered
         assert "only the translation" in lowered
 
+    def test_prompt_demands_json_contract(self):
+        """契约是整个防误杀方案的根基，提示词里必须说清楚。
+
+        {"zh": ...} 是唯一被接受的形状；{"error": ...} 是模型正规的拒绝通道 ——
+        有了它，模型就没理由把拒绝塞进译文字段。两句缺一不可。
+        """
+        from app.modules.translate.translateai import PROMPT
+
+        assert '{"zh"' in PROMPT
+        assert '{"error"' in PROMPT
+        assert "json" in PROMPT.lower()
+
     def test_prompt_is_sent_as_system_message(self, monkeypatch):
         """提示词要真的发出去，且发在 system 位。"""
         from app.modules.translate import translateai
@@ -541,7 +553,7 @@ class TestPromptHardening:
                 pass
 
             def json(self):
-                return {"choices": [{"message": {"content": "译文"},
+                return {"choices": [{"message": {"content": '{"zh": "译文"}'},
                                      "finish_reason": "stop"}]}
 
         class _Client:
@@ -578,7 +590,7 @@ class TestPromptHardening:
                 pass
 
             def json(self):
-                return {"choices": [{"message": {"content": "译文"},
+                return {"choices": [{"message": {"content": '{"zh": "译文"}'},
                                      "finish_reason": "stop"}]}
 
         class _Client:
@@ -602,21 +614,19 @@ class TestPromptHardening:
 class TestSilentTruncation:
     """网关的输出侧过滤会把译文从中间砍断，且伪装成正常结束。
 
-    这是比拒绝更阴的一种失败：finish_reason 还是 stop、usage 的
-    completion_tokens 与返回字数完全对得上（模型确实"只生成了那么多"），
-    长度比也落在正常译文的区间内 —— 没有任何字段能把它和完整译文分开。
+    finish_reason 还是 stop、completion_tokens 与返回字数对得上、长度比也
+    落在正常区间 —— 没有任何字段能把它和完整译文分开。以前只能原样收下，
+    卡片上就顶着半截标题（实测 gemini-2.5-flash-lite：从「我的女友在」断掉）。
 
-    所以不能靠检测兜住它，只能换一个不做这种过滤的模型（Gemini 会，
-    Claude 不会）。这条用例守的是：真出现半截译文时，别自作聪明地
-    "修补"或猜测，宁可当失败处理。
+    JSON 契约顺手把这个问题解决了：砍断的 JSON 解析不出来，直接当失败
+    降级到下一家。这条用例守的是「半截 JSON 绝不能被修补后收下」。
     """
 
-    def test_truncated_output_is_not_repaired(self, monkeypatch):
-        """半截译文不做拼接猜测 —— 悄悄译残比翻不出来更糟，它看着是对的。"""
+    def test_truncated_json_is_dropped_not_repaired(self, monkeypatch):
         from app.modules.translate import translateai
 
-        # 实测 gemini-2.5-flash-lite 对这个标题的返回：从"我的女友在"就断了
-        half = "【VR】我的女友在"
+        # 网关从中间砍断，右括号和引号都没了
+        half = '{"zh": "【VR】我的女友在'
 
         class _Resp:
             def raise_for_status(self):
@@ -643,11 +653,11 @@ class TestSilentTruncation:
 
         monkeypatch.setattr(translateai.httpx, "Client", _Client)
         client = translateai.TranslateAI(url="http://x/v1", model="m", api_key="k")
-        # 原样返回，不拼接、不补全、不重试拼凑
-        assert client.translate(JA_TITLE) == half
+        # 不拼接、不补全、不猜 —— 返回空串让工厂降级
+        assert client.translate(JA_TITLE) == ""
 
     def test_refusal_still_beats_truncation_check(self):
-        """拒绝说明仍要被拦下 —— 别因为放过截断就把拒绝也放过去了。"""
+        """拒绝话术仍要被拦下 —— 别因为放过截断就把拒绝也放过去了。"""
         from app.modules.translate.translateai import looks_like_refusal
 
         assert looks_like_refusal(REFUSAL, JA_TITLE) is True
@@ -1094,12 +1104,12 @@ class TestGatewayTokenSignal:
 
     def test_zero_tokens_is_treated_as_blocked(self, monkeypatch):
         """token 为 0 —— 哪怕内容看着像正常译文，也不能当译文收下。"""
-        self._respond(monkeypatch, "违反校规的女学生", {"total_tokens": 0})
+        self._respond(monkeypatch, '{"zh": "违反校规的女学生"}', {"total_tokens": 0})
         assert self._client().translate("校則違反の女子生徒") == ""
 
     def test_normal_usage_passes_through(self, monkeypatch):
         """正常消耗了 token，就按译文收下。"""
-        self._respond(monkeypatch, "违反校规的女学生", {"total_tokens": 42})
+        self._respond(monkeypatch, '{"zh": "违反校规的女学生"}', {"total_tokens": 42})
         assert self._client().translate("校則違反の女子生徒") == "违反校规的女学生"
 
     def test_missing_usage_does_not_block(self, monkeypatch):
@@ -1108,7 +1118,7 @@ class TestGatewayTokenSignal:
         那种情况下「没有 usage」是「没报告」而不是「没消耗」，不能当成
         拦截 —— 否则接上这类网关会一条都翻不出来。
         """
-        self._respond(monkeypatch, "违反校规的女学生", None)
+        self._respond(monkeypatch, '{"zh": "违反校规的女学生"}', None)
         assert self._client().translate("校則違反の女子生徒") == "违反校规的女学生"
 
     def test_empty_content_still_empty(self, monkeypatch):
@@ -1117,23 +1127,16 @@ class TestGatewayTokenSignal:
         assert self._client().translate("校則違反の女子生徒") == ""
 
 
-class TestStructuralRefusalHeuristics:
-    """兜底判据只认「结构上不可能是片名」的形态，不按词猜。"""
+class TestNoStructuralGuessing:
+    """内容判定只认整句话术，不做结构推断。
 
-    def test_english_prose_for_japanese_source(self):
-        """原文是日文，回来一段英文散文 —— 那不是译文。"""
-        from app.modules.translate.translateai import looks_like_refusal
+    下面这些「原文里就有的英文标记」「原文本来就是英文」的样本，以前每一条
+    都对应一次线上误杀。现在它们理应全部放行 —— 不是因为判据变聪明了，
+    而是因为不再有结构判据。
+    """
 
-        prose = (
-            "This content appears to describe explicit material involving "
-            "school settings which I would rather not render into Chinese."
-        )
-        assert looks_like_refusal(prose, "校則違反ブルマ女子生徒と禁断の中出し性交") is True
-
-    # 判据必须是「净增」而不是「英文单词总数」。片名自带的英文标记在原文
-    # 里同样存在，翻译时原样保留是正确行为 —— 按总数判会误杀，实测
-    # 「【VR】庆祝 小熊猫VR 8周年…Happy Valentine's Day 特别BOX」有 9 个
-    # 英文单词却净增 0。
+    # 这几条曾被「英文单词数」那关误杀。片名自带的英文标记（VR、BOX、
+    # Happy Valentine's Day）翻译时原样保留是正确行为。
     @pytest.mark.parametrize(
         "translated, source",
         [
@@ -1155,17 +1158,6 @@ class TestStructuralRefusalHeuristics:
         from app.modules.translate.translateai import looks_like_refusal
 
         assert looks_like_refusal(translated, source) is False
-
-    def test_counts_only_newly_added_english(self):
-        """直接验证净增的算法本身。"""
-        from app.modules.translate.translateai import _extra_english_words
-
-        # 原文里就有的，净增 0
-        assert _extra_english_words(
-            "【VR】全新篇章 THE BEST", "【VR】BLAND NEW CHAPTER THE BEST"
-        ) == 0
-        # 凭空多出来的才算
-        assert _extra_english_words("这是 Simplified Chinese Translation", "これは") == 3
 
     def test_model_echoes_source_with_label(self):
         """模型把原文、标注、译文一起吐出来了。
@@ -1192,3 +1184,99 @@ class TestStructuralRefusalHeuristics:
         from app.modules.translate.translateai import looks_like_refusal
 
         assert looks_like_refusal("The Best Collection 8 Hours", "The Best Collection 8 Hours") is False
+
+
+class TestJsonContract:
+    """AI 路径的根本方案：模型按 {"zh": ...} 返回，解析不出就不是译文。
+
+    这一组守的是「不猜」。拒绝说明、思考痕迹、原文回显、标注、半截输出 ——
+    全都是散文，长不成 JSON；正常译文不管内容多离谱，只要在 zh 字段里
+    就照收。片名里的「违反」「对不起」「无法满足」「VR/BOX」从此与判定无关。
+    """
+
+    def _parse(self, raw):
+        from app.modules.translate.translateai import parse_translation
+
+        return parse_translation(raw)
+
+    @pytest.mark.parametrize(
+        "raw, expected",
+        [
+            ('{"zh": "违反校规的女学生"}', "违反校规的女学生"),
+            ('{"zh": "对不起，我要高潮了！优雅敏感的人妻"}', "对不起，我要高潮了！优雅敏感的人妻"),
+            ('{"zh": "仅靠与丈夫做爱无法满足的欲求不满人妻"}', "仅靠与丈夫做爱无法满足的欲求不满人妻"),
+            (
+                '{"zh": "【VR】庆祝 小熊猫VR 8周年 Happy Valentine\'s Day 特别BOX 1"}',
+                "【VR】庆祝 小熊猫VR 8周年 Happy Valentine's Day 特别BOX 1",
+            ),
+            # 代码围栏
+            ('```json\n{"zh": "步"}\n```', "步"),
+            # 前面夹了思考痕迹，取第一个能解出的对象
+            ('Let me think. あゆみ is a name.\n{"zh": "步"}', "步"),
+            # 前后有空白
+            ('  {"zh": "  译文  "}  ', "译文"),
+        ],
+    )
+    def test_accepts_anything_inside_zh(self, raw, expected):
+        zh, reason = self._parse(raw)
+        assert zh == expected
+        assert reason == ""
+
+    @pytest.mark.parametrize(
+        "raw, reason",
+        [
+            # 正规拒绝通道
+            ('{"error": "content policy"}', "error"),
+            # 各种散文：拒绝、自述、原文+标注+译文、纯译文不带 JSON
+            ("I'm sorry, but I can't assist with that.", "no-json"),
+            ("Since this contains proper nouns (names and a pro", "no-json"),
+            (
+                "【VR】BLAND NEW CHAPTER\n**Simplified Chinese Translation:**\n【VR】全新篇章",
+                "no-json",
+            ),
+            ("违反校规的女学生", "no-json"),
+            # 网关从中间砍断
+            ('{"zh": "【VR】我的女友在', "no-json"),
+            # 解出了对象但没按契约给 zh
+            ('{"translation": "x"}', "no-zh"),
+            ('{"zh": ""}', "no-zh"),
+            ("", "no-json"),
+        ],
+    )
+    def test_rejects_everything_else(self, raw, reason):
+        zh, why = self._parse(raw)
+        assert zh == ""
+        assert why == reason
+
+    def _client_with(self, monkeypatch, content, tokens=30):
+        import httpx
+
+        from app.modules.translate.translateai import TranslateAI
+
+        def fake_post(self, url, **kw):
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [{"message": {"content": content}, "finish_reason": "stop"}],
+                    "usage": {"total_tokens": tokens},
+                },
+                request=httpx.Request("POST", url),
+            )
+
+        monkeypatch.setattr(httpx.Client, "post", fake_post)
+        return TranslateAI(url="http://x/v1", model="m", api_key="k")
+
+    def test_client_stores_only_zh_field(self, monkeypatch):
+        """端到端：模型回 JSON，translate() 只把 zh 交出去。"""
+        client = self._client_with(monkeypatch, '{"zh": "对不起，我是个好色的女人"}')
+        assert client.translate("ごめんなさい、私スケベな女です") == "对不起，我是个好色的女人"
+
+    def test_client_drops_prose_even_if_it_looks_chinese(self, monkeypatch):
+        """模型不按契约、直接吐一句中文 —— 不猜它是不是译文，丢掉降级。"""
+        client = self._client_with(monkeypatch, "违反校规的女学生")
+        assert client.translate("校則違反の女子生徒") == ""
+
+    def test_refusal_smuggled_into_zh_is_caught(self, monkeypatch):
+        """模型没走 error 通道、把拒绝话术塞进 zh —— 整句话术仍能认出。"""
+        client = self._client_with(monkeypatch, '{"zh": "我无法翻译这个标题。"}')
+        assert client.translate("校則違反の女子生徒") == ""
