@@ -495,17 +495,29 @@ def _remap(raw, output, storage):
 
 
 def _save_metadata(plan):
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+    from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+
     with session_scope() as session:
+        # Production sessions disable autoflush: session.get() cannot see a
+        # newly added pending row. Multiple parts must reuse one stored row.
+        rows = {}
+        insert = sqlite_insert if session.get_bind().dialect.name == 'sqlite' else pg_insert
         for item in plan['metadata']:
             for code in dict.fromkeys([item['code'], item.get('target_code', item['code'])]):
-                row = session.get(Code, code)
+                row = rows.get(code)
                 if row is None:
-                    row = Code(code=code)
-                    session.add(row)
+                    row = session.get(Code, code)
+                if row is None:
+                    # Conflict-safe even when another writer inserts after GET.
+                    session.execute(insert(Code).values(code=code).on_conflict_do_nothing(index_elements=['code']))
+                    row = session.get(Code, code)
                     base = session.get(Code, merge.base_code(code)) if merge.base_code(code) else None
                     if base is not None:
                         for key, value in merge.clean_detail(_plain(base), code).items():
-                            setattr(row, key, value)
+                            if getattr(row, key, None) in (None, ''):
+                                setattr(row, key, value)
+                rows[code] = row
                 for key, value in merge.clean_detail(item['detail'], code).items():
                     existing = getattr(row, key, None)
                     if existing in (None, '') or key in ('title', 'cn_title') and not merge.clean_detail({key: existing}, code).get(key):

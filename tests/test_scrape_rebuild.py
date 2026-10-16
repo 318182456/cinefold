@@ -94,6 +94,48 @@ def test_preview_is_read_only_and_validates_independent_download(library):
     assert not value['deletion_protected']
 
 
+def test_preserve_metadata_repeated_codes_with_production_autoflush_disabled(library):
+    import app.database.session as database
+    factory = sessionmaker(bind=library['db'].kw['bind'], autoflush=False, expire_on_commit=False)
+    original = database.SessionLocal
+    database.SessionLocal = factory
+    try:
+        plan = {'metadata': [
+            {'code': 'SONE-725-U', 'target_code': 'SONE-725-C', 'detail': {'title': '第一分集标题'}},
+            {'code': 'SONE-725-U', 'target_code': 'SONE-725-C', 'detail': {'title': '第二分集标题', 'outline': '第二分集补充简介'}},
+            {'code': 'SONE-725-U', 'target_code': 'SONE-725-U', 'detail': {'casts': '演员乙'}},
+        ]}
+        scraperebuild._save_metadata(plan)
+        scraperebuild._save_metadata(plan)  # retry is idempotent
+        with factory() as session:
+            rows = session.scalars(select(Code).where(Code.code.in_(['SONE-725-U', 'SONE-725-C']))).all()
+            assert len(rows) == 2
+            for row in rows:
+                assert row.title == '人工保留标题'
+                assert row.outline == '第二分集补充简介'
+                assert row.casts == '演员甲'
+    finally:
+        database.SessionLocal = original
+
+
+def test_preserve_repeated_metadata_without_existing_base(library):
+    import app.database.session as database
+    factory = sessionmaker(bind=library['db'].kw['bind'], autoflush=False, expire_on_commit=False)
+    original = database.SessionLocal
+    database.SessionLocal = factory
+    try:
+        plan = {'metadata': [
+            {'code': 'STARS-207-U', 'detail': {'title': '第一分集'}},
+            {'code': 'STARS-207-U', 'detail': {'title': '第二分集', 'outline': '补充简介'}},
+        ]}
+        scraperebuild._save_metadata(plan)
+        with factory() as session:
+            row = session.get(Code, 'STARS-207-U')
+            assert row.title == '第一分集' and row.outline == '补充简介'
+    finally:
+        database.SessionLocal = original
+
+
 def add_unrecoverable(library):
     directory = library['output'] / 'only-copy'
     directory.mkdir()
