@@ -2,9 +2,7 @@
 from __future__ import annotations
 
 import copy
-import hashlib
 import os
-import re
 import threading
 import uuid
 from collections import defaultdict
@@ -12,12 +10,12 @@ from datetime import datetime
 from pathlib import Path
 
 from loguru import logger
-from sqlalchemy import select
+from sqlalchemy import and_, case, exists, func, literal, or_, select
 
 from app.core.config import get_settings, save_settings
-from app.database.models import Code, CodeStatus, MediaLink, ScrapeAttempt
+from app.database.models import Code, CodeStatus, MediaLink, ScrapeAttempt, ScrapeSourceVideo, ScrapeSourceMembership, ScrapeSourceRoot
 from app.database.session import session_scope
-from app.services import scrape, scrapewatch
+from app.services import scrape, scrapewatch, scrapeinventory
 from app.services.medialink import is_adoptable_video
 from app.utils import get_true_code, mediafile
 
@@ -28,11 +26,11 @@ _STATE = {"running": False, "job_id": "", "total": 0, "done": 0, "ok": 0,
 
 
 def key(path) -> str:
-    return hashlib.sha256(os.path.normcase(str(Path(path).resolve())).encode()).hexdigest()
+    return scrapeinventory.key(path)
 
 
 def configured() -> list[str]:
-    return list(dict.fromkeys(s.strip() for s in re.split(r"[,\r\n]+", get_settings().scrape_source_dirs) if s.strip()))
+    return scrapeinventory.configured()
 
 
 def _root(path: str) -> Path:
@@ -51,7 +49,9 @@ def _root(path: str) -> Path:
     return root
 
 
-def roots() -> list[dict]:
+def roots(probe: bool = False) -> list[dict]:
+    if not probe:
+        return scrapeinventory.roots()
     result = []
     for raw in configured():
         try:
@@ -91,7 +91,7 @@ def validate_file(raw: str) -> Path:
     if path.stat().st_size == 0:
         raise ValueError(f"视频为空文件: {path.name}")
     path = path.resolve()
-    if not any(r['available'] and path.is_relative_to(Path(r['resolved'])) for r in roots()):
+    if not any(r['available'] and path.is_relative_to(Path(r['resolved'])) for r in roots(probe=True)):
         raise ValueError(f"视频不在当前有效的下载源目录中: {path}")
     return path
 
@@ -136,72 +136,48 @@ def group_entries(entries: list[dict]):
 
 
 def list_videos(*, root: str = '', keyword: str = '', status: str = '', page: int = 1, size: int = 30) -> dict:
+    """只从持久化清单查询、筛选和分页，不触碰磁盘。"""
     configured_roots = roots()
     if root and root not in {r['path'] for r in configured_roots}:
         raise ValueError("所选目录未配置")
-    with session_scope() as session:
-        links = defaultdict(list)
-        for source, target in session.execute(select(MediaLink.source_path, MediaLink.link_path)):
-            links[key(source)].append(target)
-        attempts = {a.source_key: a.to_dict() for a in session.scalars(select(ScrapeAttempt))}
-        titles = {c.code: (c.cn_title or c.title or '') for c in session.scalars(select(Code))}
-        downloading = set(session.scalars(select(Code.code).where(Code.status == CodeStatus.DOWNLOADING)))
+    root_keys = [r['root_key'] for r in configured_roots if not root or r['path'] == root]
     job = state()
-    rows, seen, errors = [], set(), []
-    counts = defaultdict(int)
-    needle = keyword.casefold().strip()
-    for item in configured_roots:
-        if not item['available'] or root and item['path'] != root:
-            continue
-        def onerror(exc):
-            errors.append(f"目录读取失败: {exc.filename}")
-        for folder, dirs, files in os.walk(item['resolved'], followlinks=False, onerror=onerror):
-            dirs[:] = sorted(d for d in dirs if d not in {'@eaDir', '#recycle', '.unwanted'} and not Path(folder, d).is_symlink())
-            for filename in sorted(files):
-                path = Path(folder, filename)
-                if path.is_symlink() or not is_adoptable_video(path):
-                    continue
-                identity = key(path)
-                if identity in seen:
-                    continue
-                seen.add(identity)
-                try:
-                    stat = path.stat()
-                    if not path.is_file():
-                        continue
-                except OSError:
-                    errors.append(f"视频不可访问: {path}")
-                    continue
-                info = mediafile.parse(path)
-                attempt = attempts.get(identity, {})
-                code = attempt.get('code') or info.code
-                target_links = links.get(identity, [])
-                current = 'pending'
-                if not code:
-                    current = 'unrecognized'
-                elif target_links:
-                    current = 'complete' if scrapewatch._complete(path, code, target_links) else 'incomplete'
-                if attempt.get('status') in ('failed', 'cancelled'):
-                    current = attempt['status']
-                elif attempt.get('status') in ('queued', 'running'):
-                    active = (job['running'] and attempt.get('job_id') == job['job_id']) if attempt.get('job_id') else scrapewatch._LOCK.locked()
-                    current = attempt['status'] if active else 'interrupted'
-                if code in downloading or info.code in downloading:
-                    current = 'downloading'
-                elif not stat.st_size:
-                    current = 'empty'
-                row = {'path': str(path), 'name': path.name, 'root': item['path'], 'code': code, 'detected_code': info.code,
-                       'title': titles.get(code, ''), 'part': info.part, 'size': stat.st_size, 'mtime': stat.st_mtime,
-                       'status': current, 'links': target_links, 'last_run': attempt.get('updated_at'), 'error': attempt.get('error', '')}
-                if needle and needle not in f"{path} {code} {row['title']}".casefold():
-                    continue
-                counts[current] += 1
-                if not status or status == current:
-                    rows.append(row)
-    rows.sort(key=lambda r: (-r['mtime'], r['path']))
-    offset = (page - 1) * size
-    return {'roots': configured_roots, 'items': rows[offset:offset + size], 'total': len(rows), 'page': page,
-            'size': size, 'counts': dict(counts), 'warnings': errors[:20], 'job': job}
+    video, attempt = ScrapeSourceVideo, ScrapeAttempt
+    number = func.coalesce(func.nullif(attempt.code, ''), video.detected_code)
+    title = func.coalesce(func.nullif(Code.cn_title, ''), Code.title, '')
+    active = or_(and_(attempt.job_id == job['job_id'], literal(job['running'])),
+                 and_(attempt.job_id == '', literal(scrapewatch._LOCK.locked())))
+    queued = case((active, attempt.status), else_='interrupted')
+    downloading = video.detected_code.in_(select(Code.code).where(Code.status == CodeStatus.DOWNLOADING).correlate(None))
+    current = case(
+        (or_(Code.status == CodeStatus.DOWNLOADING, downloading), 'downloading'),
+        (video.size == 0, 'empty'),
+        (attempt.status.in_(['queued', 'running']), queued),
+        (attempt.status.in_(['failed', 'cancelled']), attempt.status),
+        (number == '', 'unrecognized'), else_=video.artifact_status,
+    )
+    membership = exists(select(ScrapeSourceMembership.source_key).where(
+        ScrapeSourceMembership.source_key == video.source_key, ScrapeSourceMembership.root_key.in_(root_keys)))
+    query = select(video, number.label('number'), title.label('title'), current.label('current'),
+                   attempt.updated_at, attempt.error).outerjoin(attempt, attempt.source_key == video.source_key).outerjoin(Code, Code.code == number).where(membership)
+    needle = keyword.strip()
+    if needle:
+        query = query.where(or_(video.path.icontains(needle, autoescape=True), number.icontains(needle, autoescape=True), title.icontains(needle, autoescape=True)))
+    with session_scope() as session:
+        summary = query.with_only_columns(current.label('status')).order_by(None).subquery()
+        counts = dict(session.execute(select(summary.c.status, func.count()).group_by(summary.c.status)).all())
+        filtered = query.where(current == status) if status else query
+        total = session.scalar(select(func.count()).select_from(filtered.order_by(None).subquery()))
+        rows = []
+        for cached, code, name, label, last_run, error in session.execute(filtered.order_by(video.mtime.desc(), video.path).offset((page - 1) * size).limit(size)):
+            rows.append({'path': cached.path, 'name': cached.name, 'root': root, 'code': code,
+                'detected_code': cached.detected_code, 'title': name, 'part': cached.part, 'size': cached.size,
+                'mtime': cached.mtime, 'status': label, 'links': cached.links,
+                'last_run': last_run.strftime('%Y-%m-%d %H:%M:%S') if last_run else None,
+                'error': error or '', 'indexed_at': cached.indexed_at.isoformat()})
+    return {'roots': configured_roots, 'items': rows, 'total': total, 'page': page, 'size': size,
+            'counts': counts, 'warnings': [r['error'] for r in configured_roots if r['error']], 'job': job,
+            'inventory': scrapeinventory.state(), 'needs_refresh': any(r['last_scan'] is None for r in configured_roots)}
 
 
 def start(entries: list[dict], *, overwrite: bool = False, refresh_metadata: bool = False, fetch_meta: bool = True) -> dict:

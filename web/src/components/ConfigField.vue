@@ -42,7 +42,7 @@ const value = computed({
 
     <select v-else-if="field.t === 'select'" v-model="value" class="input">
       <option v-for="option in choices" :key="option" :value="option">
-        {{ option || '（默认）' }}
+        {{ field.optionLabels?.[option] || option || '（默认）' }}
       </option>
     </select>
 

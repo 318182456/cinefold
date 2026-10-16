@@ -238,7 +238,9 @@ def poll_playback() -> int:
 
 def scan_scrape_sources() -> int:
     """扫描下载目录，补刮失败或未经过下载器回调的影片。"""
+    from app.services.scrapeinventory import refresh_now
     from app.services.scrapewatch import scan
+    refresh_now()
     return scan()
 
 
@@ -472,7 +474,7 @@ JOBS: dict[str, dict] = {
 INTERVAL_JOBS: dict[str, dict] = {
     "poll_playback": {"func": poll_playback, "name": "Emby 播放记录", "minutes": 1},
     "scan_scrape_sources": {
-        "func": scan_scrape_sources, "name": "下载目录自动刮削", "minutes": 10,
+        "func": scan_scrape_sources, "name": "源视频清单与自动刮削", "minutes": 10,
         "interval_key": "scrape_scan_interval",
     },
     "sync_emby_watch": {

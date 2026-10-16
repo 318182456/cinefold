@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import {
   checkVersion, deletePasskey, deleteTelegramWebhook, getConfig, getOidcRedirectUri,
   getTelegramReceive, getUpgradeStatus, listPasskeys, listPtSites, passkeyRegisterBegin,
@@ -7,6 +7,7 @@ import {
   testConnection, testOidc,
 } from '@/api'
 import { PasskeyCancelled, createCredential, isSupported } from '@/utils/webauthn'
+import { useRoute } from 'vue-router'
 import { useToast } from '@/composables/useToast'
 import { useConfigStore } from '@/stores/config'
 import ConfigField from '@/components/ConfigField.vue'
@@ -19,7 +20,10 @@ const configStore = useConfigStore()
 const form = reactive({})
 const loading = ref(true)
 const saving = ref(false)
+const route = useRoute()
 const activeGroup = ref('downloader')
+const scrapeTab = ref('basic')
+const SCRAPE_TABS = [['basic', '目录与命名'], ['metadata', '元数据来源'], ['images', '图片与水印'], ['automation', '自动任务']]
 const testing = ref('')
 const testResults = reactive({})
 
@@ -261,8 +265,6 @@ const GROUPS = [
           // 明文仅一次可见的提示，两处都放会让人以为是两个不同的配置项
           { k: 'medialink_library_path', label: '媒体库根目录', ph: '/volume3/h_video',
             hint: '按 inode 反查硬链接的扫描范围。可设成上一层，把多个分类目录都纳入' },
-          { k: 'medialink_scrape_dir', label: '刮削输出目录', ph: '/volume3/h_video/日本AV',
-            hint: '刮削工具实际写入硬链接的目录。留空则等同库根。该目录受保护，不会被当成空目录清掉' },
           { k: 'medialink_delete_enabled', label: '启用联动删除', t: 'bool',
             hint: '删除不可逆。建议先用下方演练确认反查结果无误再开启' },
         ],
@@ -289,18 +291,28 @@ const GROUPS = [
     sections: [
       {
         title: '刮削方式',
-        hint: '两种方式互斥 —— 都开着会同时往媒体库写同一批文件，产物互相覆盖。'
-          + '切到自建后请停掉 MDCng 的定时任务；仍收到它的 webhook 回调时，'
-          + '关联照常登记（否则联动删除会失效），但日志里会警告',
+        tab: 'basic',
+        hint: '选择由 cinefold 或外部工具负责自动刮削。两种模式都支持查看已保存的源视频清单。切换工具前，请先完成单片验证。',
         fields: [
           { k: 'scrape_mode', label: '由谁刮削', t: 'select',
             options: ['external', 'builtin'],
+            optionLabels: { external: '外部工具（MDCng 等）', builtin: 'cinefold 内置刮削' },
             hint: 'external：等 MDCng 等外部工具回调 /webhook/scrape，行为与旧版一致。'
               + 'builtin：自己抓元数据、写 NFO、出图、建硬链接，不需要外部工具' },
         ],
       },
       {
+        title: '源目录与输出目录',
+        tab: 'basic',
+        hint: '目录配置统一在此管理；刮削工作台负责查询与执行任务。',
+        fields: [
+          { k: 'scrape_source_dirs', label: '下载源目录', t: 'textarea', hint: '多个目录用逗号分隔或每行一个。保存后首次进入工作台会后台建立清单，以后读取数据库；也可主动扫描更新。自动刮削只处理已稳定的视频，请确保下载完成后再放入。源目录与输出目录不能重叠' },
+          { k: 'medialink_scrape_dir', label: '刮削输出目录', ph: '/volume3/h_video/日本AV', hint: '产物硬链接、NFO 与图片存放位置；留空使用媒体库根目录' },
+        ],
+      },
+      {
         title: '产物命名',
+        tab: 'basic',
         hint: '仅自建刮削生效。支持基础语法 {number} 与 Jinja2 高级语法 '
           + '{{ number }}，与 MDCng 的模板写法一致，配置可直接搬过来。'
           + '基础语法缺失字段填「未知」，高级语法填空并支持条件与 filter。'
@@ -317,33 +329,47 @@ const GROUPS = [
         ],
       },
       {
-        title: '自动扫描与抓取等待',
+        title: '自动任务',
+        tab: 'automation',
+        hint: '视频清单按间隔后台更新，external 模式也生效。自动刮削仅在 builtin 模式运行。',
         fields: [
-          { k: 'scrape_source_dirs', label: '下载源目录', t: 'textarea', hint: '仅 builtin 生效，多个目录用逗号分隔。文件连续两轮稳定且至少 2 分钟未修改后处理；跳过本项目标记为下载中的番号。手动下载的文件请完成后再放入。源文件保留，失败后重试。源目录与输出目录不能重叠' },
-          { k: 'scrape_scan_interval', label: '扫描间隔（分钟）', ph: '10' },
-          { k: 'scrape_scan_limit', label: '每轮最多处理番号数', ph: '10' },
-          { k: 'scrape_metadata_timeout', label: '元数据总等待上限（秒）', ph: '25', hint: '限制等待元数据的时间；翻译、下载图片和写文件另计' },
-          { k: 'scrape_merge_grace', label: '首次命中后的补全等待（秒）', ph: '3', hint: '仅对等待窗口内返回的数据应用优先级。调大可等待首选源补全' },
+          { k: 'scrape_scan_interval', label: '目录核对间隔（分钟）', ph: '10' },
+          { k: 'scrape_scan_limit', label: '每轮最多自动刮削番号数', ph: '10' },
+          { k: 'scrape_overwrite', label: '默认覆盖 NFO/图片', t: 'bool', hint: '用于自动刮削与路径临时任务；视频列表中的手动任务可单独选择本次覆盖方式' },
           { k: 'scrape_notify', label: '入库完成通知', t: 'bool', hint: '使用已配置的通知渠道；完整登记成功后发送' },
         ],
       },
       {
+        title: '抓取等待',
+        tab: 'metadata',
+        fields: [
+          { k: 'scrape_metadata_timeout', label: '元数据总等待上限（秒）', ph: '25', hint: '翻译、下载图片和写文件另计' },
+          { k: 'scrape_merge_grace', label: '首次命中后的补全等待（秒）', ph: '3', hint: '调大可等待首选源补全，调小可更快返回' },
+        ],
+      },
+      {
         title: '来源优先级（按番号类型）',
+        tab: 'metadata',
         hint: '从左到右优先；箭头可调整顺序，其余源按数据源页面排序补充。仅已启用、匹配番号规则的详情源参与。JavLibrary 当前仅用于榜单，FreeJavBT 尚未接入详情；欧美无番号影片暂不支持自动识别',
         fields: [['censored', '有码'], ['uncensored', '无码'], ['amateur', '素人'], ['fc2', 'FC2'], ['domestic', '国产']].map(([k, label]) => ({ k, label, group: 'scrape_source_priority', t: 'sources' })),
       },
       {
         title: '来源优先级（按字段）',
+        collapsible: true,
+        tab: 'metadata',
         hint: '字段首选无数据时按类型优先级补齐；未配置的字段沿用质量合并规则。已有资料仍只补空缺',
         fields: [['title', '标题 / 原标题'], ['cn_title', '中文标题'], ['outline', '简介'], ['casts', '演员'], ['banner', '封面'], ['poster', '海报'], ['still_photo', '剧照'], ['genres', '标签'], ['star', '评分'], ['release_date', '发行日期'], ['duration', '时长'], ['publisher', '发行商'], ['producer', '片商'], ['series', '系列']].map(([k, label]) => ({ k, label, group: 'scrape_field_priority', t: 'sources' })),
       },
       {
         title: '屏蔽来源（按字段）',
+        collapsible: true,
+        tab: 'metadata',
         hint: '忽略指定源新返回的对应字段；保留数据库已有值',
         fields: [['title', '标题 / 原标题'], ['cn_title', '中文标题'], ['outline', '简介'], ['casts', '演员'], ['banner', '封面'], ['poster', '海报'], ['still_photo', '剧照'], ['genres', '标签'], ['star', '评分']].map(([k, label]) => ({ k, label, group: 'scrape_field_exclude', t: 'sources' })),
       },
       {
         title: '图片水印',
+        tab: 'images',
         panel: 'watermark',
         hint: '按明确的文件标记添加：破解、流出、无码、有码逐级覆盖。清晰度依据文件名中的 4K/8K/2160p/4320p；已有图片需开启重刮覆盖才改变',
         fields: [
@@ -360,10 +386,9 @@ const GROUPS = [
         ],
       },
       {
-        title: '产物内容',
+        title: '图片输出',
+        tab: 'images',
         fields: [
-          { k: 'scrape_overwrite', label: '重刮时覆盖', t: 'bool',
-            hint: '关闭时只补缺失的，手改过的 NFO 与换过的封面不会被冲掉' },
           { k: 'scrape_still_limit', label: '剧照张数', t: 'number', ph: '5',
             hint: '落进影片旁的 extrafanart 目录。每张都要跨境下载，0 表示不下' },
           { k: 'scrape_require_images', label: '严格校验图片', t: 'bool', hint: 'poster、thumb、fanart 任一缺失时不标记入库完成，自动扫描会重试' },
@@ -832,6 +857,10 @@ function groupFields(group) {
   return group.sections.flatMap((section) => section.fields)
 }
 
+watch(() => route.query.section, value => {
+  if (GROUPS.some(group => group.key === value)) activeGroup.value = value
+}, { immediate: true })
+
 async function load() {
   loading.value = true
   try {
@@ -1148,8 +1177,12 @@ onUnmounted(stopUpgradePoll)
 
     <template v-else>
       <div v-for="group in GROUPS" v-show="activeGroup === group.key" :key="group.key" class="space-y-4">
-        <div v-for="section in group.sections" :key="section.title" class="card space-y-3">
-          <div>
+        <div v-if="group.key === 'scrape'" class="card space-y-3">
+          <div class="flex flex-wrap items-center justify-between gap-2"><div><p class="font-medium">刮削设置</p><p class="mt-1 text-xs text-gray-500">长期规则在这里设置，视频操作与任务进度在刮削工作台。</p></div><RouterLink :to="{ name: 'Scrape' }" class="text-sm text-brand">打开工作台 ↗</RouterLink></div>
+          <div class="flex flex-wrap gap-2" role="tablist" aria-label="刮削设置分类"><button v-for="[value, label] in SCRAPE_TABS" :key="value" class="btn text-xs" :class="scrapeTab === value ? 'bg-brand text-white' : 'btn-ghost'" role="tab" :aria-selected="scrapeTab === value" @click="scrapeTab = value">{{ label }}</button></div>
+        </div>
+        <component :is="section.collapsible ? 'details' : 'div'" v-for="section in group.sections" v-show="group.key !== 'scrape' || section.tab === scrapeTab" :key="section.title" class="card space-y-3">
+          <component :is="section.collapsible ? 'summary' : 'div'" :class="section.collapsible ? 'cursor-pointer' : ''">
             <div class="flex items-center gap-2">
               <p class="text-sm font-medium text-gray-300">{{ section.title }}</p>
               <!-- 翻译各家标出是否生效，省得对着一堆空框猜配没配 -->
@@ -1166,7 +1199,7 @@ onUnmounted(stopUpgradePoll)
             <p v-if="section.hint" class="mt-0.5 text-[11px] text-gray-600">
               {{ section.hint }}
             </p>
-          </div>
+          </component>
 
           <div class="grid gap-4 sm:grid-cols-2">
             <ConfigField
@@ -1179,7 +1212,7 @@ onUnmounted(stopUpgradePoll)
           </div>
 
           <!-- 翻译降级链概览：把四张卡的配置状态汇总成一句话 -->
-          <WatermarkPreview v-if="section.panel === 'watermark' && activeGroup === 'scrape'" :config="form.scrape_watermark" />
+          <WatermarkPreview v-if="section.panel === 'watermark' && activeGroup === 'scrape' && scrapeTab === 'images'" :config="form.scrape_watermark" />
           <template v-if="section.panel === 'translate-chain'">
             <div
               v-if="translateChain.length"
@@ -1595,7 +1628,7 @@ onUnmounted(stopUpgradePoll)
               docker compose pull 回到镜像版本
             </p>
           </template>
-        </div>
+        </component>
 
         <!-- 连接测试 -->
         <div v-if="group.tests" class="card space-y-2">

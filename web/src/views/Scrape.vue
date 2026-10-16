@@ -1,12 +1,11 @@
 <script setup>
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, nextTick, onMounted, reactive, ref } from 'vue'
 import { previewScrape, runScrape, getScrapeFields } from '@/api'
 import { useToast } from '@/composables/useToast'
 import { useConfigStore } from '@/stores/config'
 import EmptyState from '@/components/EmptyState.vue'
 import ModalDialog from '@/components/ModalDialog.vue'
 import PrivateImage from '@/components/PrivateImage.vue'
-import WatermarkPreview from '@/components/WatermarkPreview.vue'
 import DownloadSources from '@/components/DownloadSources.vue'
 
 const toast = useToast()
@@ -37,7 +36,7 @@ const runResult = ref(null)
 const fields = ref([])
 const jinjaAvailable = ref(true)
 const mode = ref('')
-const watermarkConfig = ref({})
+const workspace = ref('videos')
 const showFields = ref(false)
 
 // 产物类型的显示名。kind 由后端给（与 images.planned_names 一致）
@@ -83,7 +82,6 @@ onMounted(async () => {
     fields.value = data.fields || []
     jinjaAvailable.value = data.jinja_available !== false
     mode.value = config?.scrape_mode || ''
-    watermarkConfig.value = config?.scrape_watermark || {}
   } catch {
     // 字段清单只是模板提示，取不到不影响试算
   }
@@ -108,7 +106,9 @@ async function doPreview() {
   }
 }
 
-function previewSource({ path, code }) {
+async function previewSource({ path, code }) {
+  workspace.value = 'tools'
+  await nextTick()
   form.path = path
   form.code = code
   result.value = null
@@ -135,6 +135,8 @@ async function doRun() {
 
 <template>
   <div class="space-y-4">
+    <div class="flex flex-wrap items-center justify-between gap-3"><div><h1 class="text-xl font-semibold">刮削工作台</h1><p class="mt-1 text-sm text-gray-500">管理源视频、指定番号和执行任务。</p></div><RouterLink :to="{ name: 'Config', query: { section: 'scrape' } }" class="btn-ghost">刮削设置 ↗</RouterLink></div>
+    <div class="flex gap-2" role="tablist" aria-label="刮削工作区"><button v-for="[value, label] in [['videos', '视频与任务'], ['tools', '路径试算与临时任务']]" :key="value" class="btn" :class="workspace === value ? 'bg-brand text-white' : 'btn-ghost'" role="tab" :aria-selected="workspace === value" @click="workspace = value">{{ label }}</button></div>
     <!-- 当前刮削方式。走 external 时这个页面只能手动刮，说清楚免得白等 -->
     <div v-if="mode && mode !== 'builtin'" class="card">
       <p class="text-[11px] text-amber-400">
@@ -145,7 +147,8 @@ async function doRun() {
       </p>
     </div>
 
-    <DownloadSources @preview="previewSource" />
+    <DownloadSources v-show="workspace === 'videos'" @preview="previewSource" />
+    <div v-show="workspace === 'tools'" class="space-y-4">
     <!-- 输入 -->
     <div id="scrape-preview-form" class="card space-y-3">
       <div>
@@ -166,18 +169,6 @@ async function doRun() {
           >
           <span class="mt-1 block text-[11px] text-gray-600">
             容器内的路径。目录会递归扫，按番号分组，分集只抓一次元数据。留空并只填番号，可试算命名效果
-          </span>
-        </label>
-
-        <label class="block">
-          <span class="text-xs text-gray-400">硬链接目录（可选）</span>
-          <input
-            v-model="form.target_dir"
-            class="input mt-1 w-full font-mono text-xs"
-            placeholder="留空用设置里的「刮削输出目录」"
-          >
-          <span class="mt-1 block text-[11px] text-gray-600">
-            只对本次生效。硬链接建不了跨文件系统的，填别的盘会在开刮前被拦下
           </span>
         </label>
 
@@ -321,10 +312,6 @@ async function doRun() {
       </p>
     </div>
 
-    <div v-if="watermarkConfig.enabled && items.length" class="card space-y-2">
-      <p class="text-sm text-gray-300">水印位置预览（首个影片）</p>
-      <WatermarkPreview :config="watermarkConfig" :filename="items[0].source || `${items[0].code}.mp4`" :code="items[0].code" />
-    </div>
     <!-- 刮削结果 -->
     <div v-if="runResult" class="card space-y-2">
       <p class="text-sm font-medium text-gray-300">刮削结果</p>
@@ -393,6 +380,7 @@ async function doRun() {
       </template>
     </div>
 
+    </div>
     <!-- 产物详情：NFO 全文与图片。
          列表里塞不下这些，但「刮得对不对」恰恰要看内容才知道 -->
     <ModalDialog

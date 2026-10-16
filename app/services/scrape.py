@@ -512,6 +512,12 @@ def scrape_group(
             failures.append("硬链接关联或入库状态登记失败，请重试；源文件与产物保留")
     if failures:
         result.error = "；".join(failures)
+    if result.links:
+        try:
+            from app.services.scrapeinventory import update_result
+            update_result(linked_items, code)
+        except Exception:
+            logger.warning(f"[{code}] 源视频清单未能更新，后续扫描会重新核对")
     if result.ok and (result.nfo_written or registered_new) and getattr(settings, "scrape_notify", False):
         try:
             from html import escape

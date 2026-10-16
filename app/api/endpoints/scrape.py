@@ -85,6 +85,21 @@ def source_job_status(current_user: str = Depends(get_current_user)):
     return ResponseEntity.ok(state())
 
 
+@router.post("/videos/refresh")
+def refresh_source_inventory(root: str = '', current_user: str = Depends(get_current_user)):
+    from app.services.scrapeinventory import start_refresh
+    try:
+        return ResponseEntity.ok(start_refresh(root))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.get("/videos/refresh")
+def source_inventory_status(current_user: str = Depends(get_current_user)):
+    from app.services.scrapeinventory import state
+    return ResponseEntity.ok(state())
+
+
 @router.post("/jobs")
 def start_source_job(body: SourceJobRequest, current_user: str = Depends(get_current_user)):
     from app.services.scrapesources import start

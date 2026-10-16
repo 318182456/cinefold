@@ -1,5 +1,6 @@
 import os
 import time
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -9,9 +10,9 @@ from sqlalchemy.pool import StaticPool
 
 from app.core.config import Settings
 from app.database.base import DBBase
-from app.database.models import Code, CodeStatus, MediaLink, ScrapeAttempt
+from app.database.models import Code, CodeStatus, MediaLink, ScrapeAttempt, ScrapeSourceVideo
 from app.modules.scrape import local, merge, nfo
-from app.services import scrape, scrapesources as sources, scrapewatch
+from app.services import scrape, scrapesources as sources, scrapewatch, scrapeinventory
 
 
 @pytest.fixture
@@ -24,7 +25,7 @@ def env(tmp_path, monkeypatch):
     root = tmp_path / 'downloads'; root.mkdir()
     settings = Settings(scrape_source_dirs=str(root), medialink_scrape_dir=str(tmp_path / 'library'),
                         scrape_dir_template='{number}', scrape_still_limit=0, scrape_notify=False)
-    for module in (sources, scrape, scrapewatch):
+    for module in (sources, scrape, scrapewatch, scrapeinventory):
         monkeypatch.setattr(module, 'get_settings', lambda reload=False: settings)
     writes = []
     def save(updates):
@@ -69,6 +70,7 @@ def test_video_listing_filters_paginates_and_never_scrapes(env, monkeypatch):
     unknown = video(root, 'random-name.mkv')
     video(root, 'SONE-725-trailer.mp4')
     (root / 'readme.txt').write_text('text')
+    scrapeinventory.refresh_now()
     with db() as session:
         session.add(Code(code='SONE-725', title='已知标题')); session.commit()
     monkeypatch.setattr(scrape, 'scrape_group', lambda *a, **kw: pytest.fail('列表不能刮削'))
@@ -89,8 +91,10 @@ def test_listing_shows_complete_missing_failed_and_interrupted(env):
     for kind in ('poster', 'fanart', 'thumb'): target.with_name(f'{target.stem}-{kind}.jpg').write_bytes(b'image')
     with db() as session:
         session.add(MediaLink(code='SONE-725', source_path=str(original), link_path=str(target))); session.commit()
+    scrapeinventory.refresh_now()
     assert sources.list_videos()['items'][0]['status'] == 'complete'
     target.with_name(f'{target.stem}-poster.jpg').unlink()
+    scrapeinventory.refresh_now()
     assert sources.list_videos()['items'][0]['status'] == 'incomplete'
     sources.record_attempt([{'path': str(original)}], 'SONE-725', status='failed', error='网络失败')
     row = sources.list_videos()['items'][0]
@@ -111,6 +115,7 @@ def test_manual_codes_apply_per_video_and_parts_are_grouped(env):
     assert [x.part for x in groups['SONE-725']] == [1, 2]
     assert groups['SSIS-001'][0].path == third
     assert not list(root.parent.glob('library/**/*'))
+    scrapeinventory.refresh_now()
     assert sources.list_videos(keyword='unknown-A')['items'][0]['code'] == 'SONE-725'
     with pytest.raises(ValueError, match='已有手动刮削'): sources.start([{'path': str(first), 'code': 'SONE-725'}])
 
@@ -128,6 +133,7 @@ def test_manual_queue_rejects_unknown_invalid_outside_empty_and_downloading(env,
     with db() as session:
         session.add(Code(code='SONE-725', status=CodeStatus.DOWNLOADING)); session.commit()
     with pytest.raises(ValueError, match='下载中'): sources.start([{'path': str(known)}])
+    scrapeinventory.refresh_now()
     assert sources.list_videos(keyword='SONE-725')['items'][0]['status'] == 'downloading'
 
 
@@ -137,6 +143,7 @@ def test_queue_rejects_symlink_escape(env, tmp_path):
     link = root / 'SONE-725.mp4'
     try: link.symlink_to(outside)
     except OSError: pytest.skip('当前环境不允许建立符号链接')
+    scrapeinventory.refresh_now()
     assert sources.list_videos()['total'] == 0
     with pytest.raises(ValueError): sources.start([{'path': str(link)}])
 
@@ -240,12 +247,138 @@ def test_source_api_auth_and_invalid_inputs(env):
     from app.api.endpoints.scrape import router
     root, _, _, _, _ = env
     original = video(root, 'unknown.mp4')
+    scrapeinventory.refresh_now()
     app = FastAPI(); app.include_router(router)
     client = TestClient(app)
     assert client.get('/scrape/videos').status_code == 401
+    assert client.post('/scrape/videos/refresh').status_code == 401
     assert client.post('/scrape/jobs', json={'items': [{'path': str(original), 'code': 'SONE-725'}]}).status_code == 401
     app.dependency_overrides[get_current_user] = lambda: 'admin'
     assert client.get('/scrape/videos').json()['data']['total'] == 1
     assert client.post('/scrape/jobs', json={'items': []}).status_code == 422
     assert client.post('/scrape/jobs', json={'items': [{'path': str(original)}]}).status_code == 400
     assert client.post('/scrape/jobs', json={'items': [{'path': str(original), 'code': 'SONE-725'}]}).json()['data']['running']
+
+
+def test_database_pagination_search_and_status_do_not_touch_disk(env, monkeypatch):
+    root, _, db, _, _ = env
+    original = video(root)
+    video(root, 'unknown.mkv')
+    scrapeinventory.refresh_now()
+    with db() as session:
+        session.add(Code(code='SONE-725', title='数据库标题')); session.commit()
+    def forbidden(*args, **kwargs):
+        pytest.fail('读取清单不能访问文件系统或重新解析文件')
+    with monkeypatch.context() as check:
+        check.setattr(Path, 'stat', forbidden)
+        check.setattr(Path, 'resolve', forbidden)
+        check.setattr(sources.os, 'walk', forbidden)
+        check.setattr(sources.mediafile, 'parse', forbidden)
+        check.setattr(scrapewatch, '_complete', forbidden)
+        assert sources.list_videos(size=1)['total'] == 2
+        assert len(sources.list_videos(size=1, page=2)['items']) == 1
+        assert sources.list_videos(keyword='数据库标题')['items'][0]['path'] == str(original)
+        assert sources.list_videos(status='unrecognized')['total'] == 1
+
+
+def test_inventory_survives_process_state_reset_and_syncs_file_changes(env, monkeypatch):
+    root, _, _, _, _ = env
+    original = video(root)
+    scrapeinventory.refresh_now()
+    monkeypatch.setattr(scrapeinventory, '_STATE', {'running': False, 'done': 0, 'files': 0, 'total': 0,
+        'current': '', 'errors': [], 'finished_at': ''})
+    second = video(root, 'SONE-726.mp4')
+    assert sources.list_videos()['total'] == 1  # 新文件只在扫描时纳入。
+    assert not sources.list_videos()['needs_refresh']
+    scrapeinventory.refresh_now()
+    assert sources.list_videos()['total'] == 2
+    original.unlink()
+    assert sources.list_videos()['total'] == 2  # 页面查询不会自动扫盘。
+    scrapeinventory.refresh_now()
+    result = sources.list_videos()
+    assert result['total'] == 1 and result['items'][0]['path'] == str(second)
+
+
+def test_offline_root_preserves_inventory_and_reports_error(env, monkeypatch):
+    root, _, _, _, _ = env
+    video(root)
+    scrapeinventory.refresh_now()
+    def unavailable(path):
+        raise OSError('挂载不可访问')
+    monkeypatch.setattr(sources, '_root', unavailable)
+    scrapeinventory.refresh_now()
+    result = sources.list_videos()
+    assert result['total'] == 1
+    assert not result['roots'][0]['available'] and '挂载不可访问' in result['warnings'][0]
+
+
+def test_partial_directory_scan_does_not_drop_unseen_rows(env, monkeypatch):
+    root, _, _, _, _ = env
+    video(root); video(root, 'SONE-726.mp4')
+    scrapeinventory.refresh_now()
+    def partial(folder, *, onerror, **kwargs):
+        onerror(PermissionError(13, 'permission denied', str(root / 'subdir')))
+        yield str(root), [], ['SONE-725.mp4']
+    monkeypatch.setattr(scrapeinventory.os, 'walk', partial)
+    scrapeinventory.refresh_now()
+    result = sources.list_videos()
+    assert result['total'] == 2 and result['warnings']
+
+
+def test_overlapping_roots_share_video_without_duplicate_rows(env):
+    root, settings, _, _, _ = env
+    child = root / 'nested'; child.mkdir()
+    original = video(child)
+    settings.scrape_source_dirs = f'{root},{child}'
+    scrapeinventory.refresh_now()
+    assert sources.list_videos()['total'] == 1
+    assert sources.list_videos(root=str(child))['items'][0]['path'] == str(original)
+    settings.scrape_source_dirs = str(child)
+    assert sources.list_videos()['total'] == 1
+    settings.scrape_source_dirs = ''
+    assert sources.list_videos()['total'] == 0 and original.exists()
+
+
+def test_old_scan_cannot_overwrite_new_scrape_result(env):
+    root, _, db, _, _ = env
+    original = video(root)
+    scrapeinventory.refresh_now()
+    with db() as session:
+        row = session.get(ScrapeSourceVideo, sources.key(original))
+        old = row.to_dict()
+        old['indexed_at'] = datetime.now() - timedelta(minutes=10)
+        old['artifact_status'] = 'pending'
+        row.artifact_status = 'complete'
+        row.links = ['/library/new.mp4']
+        row.indexed_at = datetime.now()
+        session.commit()
+    scrapeinventory._flush(sources.key(root), [old], old['indexed_at'])
+    assert sources.list_videos()['items'][0]['status'] == 'complete'
+    assert sources.list_videos()['items'][0]['links'] == ['/library/new.mp4']
+
+
+def test_attempt_updates_are_visible_without_rescan(env, monkeypatch):
+    root, _, _, _, _ = env
+    original = video(root, 'unknown.mp4')
+    scrapeinventory.refresh_now()
+    sources.record_attempt([{'path': str(original)}], 'SONE-725', status='failed', error='请求失败')
+    monkeypatch.setattr(scrapeinventory.os, 'walk', lambda *a, **kw: pytest.fail('任务状态更新后不应扫目录'))
+    row = sources.list_videos()['items'][0]
+    assert row['code'] == 'SONE-725' and row['status'] == 'failed' and row['error'] == '请求失败'
+
+
+def test_direct_scrape_updates_cached_artifacts_without_directory_scan(env, monkeypatch):
+    root, _, db, _, _ = env
+    original = video(root)
+    scrapeinventory.refresh_now()
+    with db() as session:
+        session.add(Code(code='SONE-725')); session.commit()
+    monkeypatch.setattr(scrape, 'load_group_meta', lambda *a, **kw: {'title': '标题'})
+    monkeypatch.setattr(scrape, '_cover_bytes', lambda *a, **kw: b'')
+    from app.services import medialink
+    monkeypatch.setattr(medialink, '_fetch_subtitle_quietly', lambda *a: None)
+    monkeypatch.setattr(medialink, '_generate_review_quietly', lambda *a: None)
+    monkeypatch.setattr(scrapeinventory.os, 'walk', lambda *a, **kw: pytest.fail('刮削后只更新对应记录'))
+    assert scrape.scrape_file(original, fetch_meta=False).ok
+    row = sources.list_videos()['items'][0]
+    assert row['links'] and row['status'] == 'incomplete'  # 无封面时仍准确显示产物缺项。
