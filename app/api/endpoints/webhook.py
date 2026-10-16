@@ -196,6 +196,10 @@ async def emby_webhook(request: Request):
         return ResponseEntity.fail("请求体为空或不是合法 JSON", code=400)
 
     event = _pick(data, "Event", "event", "NotificationType", "notification_type").lower()
+    from app.services import playback
+    if event.replace("_", ".") in playback.EVENTS:
+        result = await run_in_threadpool(playback.webhook, data)
+        return ResponseEntity.ok(result)
     if event and event.replace("_", ".") not in DELETE_EVENTS:
         logger.info(f"Emby 回调事件为 {event}，非删除事件，忽略")
         return ResponseEntity.ok({"ignored": True, "event": event})

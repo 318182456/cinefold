@@ -74,6 +74,35 @@ class ScrapeRequest(BaseModel):
     target_dir: str = ""
 
 
+class WatermarkPreviewRequest(BaseModel):
+    config: dict = {}
+    kind: str = "poster"
+    show_all: bool = False
+    # 真实影片的预览只按文件名判断标记，不访问磁盘或网络。
+    filename: str = "SONE-725-C-4K.mp4"
+    code: str = "SONE-725"
+
+
+@router.post("/watermark-preview")
+def watermark_preview(body: WatermarkPreviewRequest, current_user: str = Depends(get_current_user)):
+    import base64
+    from io import BytesIO
+    from PIL import Image
+    from app.modules.scrape import watermark
+    error = watermark.validate(body.config)
+    if error or body.kind not in ("poster", "thumb", "fanart"):
+        return ResponseEntity.fail(error or "无效的图片类型", code=400)
+    image = Image.new("RGB", (400, 600) if body.kind == "poster" else (600, 400), "#182330")
+    buffer = BytesIO()
+    image.save(buffer, format="JPEG")
+    image.close()
+    info = mediafile.parse(Path(body.filename))
+    info.code = get_true_code(body.code) or info.code
+    detected = list(watermark.BADGES) if body.show_all else watermark.labels(info)
+    rendered = watermark.render(buffer.getvalue(), detected, body.config, body.kind)
+    return ResponseEntity.ok({"image": "data:image/jpeg;base64," + base64.b64encode(rendered).decode("ascii"), "labels": detected})
+
+
 def _explain_missing(target: Path) -> str:
     """路径不存在时，指出到底断在哪一层。
 
@@ -131,6 +160,8 @@ def _result_dict(result: scrape_service.ScrapeResult) -> dict:
         "nfo_written": result.nfo_written,
         "images_written": result.images_written,
         "skipped": result.skipped,
+        "warnings": result.warnings,
+        "sources": result.sources,
         "error": result.error,
     }
 
@@ -218,7 +249,8 @@ def _preview_sync(body: ScrapeRequest) -> dict:
                 "subbed": info.subbed,
                 "uncensored": info.uncensored,
                 "target": str(target),
-                "has_meta": bool(meta),
+                "has_meta": bool(meta.get("title") or meta.get("cn_title")),
+                "sources": meta.get("_sources", []),
                 # NFO 的实际内容与图片地址。让用户直接看到会写进去什么，
                 # 而不是只看到文件名 —— 元数据抓得对不对，看内容才知道。
                 # 预告片不会被刮，列出这些只会误导
@@ -263,7 +295,8 @@ def _preview_code_only(code: str, body: ScrapeRequest, settings) -> dict:
         "subbed": False,
         "uncensored": False,
         "target": str(target),
-        "has_meta": bool(meta),
+        "has_meta": bool(meta.get("title") or meta.get("cn_title")),
+        "sources": meta.get("_sources", []),
         "outputs": _planned_outputs(target, settings, images),
         "nfo": _preview_nfo(meta, info, target),
         "images": images,

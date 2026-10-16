@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import threading
+import hashlib
 from datetime import datetime
 from pathlib import PureWindowsPath
 
@@ -68,6 +69,7 @@ def _sync(settings) -> dict:
                 continue
             user_data = item.get("UserData") or {}
             snapshots.append(EmbyWatch(user_id=settings.emby_user_id, item_id=str(item["Id"]), code=code,
+                favorite=bool(user_data.get("IsFavorite")), server=hashlib.sha256(settings.emby_url.rstrip('/').encode()).hexdigest(),
                 played=bool(user_data.get("Played")), play_count=user_data.get("PlayCount") or 0,
                 position_ticks=user_data.get("PlaybackPositionTicks") or 0, runtime_ticks=item.get("RunTimeTicks") or 0,
                 last_played=user_data.get("LastPlayedDate"), sync_time=datetime.now()))
@@ -76,6 +78,45 @@ def _sync(settings) -> dict:
         session.execute(delete(EmbyWatch))
         session.add_all(snapshots)
     return {"matched": matched, "ignored": ignored, "total": len(items)}
+
+
+def set_user_state(code: str, item_id: str, action: str) -> dict:
+    """用户点击后才写入 Emby；只允许操作已同步到所选用户的影片。"""
+    from urllib.parse import quote
+    settings = get_settings()
+    if not settings.emby_url or not settings.emby_api_key or not settings.emby_user_id:
+        raise ValueError("请先配置 Emby 并选择观看统计用户")
+    if action not in ('favorite', 'unfavorite', 'played', 'unplayed'):
+        raise ValueError("不支持的 Emby 操作")
+    if not _lock.acquire(blocking=False):
+        raise ValueError("Emby 正在同步或更新，请稍后重试")
+    try:
+        with session_scope() as session:
+            row = session.get(EmbyWatch, (settings.emby_user_id, item_id))
+            server = hashlib.sha256(settings.emby_url.rstrip('/').encode()).hexdigest()
+            if row is None or row.code != code or row.server != server:
+                raise ValueError("影片尚未与当前 Emby 用户关联，请先同步 Emby")
+            resource = 'FavoriteItems' if action in ('favorite', 'unfavorite') else 'PlayedItems'
+            method = 'POST' if action in ('favorite', 'played') else 'DELETE'
+            url = f"{settings.emby_url.rstrip('/')}/emby/Users/{quote(settings.emby_user_id, safe='')}/{resource}/{quote(item_id, safe='')}"
+            with httpx.Client(timeout=20, trust_env=False) as client:
+                response = client.request(method, url, headers={'X-Emby-Token': settings.emby_api_key})
+                response.raise_for_status()
+                data = response.json() if response.content else {}
+            if not isinstance(data, dict):
+                raise RuntimeError('Emby 返回格式无效')
+            if resource == 'FavoriteItems':
+                row.favorite = bool(data.get('IsFavorite', action == 'favorite'))
+            else:
+                row.played = bool(data.get('Played', action == 'played'))
+            for remote, local in (('PlaybackPositionTicks', 'position_ticks'), ('PlayCount', 'play_count'), ('LastPlayedDate', 'last_played')):
+                if remote in data:
+                    setattr(row, local, data[remote])
+            row.sync_time = datetime.now()
+            session.flush()
+            return row.to_dict()
+    finally:
+        _lock.release()
 
 
 def scheduled_sync() -> int:

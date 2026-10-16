@@ -13,7 +13,7 @@ from app.services.rules import matches, terms
 
 
 def library_items(*, keyword: str = "", conditions: dict | None = None, collection_id: int | None = None,
-                  favorite: bool = False, watch_later: bool = False, unseen: bool = False,
+                  favorite: bool = False, emby_favorite: bool = False, watch_later: bool = False, unseen: bool = False,
                   sort: str = "recent", page: int = 1, size: int = 30, include_skipped: bool = False) -> dict:
     conditions = conditions or {}
     collection_conditions = {}
@@ -48,6 +48,8 @@ def library_items(*, keyword: str = "", conditions: dict | None = None, collecti
                 continue
             pref = prefs.get(row.code, {})
             watch = watches.get(row.code, [])
+            if emby_favorite and not any(w.get("favorite") for w in watch):
+                continue
             if favorite and not pref.get("favorite") or watch_later and not pref.get("watch_later"):
                 continue
             if pref.get("skipped") and not include_skipped:

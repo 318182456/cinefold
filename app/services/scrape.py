@@ -21,6 +21,8 @@
 from __future__ import annotations
 
 import os
+import threading
+from functools import wraps
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -39,6 +41,16 @@ from app.utils.mediafile import MediaFileInfo
 # 图片下载的并发数。与 cache_lack_photos 保持一致 —— 图源对单 IP
 # 的连接数敏感，开大反而被限速
 IMAGE_WORKERS = 5
+_SCRAPE_LOCK = threading.RLock()
+
+
+def _serialized(fn):
+    @wraps(fn)
+    def run(*args, **kwargs):
+        # 定时扫描、下载完成与手动入口共用，防止同时写同一份 NFO。
+        with _SCRAPE_LOCK:
+            return fn(*args, **kwargs)
+    return run
 
 # 图源要带 Referer 才给图，防盗链。与 services.cache_lack_photos 同源
 _IMAGE_HEADERS = {
@@ -59,6 +71,8 @@ class ScrapeResult:
     nfo_written: int = 0
     images_written: int = 0
     skipped: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+    sources: list[dict] = field(default_factory=list)
     error: str = ""
 
     @property
@@ -87,7 +101,11 @@ def _load_meta(code: str, fetch: bool = True) -> dict:
     if detail:
         _save_meta(code, detail)
         _translate_quietly(code)
-    return _read_meta(code)
+    meta = _read_meta(code)
+    sources = detail.get("_sources", []) or getattr(detail, "sources", [])
+    if sources:
+        meta["_sources"] = sources
+    return meta
 
 
 def _read_meta(code: str) -> dict:
@@ -369,6 +387,7 @@ def scrape_file(
     )
 
 
+@_serialized
 def scrape_group(
     code: str,
     items: list[MediaFileInfo],
@@ -394,12 +413,15 @@ def scrape_group(
         return result
 
     meta = load_group_meta(code, playable, fetch=fetch_meta)
-    if not meta:
+    result.sources = meta.get("_sources", [])
+    if not (meta.get("title") or meta.get("cn_title")):
         result.error = f"取不到元数据: {code}"
         return result
 
     # 图片对一个番号只准备一份，各分集共用同一份内容
     cover = _cover_bytes(meta, code)
+    if not cover:
+        result.warnings.append("未获取到封面，请检查图源和网络后补刮")
     still_urls = [
         u.strip()
         for u in (meta.get("still_photo") or "").split(",")
@@ -412,6 +434,7 @@ def scrape_group(
 
     total = len([i for i in playable if i.part > 0])
     linked_items = []
+    failures = []
     for info in playable:
         info_total = total
         target = _target_path(meta, info, target_dir)
@@ -419,16 +442,22 @@ def scrape_group(
         ok, note = _make_link(info.path, target)
         if not ok:
             result.skipped.append(note)
+            failures.append(note)
             logger.warning(f"[{code}] {note}")
             continue
-        result.links.append(target)
-        linked_items.append(info)
-
+        from app.modules.scrape import watermark
+        marked_images = watermark.apply(image_set, info, getattr(settings, "scrape_watermark", {}))
         written = scrape_images.write_images(
-            target, image_set, overwrite=settings.scrape_overwrite
+            target, marked_images, overwrite=settings.scrape_overwrite
         )
         if written:
             result.images_written += 1
+        missing_images = [kind for kind in ("poster", "fanart", "thumb") if not target.with_name(f"{target.stem}-{kind}.jpg").is_file()]
+        if missing_images:
+            note = f"图片产物缺失（{', '.join(missing_images)}）: {target.name}"
+            result.warnings.append(note)
+            if getattr(settings, "scrape_require_images", False):
+                failures.append(note)
 
         data = build_nfo_data(
             code, meta, info,
@@ -440,12 +469,45 @@ def scrape_group(
             target.with_suffix(".nfo"), data, overwrite=settings.scrape_overwrite
         ):
             result.nfo_written += 1
+        else:
+            from app.modules.scrape import local
+            if settings.scrape_overwrite or not local.read(target.with_suffix(".nfo"), code).get("title"):
+                note = f"NFO 未能写入或已有 NFO 无效: {target.with_suffix('.nfo')}"
+                failures.append(note)
+                result.skipped.append(note)
+                continue
+        result.links.append(target)
+        linked_items.append(info)
 
+    result.error = "；".join(failures)
+    registered_new = False
     if result.links:
-        _register(code, linked_items, result)
+        try:
+            registered_new = bool(_register(code, linked_items, result))
+        except Exception:
+            logger.exception(f"[{code}] 入库登记失败")
+            failures.append("硬链接关联或入库状态登记失败，请重试；源文件与产物保留")
+    if failures:
+        result.error = "；".join(failures)
+    if result.ok and (result.nfo_written or registered_new) and getattr(settings, "scrape_notify", False):
+        try:
+            from html import escape
+            from app.modules.notify import get_notifiers
+            notifiers = get_notifiers()
+            sent = 0
+            text = f"刮削入库完成：{escape(code)}\n{escape(str(meta.get('cn_title') or meta.get('title') or ''))}\n{len(result.links)} 个影片文件"
+            for notifier in notifiers:
+                try:
+                    sent += bool(notifier.send_text_message(text))
+                except Exception:
+                    continue
+            if sent < len(notifiers):
+                result.warnings.append("入库完成，部分通知渠道发送失败")
+        except Exception:
+            result.warnings.append("入库完成，但通知发送失败")
 
     logger.info(
-        f"[{code}] 刮削完成: {len(result.links)} 个产物, "
+        f"[{code}] 刮削{'未完成' if result.error else '完成'}: {len(result.links)} 个产物, "
         f"NFO {result.nfo_written}, 图片 {result.images_written}"
         + (f", 跳过 {len(result.skipped)}" if result.skipped else "")
     )
@@ -510,7 +572,7 @@ def _extra_genres(info: MediaFileInfo) -> list[str]:
     return out
 
 
-def _register(code: str, items: list[MediaFileInfo], result: ScrapeResult) -> None:
+def _register(code: str, items: list[MediaFileInfo], result: ScrapeResult) -> bool:
     """把产物登记进 media_link，并触发状态流转、字幕、看点。
 
     不走 medialink.register_scrape：那个函数要扫整个媒体库按 inode 反查
@@ -528,23 +590,22 @@ def _register(code: str, items: list[MediaFileInfo], result: ScrapeResult) -> No
     from app.services.watchdir import _register as write_link
 
     linked = list(zip(items, result.links))
+    from sqlalchemy import select
+    from app.database.models import MediaLink
+    registered_new = False
     with session_scope() as session:
         for info, link in linked:
-            try:
-                write_link(code, str(info.path), str(link), session=session)
-            except Exception as exc:
-                logger.warning(f"[{code}] 登记硬链接失败 {link}: {exc}")
+            registered_new |= session.scalar(select(MediaLink.link_path).where(MediaLink.link_path == str(link))) is None
+            write_link(code, str(info.path), str(link), session=session)
+        if not result.error:
+            medialink.mark_completed(code, session=session)
 
     logger.info(f"[{code}] 已登记 {len(linked)} 条硬链接关联")
 
-    # 这三件事各自失败都不该影响刮削结果，逐个吞异常。
-    # medialink 里那两个 _quietly 函数已经是这个语义，直接借用
-    try:
-        medialink.mark_completed(code)
-    except Exception as exc:
-        logger.warning(f"[{code}] 更新入库状态失败: {exc}")
+    # 字幕和看点是附加处理，失败不回滚已登记的产物。
     medialink._fetch_subtitle_quietly(code)
     medialink._generate_review_quietly(code)
+    return registered_new
 
 
 def scrape_dir(

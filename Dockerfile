@@ -76,7 +76,7 @@ ENV MALLOC_ARENA_MAX=2 \
 # 被移除了。curl 只给 HEALTHCHECK 用，换成 python 探测会拖慢健康检查
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        nginx supervisor ca-certificates tzdata curl \
+        nginx supervisor ca-certificates tzdata curl fonts-wqy-zenhei \
     && ln -sf /usr/share/zoneinfo/$TZ /etc/localtime \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean

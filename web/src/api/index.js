@@ -197,6 +197,7 @@ export const runScrape = (payload) =>
   http.post('/scrape/run', payload, { timeout: 600000 })
 // 命名模板可用的字段清单，兼带 Jinja2 是否可用
 export const getScrapeFields = () => http.get('/scrape/fields')
+export const previewScrapeWatermark = (payload) => http.post('/scrape/watermark-preview', payload)
 
 // ---------------------------------------------------------------- 榜单
 export const getRank = (rankType = '', limit = 120) =>

@@ -11,6 +11,7 @@ import { useToast } from '@/composables/useToast'
 import { useConfigStore } from '@/stores/config'
 import ConfigField from '@/components/ConfigField.vue'
 import LoadingBlock from '@/components/LoadingBlock.vue'
+import WatermarkPreview from '@/components/WatermarkPreview.vue'
 
 const toast = useToast()
 const configStore = useConfigStore()
@@ -58,9 +59,9 @@ const medialinkHooks = computed(() => [
   },
   {
     key: 'emby',
-    title: '删除联动回调',
+    title: 'Emby 事件回调',
     url: `${medialinkBase.value}/api/v1/webhook/emby`,
-    hint: 'Emby / Jellyfin 的 Webhook 插件，事件选 item.remove',
+    hint: '删除联动选择 item.remove。开启播放记录后，还可选择 playback.start/stop/pause/unpause/progress，保留原始 Event、Item、User、Device/Session、PlayState 字段',
   },
 ])
 
@@ -218,6 +219,8 @@ const GROUPS = [
           { k: 'emby_url', label: '地址' },
           { k: 'emby_api_key', label: 'API Key', t: 'password' },
           { k: 'emby_user_id', label: '观看统计用户 ID', hint: '媒体库页面可选择用户；同步其观看进度与播放次数' },
+          { k: 'playback_tracking_enabled', label: '持续记录播放与日历', t: 'bool', hint: '每分钟只读 Emby 会话，不需要播放报告插件；从开启后记录，留空用户 ID 时记录所有用户。短于一分钟的播放可能漏记，可额外配置播放 Webhook 补充' },
+          { k: 'playback_timezone', label: '播放日历时区', ph: 'Asia/Shanghai', hint: '按此时区分配每天的观看时间，跨午夜自动拆分' },
         ],
       },
       {
@@ -314,12 +317,56 @@ const GROUPS = [
         ],
       },
       {
+        title: '自动扫描与抓取等待',
+        fields: [
+          { k: 'scrape_source_dirs', label: '下载源目录', t: 'textarea', hint: '仅 builtin 生效，多个目录用逗号分隔。文件连续两轮稳定且至少 2 分钟未修改后处理；跳过本项目标记为下载中的番号。手动下载的文件请完成后再放入。源文件保留，失败后重试。源目录与输出目录不能重叠' },
+          { k: 'scrape_scan_interval', label: '扫描间隔（分钟）', ph: '10' },
+          { k: 'scrape_scan_limit', label: '每轮最多处理番号数', ph: '10' },
+          { k: 'scrape_metadata_timeout', label: '元数据总等待上限（秒）', ph: '25', hint: '限制等待元数据的时间；翻译、下载图片和写文件另计' },
+          { k: 'scrape_merge_grace', label: '首次命中后的补全等待（秒）', ph: '3', hint: '仅对等待窗口内返回的数据应用优先级。调大可等待首选源补全' },
+          { k: 'scrape_notify', label: '入库完成通知', t: 'bool', hint: '使用已配置的通知渠道；完整登记成功后发送' },
+        ],
+      },
+      {
+        title: '来源优先级（按番号类型）',
+        hint: '从左到右优先；箭头可调整顺序，其余源按数据源页面排序补充。仅已启用、匹配番号规则的详情源参与。JavLibrary 当前仅用于榜单，FreeJavBT 尚未接入详情；欧美无番号影片暂不支持自动识别',
+        fields: [['censored', '有码'], ['uncensored', '无码'], ['amateur', '素人'], ['fc2', 'FC2'], ['domestic', '国产']].map(([k, label]) => ({ k, label, group: 'scrape_source_priority', t: 'sources' })),
+      },
+      {
+        title: '来源优先级（按字段）',
+        hint: '字段首选无数据时按类型优先级补齐；未配置的字段沿用质量合并规则。已有资料仍只补空缺',
+        fields: [['title', '标题 / 原标题'], ['cn_title', '中文标题'], ['outline', '简介'], ['casts', '演员'], ['banner', '封面'], ['poster', '海报'], ['still_photo', '剧照'], ['genres', '标签'], ['star', '评分'], ['release_date', '发行日期'], ['duration', '时长'], ['publisher', '发行商'], ['producer', '片商'], ['series', '系列']].map(([k, label]) => ({ k, label, group: 'scrape_field_priority', t: 'sources' })),
+      },
+      {
+        title: '屏蔽来源（按字段）',
+        hint: '忽略指定源新返回的对应字段；保留数据库已有值',
+        fields: [['title', '标题 / 原标题'], ['cn_title', '中文标题'], ['outline', '简介'], ['casts', '演员'], ['banner', '封面'], ['poster', '海报'], ['still_photo', '剧照'], ['genres', '标签'], ['star', '评分']].map(([k, label]) => ({ k, label, group: 'scrape_field_exclude', t: 'sources' })),
+      },
+      {
+        title: '图片水印',
+        panel: 'watermark',
+        hint: '按明确的文件标记添加：破解、流出、无码、有码逐级覆盖。清晰度依据文件名中的 4K/8K/2160p/4320p；已有图片需开启重刮覆盖才改变',
+        fields: [
+          { k: 'enabled', group: 'scrape_watermark', label: '启用水印', t: 'bool' },
+          { k: 'targets', group: 'scrape_watermark', label: '作用图片', t: 'tags', suggestions: ['poster', 'thumb', 'fanart'] },
+          { k: 'types', group: 'scrape_watermark', label: '标记类型', t: 'tags', suggestions: ['sub', 'crack', 'leak', 'uncensored', 'censored', 'resolution'], hint: 'sub 字幕 / crack 破解 / leak 流出 / uncensored 无码 / censored 有码 / resolution 清晰度' },
+          { k: 'layout', group: 'scrape_watermark', label: '布局', t: 'select', options: ['stack', 'clockwise', 'counterclockwise'], hint: 'stack 堆叠 / clockwise 顺时针 / counterclockwise 逆时针' },
+          { k: 'corner', group: 'scrape_watermark', label: '起始位置', t: 'select', options: ['top_left', 'top_right', 'bottom_right', 'bottom_left'] },
+          { k: 'scale', group: 'scrape_watermark', label: '大小（短边比例）', hint: '0.02～0.2，默认 0.07' },
+          { k: 'offset_x', group: 'scrape_watermark', label: '横向边距比例', hint: '0～0.2' },
+          { k: 'offset_y', group: 'scrape_watermark', label: '纵向边距比例', hint: '0～0.2' },
+          { k: 'gap', group: 'scrape_watermark', label: '标记间距比例', hint: '0～0.1' },
+          ...[['sub', '字幕'], ['crack', '破解'], ['leak', '流出'], ['uncensored', '无码'], ['censored', '有码'], ['resolution', '4K / 8K']].map(([k, label]) => ({ k: `position_${k}`, group: 'scrape_watermark', label: `${label}固定位置`, t: 'select', options: ['auto', 'top_left', 'top_right', 'bottom_right', 'bottom_left'] })),
+        ],
+      },
+      {
         title: '产物内容',
         fields: [
           { k: 'scrape_overwrite', label: '重刮时覆盖', t: 'bool',
             hint: '关闭时只补缺失的，手改过的 NFO 与换过的封面不会被冲掉' },
           { k: 'scrape_still_limit', label: '剧照张数', t: 'number', ph: '5',
             hint: '落进影片旁的 extrafanart 目录。每张都要跨境下载，0 表示不下' },
+          { k: 'scrape_require_images', label: '严格校验图片', t: 'bool', hint: 'poster、thumb、fanart 任一缺失时不标记入库完成，自动扫描会重试' },
         ],
       },
     ],
@@ -790,6 +837,12 @@ async function load() {
   try {
     const data = await getConfig()
     Object.assign(form, data || {})
+    form.scrape_watermark = {
+      enabled: false, targets: 'poster,thumb', types: 'sub,crack,leak,uncensored,censored,resolution',
+      layout: 'stack', corner: 'top_left', scale: 0.07, offset_x: 0.015, offset_y: 0.015, gap: 0.01,
+      ...Object.fromEntries(['sub', 'crack', 'leak', 'uncensored', 'censored', 'resolution'].map(k => [`position_${k}`, 'auto'])),
+      ...(data?.scrape_watermark || {}),
+    }
   } catch (err) {
     toast.error(err.message)
   } finally {
@@ -1126,6 +1179,7 @@ onUnmounted(stopUpgradePoll)
           </div>
 
           <!-- 翻译降级链概览：把四张卡的配置状态汇总成一句话 -->
+          <WatermarkPreview v-if="section.panel === 'watermark' && activeGroup === 'scrape'" :config="form.scrape_watermark" />
           <template v-if="section.panel === 'translate-chain'">
             <div
               v-if="translateChain.length"

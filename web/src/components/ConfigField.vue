@@ -2,6 +2,7 @@
 import { computed } from 'vue'
 import TagInput from '@/components/TagInput.vue'
 import SortRuleInput from '@/components/SortRuleInput.vue'
+import ScrapeSourceInput from '@/components/ScrapeSourceInput.vue'
 
 const props = defineProps({
   field: { type: Object, required: true },
@@ -52,6 +53,7 @@ const value = computed({
       rows="3"
     />
 
+    <ScrapeSourceInput v-else-if="field.t === 'sources'" v-model="value" />
     <SortRuleInput v-else-if="field.t === 'sort'" v-model="value" />
 
     <TagInput

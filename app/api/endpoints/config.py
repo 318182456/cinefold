@@ -36,6 +36,16 @@ def get_config(current_user: str = Depends(get_current_user)):
 @router.post("/config")
 def save_config(body: ConfigRequest, current_user: str = Depends(get_current_user)):
     """保存配置。打码占位的字段会被跳过，避免把掩码写回去。"""
+    from app.modules.scrape.preferences import validate
+    error = validate(body.config or {})
+    if error:
+        return ResponseEntity.fail(error, code=400)
+    if "playback_timezone" in (body.config or {}):
+        from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+        try:
+            ZoneInfo(body.config["playback_timezone"])
+        except (ZoneInfoNotFoundError, ValueError, TypeError):
+            return ResponseEntity.fail("播放日历时区无效，例如 Asia/Shanghai", code=400)
     valid_keys = {f.name for f in fields(Settings)}
     updates: dict = {}
 
@@ -45,6 +55,8 @@ def save_config(body: ConfigRequest, current_user: str = Depends(get_current_use
         # 前端回传的掩码说明用户没改这一项
         if key in SENSITIVE_KEYS and isinstance(value, str) and set(value) == {"*"}:
             continue
+        if key == "scrape_source_dirs" and isinstance(value, str):
+            value = ",".join(line.strip() for line in value.replace("\r", "").split("\n") if line.strip())
         updates[key.upper()] = value
 
     if not updates:

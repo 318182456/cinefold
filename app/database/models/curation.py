@@ -68,6 +68,8 @@ class EmbyWatch(DBBase):
     item_id: Mapped[str] = mapped_column(String(128), primary_key=True)
     code: Mapped[str] = mapped_column(String(64), index=True)
     played: Mapped[bool] = mapped_column(Boolean, default=False)
+    favorite: Mapped[bool] = mapped_column(Boolean, default=False)
+    server: Mapped[str] = mapped_column(String(64), default="")
     play_count: Mapped[int] = mapped_column(Integer, default=0)
     position_ticks: Mapped[int] = mapped_column(BigInteger, default=0)
     runtime_ticks: Mapped[int] = mapped_column(BigInteger, default=0)

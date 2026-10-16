@@ -185,7 +185,7 @@ def test_skipped_part_does_not_shift_source_registration(tmp_path, monkeypatch):
     monkeypatch.setattr(scrape, "_cover_bytes", lambda *a: b"")
     monkeypatch.setattr(scrape, "_make_link", lambda source, target: (source == second, "冲突"))
     monkeypatch.setattr(scrape.scrape_images, "write_images", lambda *a, **k: {})
-    monkeypatch.setattr(scrape.nfo, "write", lambda *a, **k: False)
+    monkeypatch.setattr(scrape.nfo, "write", lambda *a, **k: True)
     recorded = []
     monkeypatch.setattr(scrape, "_register", lambda code, items, result: recorded.extend(i.path for i in items))
     result = scrape.scrape_group("ABS-001", [parse(first), parse(second)])

@@ -6,10 +6,8 @@ javbus 有剧照没评分，先到的那个决定了最终质量。
 
 刮削对字段完整度的要求比订阅高得多：订阅只需要标题和封面能在列表页
 显示，刮削的产物要长期躺在媒体库里给 Emby 读，缺演员缺系列就是永久缺。
-所以这里改成「全抓完再逐字段挑最好的」。
-
-代价是必须等最慢的站（first-wins 只等最快的）。只在刮削路径上用，
-订阅那条路仍走 get_code_detail —— 那边一天几百个番号，等不起。
+所以这里在总超时与首次命中后的补全窗口内合并结果，再逐字段挑选。
+订阅那条路仍走 get_code_detail。
 
 挑选规则按字段类型分四种：
     先到先得   日期、厂牌这类"有就够了"的，按站点优先级取第一个非空
@@ -21,10 +19,17 @@ from __future__ import annotations
 
 import re
 import time
-from concurrent.futures import ThreadPoolExecutor
+import threading
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 
 from loguru import logger
+
+# 超时只能停止等待，不能杀死正在请求网络的 Python 线程。
+# 共用有界线程池，避免连续失败时每轮再创建一批悬挂线程。
+_WORKERS = 6
+_POOL = ThreadPoolExecutor(max_workers=_WORKERS, thread_name_prefix="scrape-source")
+_SLOTS = threading.BoundedSemaphore(_WORKERS)
 
 # 各字段的挑选策略。没列出的字段按 first 处理
 #
@@ -81,6 +86,13 @@ class SourceResult:
     detail: dict | None = None
     elapsed: float = 0.0
     error: str = ""
+
+
+class MetadataResult(dict):
+    """空结果仍保持 false，但可携带失败站点诊断。"""
+    def __init__(self, sources):
+        super().__init__()
+        self.sources = sources
 
 
 METADATA_FIELDS = {
@@ -174,10 +186,32 @@ def merge_details(results: list[SourceResult], code: str = "") -> dict:
     # 看出该去哪个源查，否则只能一个站一个站试
     origin: dict[str, str] = {}
 
+    from app.core.config import get_settings
+    from app.modules.scrape import preferences
+    settings = get_settings()
+    priorities = getattr(settings, "scrape_field_priority", {})
+    excluded = getattr(settings, "scrape_field_exclude", {})
+    priorities = priorities if isinstance(priorities, dict) else {}
+    excluded = excluded if isinstance(excluded, dict) else {}
+    global_priority = getattr(settings, "scrape_source_priority", {})
+    global_explicit = isinstance(global_priority, dict) and bool(global_priority.get(preferences.category(code)))
+
     for result in results:
         if not result.detail:
             continue
-        for field, value in clean_detail(result.detail, code).items():
+        detail = clean_detail(result.detail, code)
+        if priorities.get("cn_title") and _has_chinese(detail.get("title")):
+            detail.setdefault("cn_title", detail["title"])
+        for field, value in detail.items():
+            if result.site in preferences.sites(excluded.get(field, "")):
+                continue
+            priority = preferences.sites(priorities.get(field, "")) or ([r.site for r in results] if global_explicit else [])
+            if priority:
+                # 显式字段优先级胜过长度等启发式；未列出的源按全局顺序兜底。
+                if field not in merged or result.site in priority and (origin[field] not in priority or priority.index(result.site) < priority.index(origin[field])):
+                    merged[field] = value
+                    origin[field] = result.site
+                continue
             if _better(field, merged.get(field), value):
                 merged[field] = value
                 origin[field] = result.site
@@ -211,11 +245,11 @@ def base_code(code: str) -> str:
     return ""
 
 
-def fetch_merged(code: str, timeout: float = 25.0) -> dict:
+def fetch_merged(code: str, timeout: float | None = None) -> dict:
     """抓全部可用站点并合并。抓不到返回空字典。
 
-    与 get_code_detail 的区别是不提前返回 —— 全部站点都要等，
-    因为要比较字段质量。超时的站点自然被排除（它的 future 拿不到结果）。
+    首次命中后保留可配置的补全窗口，总等待不超过 timeout。
+    超时仅停止等待，底层请求靠自身的网络超时结束。
 
     带版本后缀的番号（START-025-C）在各站都查不到，抓空后自动退回
     基础番号再试一次 —— 中文字幕版与原版的元数据本来就是同一份，
@@ -224,22 +258,31 @@ def fetch_merged(code: str, timeout: float = 25.0) -> dict:
     if not code:
         return {}
 
+    from app.core.config import get_settings
+    if timeout is None:
+        timeout = max(1, min(300, getattr(get_settings(), "scrape_metadata_timeout", 25)))
+    started = time.perf_counter()
+
     merged = _fetch_one(code, timeout)
     if merged:
         return merged
 
     fallback = base_code(code)
-    if fallback:
+    remaining = timeout - (time.perf_counter() - started)
+    if fallback and remaining > 0:
         logger.info(f"[{code}] 各源都没有，退回基础番号 {fallback} 再试")
-        return _fetch_one(fallback, timeout)
-    return {}
+        return _fetch_one(fallback, remaining)
+    return merged
 
 
 def _fetch_one(code: str, timeout: float) -> dict:
     """按一个番号抓全部站点并合并。"""
     from app.modules import ladysite
+    from app.core.config import get_settings
 
-    sites = ladysite._sites_for_code(code)
+    from app.modules.scrape import preferences
+    settings = get_settings()
+    sites = preferences.ordered(code, ladysite._sites_for_code(code), getattr(settings, "scrape_source_priority", {}))
     if not sites:
         logger.warning(f"[{code}] 没有可用数据源，检查数据源开关与番号规则")
         return {}
@@ -247,34 +290,86 @@ def _fetch_one(code: str, timeout: float) -> dict:
     logger.info(f"[{code}] 多源刮削，检索 {len(sites)} 个源：{', '.join(sites)}")
     started = time.perf_counter()
 
+    fetch_detail = ladysite._fetch_detail
     def fetch(site: str) -> SourceResult:
         begin = time.perf_counter()
         try:
-            detail = ladysite._fetch_detail(site, code)
+            detail = fetch_detail(site, code)
             return SourceResult(site, detail, time.perf_counter() - begin)
         except Exception as exc:
             return SourceResult(site, None, time.perf_counter() - begin, str(exc))
+        finally:
+            _SLOTS.release()
 
-    workers = min(len(sites), ladysite.MAX_PARALLEL_SITES)
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = [pool.submit(fetch, name) for name in sites]
-        results: list[SourceResult] = []
-        for future in futures:
+    workers = min(len(sites), ladysite.MAX_PARALLEL_SITES, _WORKERS)
+    schedule = list(range(len(sites)))
+    # 中文补充源不应因为前六个站都卡住而永远没有启动机会。
+    # 仅调整请求启动顺序，字段选择仍按用户配置的全局顺序。
+    if "airav" in sites and sites.index("airav") >= workers and workers > 1:
+        index = sites.index("airav")
+        schedule.remove(index)
+        schedule.insert(workers - 1, index)
+    deadline = started + max(0, timeout)
+    grace = max(0, min(30, getattr(get_settings(), "scrape_merge_grace", 3)))
+    merge_deadline = deadline
+    pending, completed, reports = {}, {}, {}
+    next_index = 0
+
+    def submit_available():
+        nonlocal next_index
+        while next_index < len(sites) and len(pending) < workers and time.perf_counter() < merge_deadline:
+            if not _SLOTS.acquire(blocking=False):
+                break
+            index = schedule[next_index]
             try:
-                # 单站超时不拖垮整轮：剩余预算耗尽后后面的站直接算超时
-                remaining = max(0.5, timeout - (time.perf_counter() - started))
-                results.append(future.result(timeout=remaining))
-            except Exception as exc:
-                logger.debug(f"[{code}] 某个源未在预算内返回: {exc}")
+                future = _POOL.submit(fetch, sites[index])
+            except Exception:
+                _SLOTS.release()
+                raise
+            # 尚未开始的任务被取消时，fetch 的 finally 不会执行。
+            future.add_done_callback(lambda f: _SLOTS.release() if f.cancelled() else None)
+            pending[future] = index
+            next_index += 1
 
+    submit_available()
+    while pending:
+        remaining = merge_deadline - time.perf_counter()
+        if remaining <= 0:
+            break
+        ready, _ = wait(pending, timeout=remaining, return_when=FIRST_COMPLETED)
+        if not ready:
+            break
+        for future in ready:
+            index = pending.pop(future)
+            result = future.result()
+            cleaned = clean_detail(result.detail or {}, code)
+            if cleaned:
+                completed[index] = SourceResult(result.site, cleaned, result.elapsed)
+                merge_deadline = min(merge_deadline, time.perf_counter() + grace)
+                status = "hit"
+            else:
+                status = "error" if result.error else "empty"
+            reports[index] = {"site": result.site, "status": status, "elapsed": round(result.elapsed, 3)}
+            logger.info(f"[{code}] {result.site}: {status}，{result.elapsed:.2f}s")
+        submit_available()
+
+    reason = "merge_window" if merge_deadline < deadline else "timeout"
+    for future, index in pending.items():
+        future.cancel()
+        reports[index] = {"site": sites[index], "status": reason, "elapsed": round(time.perf_counter() - started, 3)}
+    for index in schedule[next_index:]:
+        reports[index] = {"site": sites[index], "status": "not_started", "elapsed": 0}
+    results = [completed[index] for index in sorted(completed)]
     hit = [r for r in results if r.detail]
     logger.info(
         f"[{code}] {len(hit)}/{len(sites)} 个源有结果，"
         f"耗时 {time.perf_counter() - started:.1f}s"
     )
     if not hit:
-        return {}
-    return merge_details(results, code)
+        return MetadataResult([reports[index] for index in sorted(reports)])
+    merged = merge_details(results, code)
+    merged["_sources"] = [reports[index] for index in sorted(reports)]
+    return merged
 
 
 def pick_best_image(candidates: list[tuple[str, bytes]]) -> tuple[str, bytes]:

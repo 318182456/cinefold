@@ -109,6 +109,8 @@ class Settings:
     emby_url: str = ""
     emby_api_key: str = ""
     emby_user_id: str = ""
+    playback_tracking_enabled: bool = False
+    playback_timezone: str = "Asia/Shanghai"
     discord_webhook_url: str = ""
     zspace_url: str = ""
     zspace_cookie: str = ""
@@ -331,6 +333,17 @@ class Settings:
     scrape_overwrite: bool = False
     # 落几张剧照到 extrafanart。0 表示不下剧照（每张都要跨境下载）
     scrape_still_limit: int = 5
+    scrape_metadata_timeout: int = 25
+    scrape_merge_grace: int = 3
+    scrape_source_dirs: str = ""
+    scrape_scan_interval: int = 10
+    scrape_scan_limit: int = 10
+    scrape_notify: bool = True
+    scrape_require_images: bool = False
+    scrape_source_priority: dict = field(default_factory=dict)
+    scrape_field_priority: dict = field(default_factory=dict)
+    scrape_field_exclude: dict = field(default_factory=dict)
+    scrape_watermark: dict = field(default_factory=dict)
 
     # --- AI 影评 ---
     # 刮削登记完成后按元数据生成看点，写进 NFO 与 Emby 简介。
@@ -510,6 +523,8 @@ def load_settings() -> Settings:
         emby_url=_env("EMBY_URL"),
         emby_api_key=_env("EMBY_API_KEY"),
         emby_user_id=_env("EMBY_USER_ID"),
+        playback_tracking_enabled=_env_bool("PLAYBACK_TRACKING_ENABLED", False),
+        playback_timezone=_env("PLAYBACK_TIMEZONE", "Asia/Shanghai"),
         discord_webhook_url=_env("DISCORD_WEBHOOK_URL"),
         zspace_url=_env("ZSPACE_URL"),
         zspace_cookie=_env("ZSPACE_COOKIE"),
@@ -636,6 +651,17 @@ def load_settings() -> Settings:
         scrape_category=_env("SCRAPE_CATEGORY", "日本AV").strip("'\""),
         scrape_overwrite=_env_bool("SCRAPE_OVERWRITE", False),
         scrape_still_limit=_env_int("SCRAPE_STILL_LIMIT", 5),
+        scrape_metadata_timeout=_env_int("SCRAPE_METADATA_TIMEOUT", 25),
+        scrape_merge_grace=_env_int("SCRAPE_MERGE_GRACE", 3),
+        scrape_source_dirs=_env("SCRAPE_SOURCE_DIRS"),
+        scrape_scan_interval=_env_int("SCRAPE_SCAN_INTERVAL", 10),
+        scrape_scan_limit=_env_int("SCRAPE_SCAN_LIMIT", 10),
+        scrape_notify=_env_bool("SCRAPE_NOTIFY", True),
+        scrape_require_images=_env_bool("SCRAPE_REQUIRE_IMAGES", False),
+        scrape_source_priority=_env_json("SCRAPE_SOURCE_PRIORITY", {}),
+        scrape_field_priority=_env_json("SCRAPE_FIELD_PRIORITY", {}),
+        scrape_field_exclude=_env_json("SCRAPE_FIELD_EXCLUDE", {}),
+        scrape_watermark=_env_json("SCRAPE_WATERMARK", {}),
 
         review_enabled=_env_bool("REVIEW_ENABLED", False),
         review_provider=_env("REVIEW_PROVIDER", "auto"),

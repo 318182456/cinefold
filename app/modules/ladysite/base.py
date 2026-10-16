@@ -192,7 +192,7 @@ class SiteClient:
                 time.sleep(wait + random.uniform(0, 0.3))
             state[1] = time.time()
 
-    def get(self, path: str, params: dict | None = None, timeout: float = 15.0, **kwargs) -> str:
+    def get(self, path: str, params: dict | None = None, timeout: float = 15.0, bypass_first: bool | None = None, **kwargs) -> str:
         """GET 请求，返回文本。失败返回空串。
 
         默认超时偏短：抓取由定时任务驱动，单站不通时应尽快让位给下一个站点。
@@ -207,7 +207,7 @@ class SiteClient:
         # 直连必被拦的站点，配了 bypass 就不必先撞一次 403。
         # Cookie 必须一并带过去：mgstage 的 adc、dmm 的 age_check_done
         # 都是年龄门，丢了的话过盾拿回来的永远是确认页
-        if self.bypass_first and settings.bypass_url:
+        if (self.bypass_first if bypass_first is None else bypass_first) and settings.bypass_url:
             return fetch_via_bypass(url, params, timeout, cookie=self.cookie)
 
         headers = self.headers(kwargs.pop("headers", None))

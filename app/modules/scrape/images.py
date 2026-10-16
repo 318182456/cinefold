@@ -60,6 +60,7 @@ class ImageSet:
     负责（它有 httpx 客户端与代理配置），这里只管裁和写。"""
     poster: bytes = b""
     fanart: bytes = b""
+    thumb: bytes = b""
     stills: list[bytes] = field(default_factory=list)
     # 封面的人像面，取自 Code.portrait_side。LEFT / RIGHT / 空
     portrait_side: str = ""
@@ -185,7 +186,7 @@ def write_images(
     # 对不上，那时试算显示的路径和真刮出来的就不是一回事了。
     # thumb 与 fanart 同源：部分皮肤只读 thumb，多写一份省得用户困惑
     content = {"poster": images.poster, "fanart": images.fanart,
-               "thumb": images.fanart}
+               "thumb": images.thumb or images.fanart}
     targets = [
         (kind, name, content[kind])
         for kind, name in planned_names(video_path)

@@ -183,7 +183,7 @@ def delete_rule(rule_id: int):
 
 @router.get("/library")
 def library(keyword: str = "", genre: str = "", actor: str = "", publisher: str = "", series: str = "",
-            collection_id: int | None = None, favorite: bool = False, watch_later: bool = False,
+            collection_id: int | None = None, favorite: bool = False, emby_favorite: bool = False, watch_later: bool = False,
             unseen: bool = False, include_skipped: bool = False,
             sort: Literal["recent", "release", "rating", "plays", "size"] = "recent",
             page: int = Query(1, ge=1), size: int = Query(30, ge=1, le=100)):
@@ -191,7 +191,7 @@ def library(keyword: str = "", genre: str = "", actor: str = "", publisher: str 
     conditions = {k: v for k, v in {"genres": [genre] if genre else [], "casts": [actor] if actor else [], "publisher": publisher, "series": series}.items() if v}
     try:
         return ResponseEntity.ok(library_items(keyword=keyword, conditions=conditions, collection_id=collection_id,
-            favorite=favorite, watch_later=watch_later, unseen=unseen, sort=sort, page=page, size=size, include_skipped=include_skipped))
+            favorite=favorite, emby_favorite=emby_favorite, watch_later=watch_later, unseen=unseen, sort=sort, page=page, size=size, include_skipped=include_skipped))
     except ValueError as exc:
         raise HTTPException(404, str(exc)) from exc
 
@@ -200,6 +200,27 @@ def library(keyword: str = "", genre: str = "", actor: str = "", publisher: str 
 def library_stats(year: int | None = Query(None, ge=1900, le=2200)):
     from app.services.library import library_stats
     return ResponseEntity.ok(library_stats(year))
+
+
+@router.get("/playback")
+def playback_report(month: str = Query(..., pattern=r"^(?:19|20|21)\d{2}-(?:0[1-9]|1[0-2])$"),
+                    user_id: str = "", day: str = "", page: int = Query(1, ge=1), size: int = Query(30, ge=1, le=100)):
+    if day:
+        from datetime import date
+        try:
+            if not day.startswith(month + "-"):
+                raise ValueError
+            date.fromisoformat(day)
+        except ValueError:
+            raise HTTPException(422, "日期必须属于所选月份")
+    from app.services.playback import report
+    return ResponseEntity.ok(report(month, user_id, day, page, size))
+
+
+@router.post("/playback/poll")
+def poll_playback():
+    from app.services.playback import poll
+    return ResponseEntity.ok({"observed": poll()})
 
 
 @router.get("/library/{code}/similar")
@@ -326,6 +347,22 @@ def emby_sync():
         raise HTTPException(400, str(exc)) from exc
     except Exception:
         raise HTTPException(502, "Emby 同步失败，旧数据已保留，请检查服务连接")
+
+
+class EmbyActionRequest(BaseModel):
+    item_id: str = Field(min_length=1, max_length=128)
+    action: Literal['favorite', 'unfavorite', 'played', 'unplayed']
+
+
+@router.post("/library/{code}/emby")
+def emby_action(code: str, body: EmbyActionRequest):
+    from app.services.embysync import set_user_state
+    try:
+        return ResponseEntity.ok(set_user_state(code, body.item_id, body.action))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except Exception:
+        raise HTTPException(502, "Emby 操作结果未确认，请检查连接并重新同步")
 
 
 class HealthRequest(BaseModel):

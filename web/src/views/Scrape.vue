@@ -6,6 +6,7 @@ import { useConfigStore } from '@/stores/config'
 import EmptyState from '@/components/EmptyState.vue'
 import ModalDialog from '@/components/ModalDialog.vue'
 import PrivateImage from '@/components/PrivateImage.vue'
+import WatermarkPreview from '@/components/WatermarkPreview.vue'
 
 const toast = useToast()
 function previewImage(url) {
@@ -35,6 +36,7 @@ const runResult = ref(null)
 const fields = ref([])
 const jinjaAvailable = ref(true)
 const mode = ref('')
+const watermarkConfig = ref({})
 const showFields = ref(false)
 
 // 产物类型的显示名。kind 由后端给（与 images.planned_names 一致）
@@ -80,6 +82,7 @@ onMounted(async () => {
     fields.value = data.fields || []
     jinjaAvailable.value = data.jinja_available !== false
     mode.value = config?.scrape_mode || ''
+    watermarkConfig.value = config?.scrape_watermark || {}
   } catch {
     // 字段清单只是模板提示，取不到不影响试算
   }
@@ -236,7 +239,7 @@ async function doRun() {
 
       <p v-if="noMetaCount" class="text-[11px] text-gray-600">
         「本地无元数据」说明这几条番号在各数据源都没检索到 ——
-        开刮也不会有标题、演员和封面，只会建硬链接并写一份只有番号的 NFO
+        缺少标题时不会登记为成功，请检查数据源与网络后重试
       </p>
 
       <div v-if="items.length" class="space-y-2">
@@ -308,6 +311,10 @@ async function doRun() {
       </p>
     </div>
 
+    <div v-if="watermarkConfig.enabled && items.length" class="card space-y-2">
+      <p class="text-sm text-gray-300">水印位置预览（首个影片）</p>
+      <WatermarkPreview :config="watermarkConfig" :filename="items[0].source || `${items[0].code}.mp4`" :code="items[0].code" />
+    </div>
     <!-- 刮削结果 -->
     <div v-if="runResult" class="card space-y-2">
       <p class="text-sm font-medium text-gray-300">刮削结果</p>
@@ -330,6 +337,12 @@ async function doRun() {
             </span>
           </p>
           <p v-if="row.error" class="mt-0.5 text-[11px] text-red-400">{{ row.error }}</p>
+          <p v-for="(note, i) in row.warnings || []" :key="`warn-${i}`" class="mt-0.5 text-[11px] text-amber-400">{{ note }}</p>
+          <div v-if="row.sources?.length" class="my-1 flex flex-wrap gap-1">
+            <span v-for="source in row.sources" :key="source.site" class="rounded bg-gray-800 px-1.5 py-0.5 text-[10px]" :class="source.status === 'hit' ? 'text-emerald-400' : 'text-gray-500'">
+              {{ source.site }} · {{ ({ hit: '命中', empty: '未返回有效数据', error: '请求异常', timeout: '等待超时', merge_window: '补全等待结束', not_started: '本轮未启动' })[source.status] || source.status }} · {{ source.elapsed }}s
+            </span>
+          </div>
           <p
             v-for="(note, i) in row.skipped || []"
             :key="i"

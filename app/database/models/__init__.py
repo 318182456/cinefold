@@ -10,6 +10,7 @@ from app.database.models.pendingdelete import PendingDelete
 from app.database.models.review import Review
 from app.database.models.user import User
 from app.database.models.watchdir import WatchDir
+from app.database.models.playback import PlaybackSession, PlaybackSpan
 from app.database.models.curation import (
     CodeProfile, Collection, CollectionItem, DownloadProfile, EmbyWatch,
     LibraryPreference, RuleExclusion, SubscriptionRule,
@@ -20,4 +21,5 @@ __all__ = [
     "MediaLink", "Passkey", "PendingDelete", "Review", "User", "WatchDir",
     "CodeProfile", "Collection", "CollectionItem", "DownloadProfile", "EmbyWatch",
     "LibraryPreference", "RuleExclusion", "SubscriptionRule",
+    "PlaybackSession", "PlaybackSpan",
 ]

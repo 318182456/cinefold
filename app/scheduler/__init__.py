@@ -230,6 +230,18 @@ def transfer_seeds() -> int:
         return 0
 
 
+def poll_playback() -> int:
+    """每分钟只读 Emby 会话，持续记录播放。"""
+    from app.services.playback import poll
+    return poll()
+
+
+def scan_scrape_sources() -> int:
+    """扫描下载目录，补刮失败或未经过下载器回调的影片。"""
+    from app.services.scrapewatch import scan
+    return scan()
+
+
 def sync_watch_dirs() -> int:
     """监控目录全量对账。
 
@@ -458,6 +470,11 @@ JOBS: dict[str, dict] = {
 
 # 固定间隔任务，不走 crontab
 INTERVAL_JOBS: dict[str, dict] = {
+    "poll_playback": {"func": poll_playback, "name": "Emby 播放记录", "minutes": 1},
+    "scan_scrape_sources": {
+        "func": scan_scrape_sources, "name": "下载目录自动刮削", "minutes": 10,
+        "interval_key": "scrape_scan_interval",
+    },
     "sync_emby_watch": {
         "func": sync_emby_watch,
         "name": "同步 Emby 观看状态", "minutes": 30,

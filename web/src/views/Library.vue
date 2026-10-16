@@ -9,9 +9,21 @@ import MetadataConditions from '@/components/MetadataConditions.vue'
 const toast = useToast()
 const route = useRoute(), router = useRouter()
 const items = ref([]), total = ref(0), page = ref(1), busy = ref(false), collections = ref([]), selected = ref(null), recommendations = ref([])
-const filters = ref({ keyword: '', genre: '', actor: '', publisher: '', favorite: false, watch_later: false, unseen: false, include_skipped: false, collection_id: '', sort: 'recent' })
+const filters = ref({ keyword: '', genre: '', actor: '', publisher: '', favorite: false, emby_favorite: false, watch_later: false, unseen: false, include_skipped: false, collection_id: '', sort: 'recent' })
 const collectionOpen = ref(false), collectionForm = ref({ name: '', kind: 'manual', conditions: {} }), collectionEditing = ref(null), chosenCollection = ref('')
 const embyOpen = ref(false), embyUsers = ref([]), embyUser = ref(''), embySyncing = ref(false)
+const embyActing = ref(false)
+async function embyAction(item, watch, action) {
+  embyActing.value = true
+  try {
+    const result = await http.post(`/library/${encodeURIComponent(item.code)}/emby`, { item_id: watch.item_id, action })
+    for (const target of [item, items.value.find(x => x.code === item.code)]) {
+      if (!target) continue
+      target.watches = target.watches.map(w => w.item_id === result.item_id && w.user_id === result.user_id ? result : w)
+    }
+    toast.success('Emby 已更新')
+  } catch (e) { toast.error(e.message) } finally { embyActing.value = false }
+}
 let request = 0
 async function load() {
   const id = ++request; busy.value = true
@@ -38,7 +50,7 @@ watch(() => route.query, (query) => {
   else load()
 }, { immediate: true })
 function clearFilters() {
-  Object.assign(filters.value, { keyword: '', genre: '', actor: '', publisher: '', favorite: false, watch_later: false, unseen: false, include_skipped: false, collection_id: '', sort: 'recent' })
+  Object.assign(filters.value, { keyword: '', genre: '', actor: '', publisher: '', favorite: false, emby_favorite: false, watch_later: false, unseen: false, include_skipped: false, collection_id: '', sort: 'recent' })
   if (Object.keys(route.query).length) router.replace({ name: 'Library', query: {} })
   else search()
 }
@@ -49,7 +61,7 @@ onMounted(() => perform(reloadCollections))
     <div class="flex flex-wrap items-center justify-between gap-3"><div><h1 class="text-xl font-semibold">媒体库</h1><p class="mt-1 text-sm text-gray-500">管理本地收藏与片单，在 Emby 中观看。</p></div><div class="flex gap-2"><button class="btn-ghost" @click="configureEmby">同步 Emby</button><button class="btn-primary" @click="newCollection()">新建片单</button></div></div>
     <form class="card space-y-3" @submit.prevent="search">
       <div class="flex flex-wrap gap-3"><input v-model="filters.keyword" class="input !w-auto min-w-40 flex-1" placeholder="搜索番号、标题、演员、标签" aria-label="搜索媒体库"><select v-model="filters.collection_id" class="input !w-auto" @change="search"><option value="">全部影片</option><option v-for="c in collections" :key="c.id" :value="c.id">{{ c.kind === 'smart' ? '智能 · ' : '' }}{{ c.name }}</option></select><select v-model="filters.sort" class="input !w-auto" @change="search"><option value="recent">最近更新</option><option value="release">最新发行</option><option value="rating">个人评分</option><option value="plays">播放最多</option><option value="size">文件体积</option></select><button class="btn-ghost">搜索</button></div>
-      <div class="flex flex-wrap items-center gap-4 text-sm"><label v-for="[key, label] in [['favorite','收藏'],['watch_later','想看'],['unseen','未看完'],['include_skipped','显示已跳过']]" :key="key" class="flex items-center gap-2"><input v-model="filters[key]" type="checkbox" @change="search">{{ label }}</label><span class="ml-auto text-gray-500">{{ total }} 部</span></div>
+      <div class="flex flex-wrap items-center gap-4 text-sm"><label v-for="[key, label] in [['favorite','本地收藏'],['emby_favorite','Emby 收藏'],['watch_later','想看'],['unseen','未看完'],['include_skipped','显示已跳过']]" :key="key" class="flex items-center gap-2"><input v-model="filters[key]" type="checkbox" @change="search">{{ label }}</label><span class="ml-auto text-gray-500">{{ total }} 部</span></div>
       <div class="flex flex-wrap gap-3">
         <input v-model="filters.genre" class="input !w-auto" placeholder="精确标签" aria-label="标签筛选">
         <input v-model="filters.actor" class="input !w-auto" placeholder="精确演员名" aria-label="演员筛选">
@@ -63,7 +75,7 @@ onMounted(() => perform(reloadCollections))
     <div v-else class="grid grid-cols-2 gap-4 sm:grid-cols-3 xl:grid-cols-5">
       <article v-for="item in items" :key="item.code" class="overflow-hidden rounded-xl border border-gray-800 bg-gray-900/60">
         <button class="block aspect-[2/3] w-full overflow-hidden bg-gray-900" :aria-label="`查看 ${item.code}`" @click="detail(item)"><PrivateImage :src="codeCover(item)" :alt="item.code" img-class="h-full w-full object-cover" :object-position="item.portrait_side === 'left' ? 'left' : item.portrait_side === 'right' ? 'right' : 'center'" :fallback-text="item.code" /></button>
-        <div class="space-y-2 p-3"><button class="text-sm font-medium text-brand" @click="detail(item)">{{ item.code }}</button><p class="line-clamp-2 min-h-10 text-xs text-gray-400">{{ item.cn_title || item.title || '暂无标题' }}</p><div class="flex items-center justify-between"><button :aria-label="item.preference.favorite ? '取消收藏' : '收藏'" :class="item.preference.favorite ? 'text-pink-400' : 'text-gray-600'" @click="preference(item, { favorite: !item.preference.favorite })">♥</button><span class="text-xs text-gray-500">{{ item.preference.rating ? `${item.preference.rating} 分` : item.watches.some(w => w.played) ? '已看完' : '未看完' }}</span><a v-if="item.emby_url" :href="item.emby_url" target="_blank" rel="noopener noreferrer" class="text-xs text-brand">Emby ↗</a></div></div>
+        <div class="space-y-2 p-3"><button class="text-sm font-medium text-brand" @click="detail(item)">{{ item.code }}</button><p class="line-clamp-2 min-h-10 text-xs text-gray-400">{{ item.cn_title || item.title || '暂无标题' }}</p><div class="flex items-center justify-between"><button :aria-label="item.preference.favorite ? '取消本地收藏' : '本地收藏'" :class="item.preference.favorite ? 'text-pink-400' : 'text-gray-600'" @click="preference(item, { favorite: !item.preference.favorite })">♥</button><span class="text-xs text-gray-500">{{ item.preference.rating ? `${item.preference.rating} 分` : item.watches.some(w => w.played) ? '已看完' : '未看完' }}</span><a v-if="item.emby_url" :href="item.emby_url" target="_blank" rel="noopener noreferrer" class="text-xs text-brand">Emby ↗</a></div></div>
       </article>
     </div>
     <div class="flex items-center justify-center gap-4"><button class="btn-ghost" :disabled="page <= 1 || busy" @click="page--">上一页</button><span class="text-sm text-gray-500">{{ page }} / {{ Math.max(1, Math.ceil(total / 30)) }}</span><button class="btn-ghost" :disabled="page * 30 >= total || busy" @click="page++">下一页</button></div>
@@ -71,7 +83,16 @@ onMounted(() => perform(reloadCollections))
       <div v-if="selected" class="space-y-5">
         <h2 class="font-medium">{{ selected.cn_title || selected.title }}</h2><p class="text-sm text-gray-400">{{ selected.release_date }} · {{ selected.publisher }} · {{ selected.duration }} 分钟</p>
         <p class="whitespace-pre-line text-sm text-gray-400">{{ selected.outline || '暂无简介' }}</p><p class="text-sm text-gray-500">演员：{{ selected.casts || '未知' }}</p><p class="text-sm text-gray-500">标签：{{ selected.genres || '未知' }}</p>
-        <div class="flex flex-wrap gap-2"><button class="btn-ghost" @click="preference(selected, { favorite: !selected.preference.favorite })">{{ selected.preference.favorite ? '取消收藏' : '收藏' }}</button><button class="btn-ghost" @click="preference(selected, { watch_later: !selected.preference.watch_later })">{{ selected.preference.watch_later ? '取消想看' : '想看' }}</button><button class="btn-ghost" @click="preference(selected, { skipped: !selected.preference.skipped })">{{ selected.preference.skipped ? '恢复展示' : '跳过此片' }}</button><a v-if="selected.emby_url" class="btn-primary" :href="selected.emby_url" target="_blank" rel="noopener noreferrer">在 Emby 中打开 ↗</a></div>
+        <div class="flex flex-wrap gap-2"><button class="btn-ghost" @click="preference(selected, { favorite: !selected.preference.favorite })">{{ selected.preference.favorite ? '取消本地收藏' : '本地收藏' }}</button><button class="btn-ghost" @click="preference(selected, { watch_later: !selected.preference.watch_later })">{{ selected.preference.watch_later ? '取消想看' : '想看' }}</button><button class="btn-ghost" @click="preference(selected, { skipped: !selected.preference.skipped })">{{ selected.preference.skipped ? '恢复展示' : '跳过此片' }}</button><a v-if="selected.emby_url" class="btn-primary" :href="selected.emby_url" target="_blank" rel="noopener noreferrer">在 Emby 中打开 ↗</a></div>
+        <div v-if="selected.watches.length" class="space-y-3 rounded-lg border border-gray-800 p-3">
+          <h3 class="text-sm font-medium">Emby 用户状态</h3>
+          <p class="text-xs text-gray-500">以下按钮直接更新已选 Emby 用户；本地收藏与片单独立保留。手动标记已看不会生成播放日历记录。</p>
+          <div v-for="w in selected.watches" :key="`${w.user_id}-${w.item_id}`" class="flex flex-wrap items-center gap-2">
+            <span class="text-xs text-gray-500">条目 {{ w.item_id }} · 播放 {{ w.play_count }} 次</span>
+            <button class="btn-ghost" :disabled="embyActing" @click="embyAction(selected, w, w.favorite ? 'unfavorite' : 'favorite')">{{ w.favorite ? '取消 Emby 收藏' : 'Emby 收藏' }}</button>
+            <button class="btn-ghost" :disabled="embyActing" @click="embyAction(selected, w, w.played ? 'unplayed' : 'played')">{{ w.played ? '在 Emby 标记未看' : '在 Emby 标记已看' }}</button>
+          </div>
+        </div>
         <label class="block"><span class="label">我的评分</span><select :value="selected.preference.rating ?? ''" class="input !w-auto" @change="preference(selected, { rating: $event.target.value === '' ? null : Number($event.target.value) })"><option value="">未评分</option><option v-for="n in 11" :key="n" :value="n - 1">{{ n - 1 }} 分</option></select></label>
         <label class="block"><span class="label">笔记</span><textarea v-model="selected.preference.notes" class="input" rows="3" maxlength="5000" /></label><button class="btn-ghost" @click="preference(selected, { notes: selected.preference.notes || '' })">保存笔记</button>
         <div v-if="collections.some(c => c.kind === 'manual')" class="flex flex-wrap gap-2"><select v-model="chosenCollection" class="input !w-auto"><option value="">选择片单</option><option v-for="c in collections.filter(c => c.kind === 'manual')" :key="c.id" :value="c.id">{{ c.name }}</option></select><button class="btn-ghost" :disabled="!chosenCollection" @click="perform(async () => { await http.post(`/collections/${chosenCollection}/items`, { codes: [selected.code] }); toast.success('已加入片单') })">加入片单</button><button v-if="activeCollection?.kind === 'manual'" class="btn-ghost" @click="perform(async () => { await http.delete(`/collections/${activeCollection.id}/items/${encodeURIComponent(selected.code)}`); selected = null; await load() })">移出当前片单</button></div>

@@ -61,7 +61,7 @@ class Airav:
         # 所以从 host 里剥掉路径部分
         root = _root(self.client.host)
         raw = self.client.get(
-            f"{root}/api/video/barcode/{normalized}", params={"lng": "zh-TW"}
+            f"{root}/api/video/barcode/{normalized}", params={"lng": "zh-TW"}, bypass_first=False
         )
         info = json_to_code(raw, normalized) if raw else None
         if info:

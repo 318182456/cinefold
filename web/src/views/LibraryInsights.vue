@@ -2,6 +2,7 @@
 import { onMounted, onUnmounted, ref } from 'vue'
 import http from '@/api'
 import { useToast } from '@/composables/useToast'
+import PlaybackCalendar from '@/components/PlaybackCalendar.vue'
 const toast = useToast()
 const stats = ref(null), health = ref({ running: false }), year = ref(new Date().getFullYear()), busy = ref(false)
 let timer, disposed = false
@@ -34,6 +35,7 @@ onUnmounted(() => { disposed = true; clearTimeout(timer) })
       </div>
       <div class="card space-y-3"><div class="flex items-center gap-3"><h2 class="font-medium">年度观看回顾</h2><input v-model.number="year" class="input !w-28" type="number" min="1900" max="2200" @change="load"></div><p class="text-xs text-gray-500">{{ stats.watch_note }}</p><div class="flex flex-wrap gap-3"><div v-for="(count, month) in stats.last_watched_months" :key="month" class="rounded-lg bg-gray-800 px-4 py-3 text-center"><p class="text-xs text-gray-500">{{ month }}</p><p class="mt-1">{{ count }} 部</p></div><p v-if="!Object.keys(stats.last_watched_months).length" class="text-sm text-gray-500">该年暂无观看数据，请先在媒体库页面同步 Emby。</p></div></div>
     </template>
+    <PlaybackCalendar />
     <div class="card space-y-4"><div class="flex flex-wrap items-center justify-between gap-3"><h2 class="font-medium">媒体健康检查</h2><div class="flex gap-2"><button class="btn-ghost" :disabled="busy || health.running" @click="scan(false)">快速检查</button><button class="btn-primary" :disabled="busy || health.running" @click="scan(true)">完整内容查重</button></div></div><p class="text-xs text-gray-500">完整查重对同体积文件读取全部内容并计算 SHA-256，大库可能耗时较长。相同硬链接按一份文件计算。检查不会删除文件。</p><p v-if="health.running" class="text-sm text-brand">检查中：{{ health.done }} / {{ health.total }}，文件枚举完成后继续计算内容指纹…</p><p v-if="health.error" class="text-sm text-red-400">{{ health.error }}</p>
       <template v-if="health.result"><div class="flex flex-wrap gap-5 text-sm text-gray-400"><span>文件引用 {{ health.result.links }}</span><span>不同文件 {{ health.result.physical_files }}</span><span>文件逻辑大小 {{ gb(health.result.unique_bytes) }}</span><span>重复内容大小 {{ health.result.hashed ? gb(health.result.duplicate_bytes) : '未检查' }}</span></div><p class="text-xs text-gray-500">文件逻辑大小不等于磁盘实际占用；重复内容大小也不代表可直接释放的空间，文件可能仍有其他硬链接或做种引用。</p>
       <div v-for="(group, index) in health.result.exact" :key="group.sha256" class="rounded-lg border border-amber-800/50 p-3 text-sm"><p class="text-amber-400">内容重复组 {{ index + 1 }} · {{ gb(group.size) }}</p><p v-for="f in group.files" :key="f.path" class="mt-2 break-all text-xs text-gray-400">{{ f.code }} · {{ f.path }}</p></div>
