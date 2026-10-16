@@ -129,13 +129,21 @@ def repair_filename_codes() -> int:
                 changed = True
             if attempt and (attempt.code in wrong or (cid or date_version) and attempt.code == old_code) and attempt.code != info.code:
                 attempt.code = info.code
+                attempt.status, attempt.error, attempt.job_id = 'pending', '', ''
+                changed = True
+            if changed and not info.ignored:
+                row.artifact_status = 'incomplete' if row.links else 'pending'
+            # 旧版本已经修正 attempt.code，却留下了旧域名番号对应的失败信息。
+            # 仅清理明确指向域名误识别的错误，当前正确番号的真实失败继续保留。
+            if (attempt and attempt.status == 'failed' and attempt.code == info.code and info.code
+                    and any(re.fullmatch(r'取不到元数据:\s*' + re.escape(code), attempt.error or '')
+                            for code in wrong if code != info.code)):
+                attempt.status, attempt.error, attempt.job_id = 'pending', '', ''
                 changed = True
             if info.ignored and row.artifact_status != 'ignored':
                 row.artifact_status = 'ignored'
                 changed = True
             if changed:
-                if not info.ignored:
-                    row.artifact_status = 'incomplete' if row.links else 'pending'
                 row.indexed_at = datetime.now()
                 repaired += 1
     if repaired:

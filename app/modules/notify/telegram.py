@@ -5,12 +5,31 @@ webhook 由 Telegram 回调本机（需公网 HTTPS），polling 靠 getUpdates 
 """
 from __future__ import annotations
 
+import re
+import time
+
 import httpx
 from loguru import logger
 
 from app.core.config import get_settings
 
 API_BASE = "https://api.telegram.org"
+
+
+class _ConnectRetryTransport(httpx.BaseTransport):
+    """兼容直连和 SOCKS/HTTP 代理，只对请求发出前的建连失败重试一次。"""
+    def __init__(self, proxy: str | None):
+        self._transport = httpx.HTTPTransport(proxy=proxy, trust_env=False)
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        try:
+            return self._transport.handle_request(request)
+        except (httpx.ConnectError, httpx.ConnectTimeout):
+            time.sleep(0.5)
+            return self._transport.handle_request(request)
+
+    def close(self) -> None:
+        self._transport.close()
 
 
 class TelegramNotifier:
@@ -28,8 +47,22 @@ class TelegramNotifier:
     def _api(self, method: str) -> str:
         return f"{API_BASE}/bot{self.token}/{method}"
 
-    def _client(self) -> httpx.Client:
-        return httpx.Client(timeout=30, proxy=self.proxy)
+    def _client(self, timeout: float = 30) -> httpx.Client:
+        # 只重试建连阶段：读取响应超时可能意味着消息已经发出，不能自动重发。
+        # 显式使用设置中的代理，避免继承容器里意外设置的代理变量。
+        transport = _ConnectRetryTransport(self.proxy)
+        return httpx.Client(timeout=httpx.Timeout(timeout, connect=min(timeout, 10)),
+                            transport=transport, trust_env=False)
+
+    def _safe_error(self, exc: Exception) -> str:
+        message = str(exc)
+        if self.token:
+            message = message.replace(self.token, '[token]')
+        message = re.sub(r'(?<=//)[^/@\s]+:[^/@\s]+@', '[credentials]@', message)
+        if isinstance(exc, httpx.ConnectError) and any(word in message.lower() for word in ('ssl', 'tls', 'handshake')):
+            route = '经代理' if self.proxy else '直连'
+            return f'TLS 握手失败（{route}，建连重试后仍失败，请检查代理节点或网络链路）：{message}'
+        return message
 
     # ------------------------------------------------------------------
     def send_text_message(self, text: str, chat_id: str = "") -> bool:
@@ -49,7 +82,7 @@ class TelegramNotifier:
                 response.raise_for_status()
             return True
         except Exception as exc:
-            logger.error(f"Telegram 发送文本失败: {exc}")
+            logger.error(f"Telegram 发送文本失败: {self._safe_error(exc)}")
             return False
 
     def send_photo_message(
@@ -78,7 +111,7 @@ class TelegramNotifier:
                     return self.send_text_message(caption, chat_id)
             return True
         except Exception as exc:
-            logger.error(f"Telegram 发图异常: {exc}，降级为文本")
+            logger.error(f"Telegram 发图异常: {self._safe_error(exc)}，降级为文本")
             return self.send_text_message(caption, chat_id)
 
     def reply_text_message(self, text: str, message_id: int, chat_id: str = "") -> bool:
@@ -98,7 +131,7 @@ class TelegramNotifier:
                 response.raise_for_status()
             return True
         except Exception as exc:
-            logger.error(f"Telegram 回复失败: {exc}")
+            logger.error(f"Telegram 回复失败: {self._safe_error(exc)}")
             return False
 
     def download_image(self, url: str) -> bytes | None:
@@ -113,7 +146,7 @@ class TelegramNotifier:
                 response.raise_for_status()
                 return response.content
         except Exception as exc:
-            logger.warning(f"下载图片失败 {url}: {exc}")
+            logger.warning(f"下载图片失败 {url}: {self._safe_error(exc)}")
             return None
 
     def test_connection(self) -> tuple[bool, str]:
@@ -126,7 +159,7 @@ class TelegramNotifier:
                 name = response.json().get("result", {}).get("username", "")
                 return True, f"连接成功，Bot @{name}"
         except Exception as exc:
-            return False, str(exc)
+            return False, self._safe_error(exc)
 
     # ------------------------------------------------------------------
     # 上行消息接收
@@ -141,7 +174,7 @@ class TelegramNotifier:
                 response.raise_for_status()
                 return response.json().get("result") or {}
         except Exception as exc:
-            logger.warning(f"获取 webhook 信息失败: {exc}")
+            logger.warning(f"获取 webhook 信息失败: {self._safe_error(exc)}")
             return {}
 
     def set_webhook(self, url: str) -> tuple[bool, str]:
@@ -162,7 +195,7 @@ class TelegramNotifier:
                 return False, payload.get("description", "设置失败")
             return True, "webhook 设置成功"
         except Exception as exc:
-            return False, str(exc)
+            return False, self._safe_error(exc)
 
     def delete_webhook(self, drop_pending: bool = False) -> tuple[bool, str]:
         """删除 webhook。切到 polling 前必须先删，两者互斥。"""
@@ -179,7 +212,7 @@ class TelegramNotifier:
                 return False, payload.get("description", "删除失败")
             return True, "webhook 已删除"
         except Exception as exc:
-            return False, str(exc)
+            return False, self._safe_error(exc)
 
     def get_updates(self, offset: int = 0, timeout: int = 30) -> list[dict]:
         """长轮询拉取更新。
@@ -194,7 +227,11 @@ class TelegramNotifier:
         }
         if offset:
             params["offset"] = offset
-        with httpx.Client(timeout=timeout + 15, proxy=self.proxy) as client:
-            response = client.post(self._api("getUpdates"), json=params)
-            response.raise_for_status()
-            return response.json().get("result") or []
+        try:
+            with self._client(timeout + 15) as client:
+                response = client.post(self._api("getUpdates"), json=params)
+                response.raise_for_status()
+                return response.json().get("result") or []
+        except httpx.HTTPError as exc:
+            # 上层轮询线程会记录异常，避免其中带出 Bot API URL 内的 token。
+            raise RuntimeError(self._safe_error(exc)) from None

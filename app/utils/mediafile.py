@@ -103,7 +103,7 @@ _UNCENSORED_SUFFIX = re.compile(r"-(?:U|UC|UCH)$", re.IGNORECASE)
 
 # 中文字幕标记
 _SUBBED_TOKENS = re.compile(
-    r"(?:^|[-_\s.\[])(?:chinese\s*sub(?:title)?s?|中文字幕|中字|简中|繁中)(?:$|[-_\s.\]])",
+    r"(?:^|[-_\s.\[])(?:chinese\s*sub(?:title)?s?|中文字幕|中字|简中|繁中|zh|chs|cht)(?:$|[-_\s.\]])",
     re.IGNORECASE,
 )
 _SUBBED_SUFFIX = re.compile(r"-(?:C|CH|UCH)$", re.IGNORECASE)

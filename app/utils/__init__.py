@@ -75,9 +75,14 @@ _DMM_FILENAME = re.compile(
     r'(?:(\d{1,2})|_(\d{3}))?(?![A-Za-z0-9])', re.IGNORECASE,
 )
 
+_FILE_CODE_LETTER = re.compile(
+    r'(?<![A-Za-z0-9])([0-9]{0,4}[A-Za-z][A-Za-z0-9]{1,7}[-_]\d{2,5})[EVR](?![A-Za-z0-9])',
+    re.IGNORECASE,
+)
+
 
 def normalize_serial_text(text: str) -> str:
-    """只规范明确的发行文件名和版本标记，不截断未知尾字母。"""
+    """规范发行文件名与已支持的尾字母，不截断任意字母串。"""
     def dmm(match):
         core = f'{match[1].upper()}-{int(match[2]):03d}'
         if match[3]:
@@ -86,6 +91,7 @@ def normalize_serial_text(text: str) -> str:
             return f'{core}-CD{int(match[4]) + 1}'
         return core
     text = _DMM_FILENAME.sub(dmm, strip_site_domains(text))
+    text = _FILE_CODE_LETTER.sub(r'\1', text)
     text = re.sub(r'(?<=\d)[-_]?uncensored(?:[-_](C|CH))?(?![A-Za-z0-9])',
                   lambda m: '-UCH' if m[1] else '-U', text, flags=re.IGNORECASE)
     text = re.sub(r'(?<=\d)(UCH|UC|CH|C|U)(?![A-Za-z0-9])', r'-\1', text, flags=re.IGNORECASE)

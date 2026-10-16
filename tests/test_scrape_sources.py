@@ -511,3 +511,41 @@ def test_cache_repair_recovers_names_and_skips_ads_preserving_manual_codes(env, 
     assert sources.video_detail(str(manual))['code'] == 'IPZZ-477-C'
     assert sources.video_detail(str(date))['code'] == '032517_505-C'
     with pytest.raises(ValueError): sources.group_entries([{'path': str(ad), 'code': 'SONE-725'}])
+
+
+def test_repair_clears_only_stale_domain_failure_and_preserves_completed_artifacts(env):
+    root, _, db, _, _ = env
+    stale = video(root, 'hhd800.com@DASD-875.mp4')
+    real = video(root, 'hhd800.com@200GANA-3282.mp4')
+    ambiguous = video(root, 'START-377V.2026.1080p.DMM.WEB-DL.mkv')
+    scrapeinventory.refresh_now()
+    sources.record_attempt([{'path': str(stale)}], 'DASD-875', status='failed', error='取不到元数据: HHD-800')
+    sources.record_attempt([{'path': str(real)}], '200GANA-3282', status='failed', error='取不到元数据: 200GANA-3282')
+    with db() as session:
+        row = session.get(ScrapeSourceVideo, sources.key(stale))
+        row.artifact_status = 'complete'; row.links = ['/library/DASD-875.mp4']
+        session.get(ScrapeSourceVideo, sources.key(ambiguous)).detected_code = ''
+        session.commit()
+    assert scrapeinventory.repair_filename_codes() == 2
+    assert scrapeinventory.repair_filename_codes() == 0
+    with db() as session:
+        attempt = session.get(ScrapeAttempt, sources.key(stale))
+        assert attempt.code == 'DASD-875' and attempt.status == 'pending' and attempt.error == ''
+        assert session.get(ScrapeSourceVideo, sources.key(stale)).artifact_status == 'complete'
+        assert session.get(ScrapeAttempt, sources.key(real)).status == 'failed'
+        assert session.get(ScrapeSourceVideo, sources.key(ambiguous)).detected_code == 'START-377'
+    assert sources.list_videos(keyword='DASD-875')['items'][0]['status'] == 'complete'
+    assert sources.list_videos(status='failed')['total'] == 1
+
+
+def test_repair_drops_old_attempt_failure_when_correcting_domain_number(env):
+    root, _, db, _, _ = env
+    path = video(root, 'hhd800.com@DASD-875.mp4')
+    scrapeinventory.refresh_now()
+    sources.record_attempt([{'path': str(path)}], 'HHD-800', status='failed', error='取不到元数据: HHD-800')
+    with db() as session:
+        session.get(ScrapeSourceVideo, sources.key(path)).detected_code = 'HHD-800'
+        session.commit()
+    assert scrapeinventory.repair_filename_codes() == 1
+    result = sources.list_videos()['items'][0]
+    assert result['code'] == 'DASD-875' and result['status'] == 'pending' and result['error'] == ''

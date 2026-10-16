@@ -328,12 +328,20 @@ def test_real_download_naming_conventions(filename, code, part, subbed, uncensor
     assert (info.code, info.part, info.subbed, info.uncensored) == (code, part, subbed, uncensored)
 
 
-@pytest.mark.parametrize('filename', [
-    'OLM-186E.2025.1080p.DMM.WEB-DL.AAC2.0.H.264-MTeam.mkv',
-    'START-377V.2026.1080p.DMM.WEB-DL.AAC2.0.H.264-MTeam.mkv',
-    'DVDES-866R_ZH.mp4',
+@pytest.mark.parametrize('filename, expected', [
+    ('OLM-186E.2025.1080p.DMM.WEB-DL.AAC2.0.H.264-MTeam.mkv', 'OLM-186'),
+    ('START-377V.2026.1080p.DMM.WEB-DL.AAC2.0.H.264-MTeam.mkv', 'START-377'),
+    ('START-475V.2026.1080p.DMM.WEB-DL.AAC2.0.H.264-MTeam.mkv', 'START-475'),
+    ('DVDES-866R_ZH.mp4', 'DVDES-866'),
 ])
-def test_unknown_product_suffixes_are_not_silently_removed(filename):
+def test_known_single_letter_file_suffixes_allow_base_code_extraction(filename, expected):
+    info = mediafile.parse(filename)
+    assert info.code == expected
+    assert info.part == 0
+
+
+@pytest.mark.parametrize('filename', ['OLM-186XYZ.mp4', 'START-377VR.mp4', 'DVDES-866RX.mp4'])
+def test_unknown_long_product_suffixes_are_not_silently_removed(filename):
     assert mediafile.parse(filename).code == ''
 
 
@@ -353,3 +361,13 @@ def test_dmm_multipart_files_share_one_normalized_code():
     groups = mediafile.group_parts(['1dvdes00644hhb2.mp4', '1dvdes00644hhb3.mp4', '1dvdes00644hhb4.mp4'])
     assert list(groups) == ['DVDES-644']
     assert [info.part for info in groups['DVDES-644']] == [2, 3, 4]
+
+
+def test_zh_subtitle_flag_survives_single_letter_file_suffix():
+    info = mediafile.parse('DVDES-866R_ZH.mp4')
+    assert info.code == 'DVDES-866' and info.subbed
+
+
+def test_actor_name_only_is_not_enough_to_identify_a_unique_movie():
+    info = mediafile.parse(Path('/downloads/日本AV') / '蒼井そら、無碼流出版.1080p.x264.mp4')
+    assert info.code == ''
