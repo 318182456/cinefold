@@ -457,3 +457,57 @@ def test_medialink_detail_works_without_source_inventory_or_files(env, monkeypat
     assert data['links'] == [target]
     assert data['size'] == 1024
     assert client.get('/medialinks/detail', params={'link_path': 'unknown'}).status_code == 404
+
+
+def test_repair_domain_codes_updates_cache_and_stale_attempts_without_disk(env, monkeypatch):
+    root, _, db, _, _ = env
+    first = video(root, 'hhd800.com@DASD-875.mp4')
+    manual = video(root, 'hhd800.com@200GANA-3282.mp4')
+    normal = video(root, 'HHD-800.mp4')
+    scrapeinventory.refresh_now()
+    for path, code in [(first, 'HHD-800'), (manual, 'SONE-725'), (normal, 'HHD-800')]:
+        sources.record_attempt([{'path': str(path)}], code, status='failed', error='旧失败记录')
+    with db() as session:
+        for path in (first, manual):
+            session.get(ScrapeSourceVideo, sources.key(path)).detected_code = 'HHD-800'
+        session.commit()
+    monkeypatch.setattr(Path, 'stat', lambda *a, **kw: pytest.fail('修复缓存不能探测磁盘'))
+    monkeypatch.setattr(Path, 'resolve', lambda *a, **kw: pytest.fail('修复缓存不能探测磁盘'))
+    assert scrapeinventory.repair_filename_codes() == 2
+    assert scrapeinventory.repair_filename_codes() == 0
+    with db() as session:
+        assert session.get(ScrapeSourceVideo, sources.key(first)).detected_code == 'DASD-875'
+        assert session.get(ScrapeAttempt, sources.key(first)).code == 'DASD-875'
+        assert session.get(ScrapeSourceVideo, sources.key(manual)).detected_code == '200GANA-3282'
+        assert session.get(ScrapeAttempt, sources.key(manual)).code == 'SONE-725'
+        assert session.get(ScrapeAttempt, sources.key(normal)).code == 'HHD-800'
+
+
+def test_cache_repair_recovers_names_and_skips_ads_preserving_manual_codes(env, monkeypatch):
+    root, _, db, _, _ = env
+    parent = root / 'SONE-725'; parent.mkdir()
+    ad = video(parent, '社 區 最 新 情 報.mp4')
+    movie = video(root, 'JUL-915C.mp4')
+    cid = video(root, '1dvdes00644hhb4.mp4')
+    manual = video(root, 'SONE-982ch.mp4')
+    date = video(root, '032517-505-C.mp4')
+    scrapeinventory.refresh_now()
+    sources.record_attempt([{'path': str(manual)}], 'IPZZ-477-C', status='failed')
+    sources.record_attempt([{'path': str(ad)}], 'SONE-725', status='failed')
+    with db() as session:
+        row = session.get(ScrapeSourceVideo, sources.key(ad)); row.artifact_status = 'pending'; row.detected_code = 'SONE-725'
+        session.get(ScrapeSourceVideo, sources.key(movie)).detected_code = ''
+        session.get(ScrapeSourceVideo, sources.key(date)).detected_code = '032517_505'
+        row = session.get(ScrapeSourceVideo, sources.key(cid)); row.detected_code = 'DVDES-00644'; row.part = 0
+        session.commit()
+    monkeypatch.setattr(Path, 'stat', lambda *a, **kw: pytest.fail('不能探测磁盘'))
+    assert scrapeinventory.repair_filename_codes() == 4
+    assert scrapeinventory.repair_filename_codes() == 0
+    assert sources.list_videos(status='ignored')['items'][0]['code'] == ''
+    assert sources.list_videos(status='unrecognized')['total'] == 0
+    assert sources.list_videos(keyword='JUL-915-C')['total'] == 1
+    row = sources.list_videos(keyword='1dvdes')['items'][0]
+    assert row['code'] == 'DVDES-644' and row['part'] == 4
+    assert sources.video_detail(str(manual))['code'] == 'IPZZ-477-C'
+    assert sources.video_detail(str(date))['code'] == '032517_505-C'
+    with pytest.raises(ValueError): sources.group_entries([{'path': str(ad), 'code': 'SONE-725'}])

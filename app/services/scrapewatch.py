@@ -91,7 +91,7 @@ def _scan(settings) -> int:
             dirs[:] = [d for d in dirs if d not in {"@eaDir", ".unwanted", "#recycle"} and not Path(folder, d).is_symlink()]
             for filename in files:
                 path = Path(folder, filename)
-                if path.is_symlink() or not is_adoptable_video(path):
+                if path.is_symlink() or not is_adoptable_video(path) or mediafile.is_advertisement(path.stem):
                     continue
                 key = str(path)
                 if key in seen:

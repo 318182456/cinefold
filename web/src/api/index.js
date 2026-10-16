@@ -256,11 +256,7 @@ export const codeCover = (item) => {
   return proxyImage(item.banner || item.poster, item.code)
 }
 
-// ---------------------------------------------------------------- 数据迁移
-export const listMigrateDatabases = () => http.get('/migrate/databases')
-export const getMigrateProgress = () => http.get('/migrate/progress')
-export const testMigrateTarget = (payload) => http.post('/migrate/test', payload)
-export const startMigrate = (payload) => http.post('/migrate/start', payload)
+// ---------------------------------------------------------------- 维护工具
 export const getImageCacheStats = () => http.get('/image-cache/stats')
 export const refetchCover = (code) => http.post('/image-cache/refetch', { code })
 // 整库重判封面人像面。立即返回，进度靠轮询

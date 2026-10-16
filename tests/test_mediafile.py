@@ -280,3 +280,76 @@ class Test按番号分组:
             Path("ABP-554-CD1.mp4"), Path("ABP-554-CD3.mp4"),
         ])
         assert [i.part for i in groups["ABP-554"]] == [1, 3]
+
+
+@pytest.mark.parametrize('filename, expected, part', [
+    ('hhd800.com@DASD-875.mp4', 'DASD-875', 0),
+    ('hhd800.com@200GANA-3282.mp4', '200GANA-3282', 0),
+    ('hhd800.com@476MLA-197.mp4', '476MLA-197', 0),
+    ('hhd800.com@MEKO-351.mp4', 'MEKO-351', 0),
+    ('hhd800.com@OFJE-594-A.mp4', 'OFJE-594', 1),
+    ('hhd800.com@OFJE-594-D.mp4', 'OFJE-594', 4),
+    ('hhd800.com@OFJE-594-C.mp4', 'OFJE-594-C', 0),
+    ('hhd800.com@DASD-875-2.mp4', 'DASD-875', 2),
+    ('www.abc123.net@SONE-725-CD2.mp4', 'SONE-725', 2),
+    ('[hhd800.com] SONE-725-UC.mp4', 'SONE-725-UC', 0),
+    ('HHD-800.mp4', 'HHD-800', 0),
+])
+def test_site_domains_are_not_video_codes(filename, expected, part):
+    info = mediafile.parse(filename)
+    assert info.code == expected
+    assert info.part == part
+
+
+def test_serial_extractors_skip_domains_instead_of_blacklisting_real_prefixes():
+    from app.utils import find_serial_number, find_serial_numbers
+    assert find_serial_number('hhd800.com@DASD-875.mp4') == 'DASD-875'
+    assert find_serial_numbers('hhd800.com@DASD-875、abc123.net@SONE-725') == ['DASD-875', 'SONE-725']
+    assert find_serial_number('hhd800.com@random.mp4') == ''
+    assert find_serial_number('HHD800.mp4') == 'HHD-800'
+    assert find_serial_number('SSIS-001.mkv') == 'SSIS-001'
+
+
+@pytest.mark.parametrize('filename, code, part, subbed, uncensored', [
+    ('SORA-613ch.mp4', 'SORA-613-CH', 0, True, False),
+    ('JUL-915C.mp4', 'JUL-915-C', 0, True, False),
+    ('SOAN-115ch.mp4', 'SOAN-115-CH', 0, True, False),
+    ('STARS-182Uncensored-C.mp4', 'STARS-182-UCH', 0, True, True),
+    ('STARS-232Uncensored-C.mp4', 'STARS-232-UCH', 0, True, True),
+    ('1star00927hhb.mp4', 'STAR-927', 0, False, False),
+    ('pred00001hhb_000.mp4', 'PRED-001', 1, False, False),
+    ('1dvdes00644hhb4.mp4', 'DVDES-644', 4, False, False),
+    ('1dvdes00644hhb2.mp4', 'DVDES-644', 2, False, False),
+    ('[FHD]ebod-198B.wmv', 'EBOD-198', 2, False, False),
+    ('032517-505-C.mp4', '032517_505-C', 0, True, False),
+])
+def test_real_download_naming_conventions(filename, code, part, subbed, uncensored):
+    info = mediafile.parse(filename)
+    assert (info.code, info.part, info.subbed, info.uncensored) == (code, part, subbed, uncensored)
+
+
+@pytest.mark.parametrize('filename', [
+    'OLM-186E.2025.1080p.DMM.WEB-DL.AAC2.0.H.264-MTeam.mkv',
+    'START-377V.2026.1080p.DMM.WEB-DL.AAC2.0.H.264-MTeam.mkv',
+    'DVDES-866R_ZH.mp4',
+])
+def test_unknown_product_suffixes_are_not_silently_removed(filename):
+    assert mediafile.parse(filename).code == ''
+
+
+@pytest.mark.parametrize('name', [
+    '社 區 最 新 情 報.mp4',
+    '18+游戏大全(996gg.cc)-七龍珠H版.mp4',
+    '台湾uu美少女直播 20年信誉保证服务全球.mp4',
+    '台 妹 子 線 上 現 場 直 播 各 式 花 式 表 演.mp4',
+    'x u u 6 2 . c o m.mp4',
+])
+def test_ads_cannot_inherit_movie_code_from_parent_directory(name):
+    info = mediafile.parse(Path('SONE-725') / name)
+    assert info.ignored and info.code == ''
+
+
+def test_dmm_multipart_files_share_one_normalized_code():
+    groups = mediafile.group_parts(['1dvdes00644hhb2.mp4', '1dvdes00644hhb3.mp4', '1dvdes00644hhb4.mp4'])
+    assert list(groups) == ['DVDES-644']
+    assert [info.part for info in groups['DVDES-644']] == [2, 3, 4]

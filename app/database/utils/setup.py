@@ -50,6 +50,9 @@ def setup_database() -> None:
     sync_builtin_sources()
     logger.info(f"  数据源登记完成，耗时 {time.perf_counter() - started:.1f}s")
 
+    from app.services.scrapeinventory import repair_filename_codes
+    repair_filename_codes()
+
 
 def update_database() -> None:
     """字段级迁移。旧版本升级上来时补齐新增列。"""

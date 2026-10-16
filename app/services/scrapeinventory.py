@@ -19,7 +19,7 @@ from app.core.config import get_settings
 from app.database.models import MediaLink, ScrapeAttempt, ScrapeSourceRoot, ScrapeSourceVideo, ScrapeSourceMembership
 from app.database.session import session_scope
 from app.services.medialink import is_adoptable_video
-from app.utils import mediafile
+from app.utils import CODE_PATTERN, _SITE_DOMAIN, _DMM_FILENAME, get_true_code, mediafile
 
 _LOCK = threading.Lock()
 _STATE_LOCK = threading.RLock()
@@ -106,6 +106,43 @@ def _insert(session, model):
     return sqlite_insert(model) if session.get_bind().dialect.name == 'sqlite' else pg_insert(model)
 
 
+def repair_filename_codes() -> int:
+    """纠正旧识别结果与广告误归类，只读路径字符串，不操作媒体文件。"""
+    repaired = 0
+    with session_scope() as session:
+        query = select(ScrapeSourceVideo, ScrapeAttempt).outerjoin(
+            ScrapeAttempt, ScrapeAttempt.source_key == ScrapeSourceVideo.source_key).execution_options(yield_per=200)
+        for row, attempt in session.execute(query):
+            domains = ' '.join(match.group(0) for match in _SITE_DOMAIN.finditer(row.name))
+            wrong = {get_true_code(match.group(1)) for match in CODE_PATTERN.finditer(domains)} - {''}
+            info = mediafile.parse(Path(row.path))
+            changed = False
+            old_code = row.detected_code
+            # DMM 的填充数字与视频编码后缀是明确的发行命名，其他非空番号不重猜。
+            cid = bool(_DMM_FILENAME.search(row.name))
+            date_version = bool(re.fullmatch(r'\d{6}_\d{2,4}', old_code)) and info.code.startswith(old_code + '-')
+            if (not row.detected_code or row.detected_code in wrong or cid or date_version or info.ignored) and row.detected_code != info.code:
+                row.detected_code, row.part = info.code, info.part
+                changed = True
+            if row.detected_code == info.code and row.part != info.part:
+                row.part = info.part
+                changed = True
+            if attempt and (attempt.code in wrong or (cid or date_version) and attempt.code == old_code) and attempt.code != info.code:
+                attempt.code = info.code
+                changed = True
+            if info.ignored and row.artifact_status != 'ignored':
+                row.artifact_status = 'ignored'
+                changed = True
+            if changed:
+                if not info.ignored:
+                    row.artifact_status = 'incomplete' if row.links else 'pending'
+                row.indexed_at = datetime.now()
+                repaired += 1
+    if repaired:
+        logger.info(f'[源视频清单] 已修正 {repaired} 条文件名识别或广告归类，请核对后重新刮削')
+    return repaired
+
+
 def _flush(root_key, batch, started):
     if not batch:
         return
@@ -124,6 +161,7 @@ def _run(paths):
         if not paths:
             return
         from app.services import scrapesources, scrapewatch
+        repair_filename_codes()
         with session_scope() as session:
             sync_roots(session)
             links = defaultdict(list)
@@ -159,7 +197,9 @@ def _run(paths):
                             target_links = links.get(source_key, [])
                             code = overrides.get(source_key) or info.code
                             status = 'pending'
-                            if target_links:
+                            if info.ignored:
+                                status = 'ignored'
+                            elif target_links:
                                 status = 'complete' if scrapewatch._complete(path, code, target_links) else 'incomplete'
                             batch.append({'source_key': source_key, 'path': str(path), 'name': name,
                                 'detected_code': info.code, 'part': info.part, 'size': stat.st_size, 'mtime': stat.st_mtime,

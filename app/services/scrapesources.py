@@ -86,6 +86,8 @@ def remove_root(path: str) -> list[dict]:
 
 def validate_file(raw: str) -> Path:
     path = Path(raw)
+    if mediafile.is_advertisement(path.stem):
+        raise ValueError('广告视频已跳过，不参与刮削')
     if not path.is_absolute() or path.is_symlink() or not path.is_file() or not is_adoptable_video(path):
         raise ValueError(f"不是可处理的源视频: {path}")
     if path.stat().st_size == 0:
@@ -116,6 +118,8 @@ def group_entries(entries: list[dict]):
     groups = defaultdict(list)
     for entry in entries:
         info = mediafile.parse(Path(entry['path']))
+        if info.ignored:
+            raise ValueError('广告视频已跳过，不参与刮削')
         if entry.get('code'):
             manual = get_true_code(entry['code'])
             if not manual:
@@ -147,7 +151,7 @@ def video_detail(path: str) -> dict:
         if video is None:
             raise ValueError('视频不在当前下载源清单中，请更新清单后重试')
         attempt = session.get(ScrapeAttempt, video.source_key)
-        code = (attempt.code if attempt else '') or video.detected_code
+        code = '' if video.artifact_status == 'ignored' else (attempt.code if attempt else '') or video.detected_code
         row = session.get(Code, code) if code else None
         return {'path': video.path, 'name': video.name, 'code': code, 'size': video.size,
                 'part': video.part, 'links': video.links, 'metadata': row.to_dict() if row else {},
@@ -164,13 +168,14 @@ def list_videos(*, root: str = '', keyword: str = '', status: str = '', page: in
     root_keys = [r['root_key'] for r in configured_roots if not root or r['path'] == root]
     job = state()
     video, attempt = ScrapeSourceVideo, ScrapeAttempt
-    number = func.coalesce(func.nullif(attempt.code, ''), video.detected_code)
+    number = case((video.artifact_status == 'ignored', ''), else_=func.coalesce(func.nullif(attempt.code, ''), video.detected_code))
     title = func.coalesce(func.nullif(Code.cn_title, ''), Code.title, '')
     active = or_(and_(attempt.job_id == job['job_id'], literal(job['running'])),
                  and_(attempt.job_id == '', literal(scrapewatch._LOCK.locked())))
     queued = case((active, attempt.status), else_='interrupted')
     downloading = video.detected_code.in_(select(Code.code).where(Code.status == CodeStatus.DOWNLOADING).correlate(None))
     current = case(
+        (video.artifact_status == 'ignored', 'ignored'),
         (or_(Code.status == CodeStatus.DOWNLOADING, downloading), 'downloading'),
         (video.size == 0, 'empty'),
         (attempt.status.in_(['queued', 'running']), queued),

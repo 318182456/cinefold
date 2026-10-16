@@ -27,9 +27,9 @@ const stats = computed(() => {
 function showDetail(row) { detailRow.value = row; detailOpen.value = true }
 function processDetail(detail) { detailOpen.value = false; open([{ ...detailRow.value, code: detail.code, links: detail.links }], !!detail.links.length) }
 function filterStatus(value) { status.value = value; search() }
-const LABELS = { pending: '未刮削', complete: '已刮削', incomplete: '产物缺失', failed: '刮削失败', unrecognized: '需指定番号', downloading: '下载中', queued: '排队中', running: '刮削中', interrupted: '上次中断', cancelled: '已停止', empty: '空文件' }
+const LABELS = { pending: '未刮削', complete: '已刮削', incomplete: '产物缺失', failed: '刮削失败', unrecognized: '需指定番号', downloading: '下载中', queued: '排队中', running: '刮削中', interrupted: '上次中断', cancelled: '已停止', empty: '空文件', ignored: '已跳过广告' }
 let request = 0, timer, indexTimer, disposed = false, initialIndexRequested = false
-const selectable = row => !['downloading', 'queued', 'running', 'empty'].includes(row.status)
+const selectable = row => !['downloading', 'queued', 'running', 'empty', 'ignored'].includes(row.status)
 const allSelected = computed(() => data.value.items.filter(selectable).length > 0 && data.value.items.filter(selectable).every(r => selected.value.includes(r.path)))
 const selectedRows = computed(() => data.value.items.filter(r => selected.value.includes(r.path)))
 const formatSize = size => size >= 1073741824 ? `${(size / 1073741824).toFixed(2)} GB` : `${(size / 1048576).toFixed(1)} MB`
@@ -155,7 +155,7 @@ onUnmounted(() => { disposed = true; request++; clearTimeout(timer); clearTimeou
         <input v-model="selected" :value="row.path" type="checkbox" class="mt-2 shrink-0" :disabled="!selectable(row)" :aria-label="`选择 ${row.name}`" />
         <div class="min-w-0 flex-1">
           <button class="block max-w-full text-left focus-visible:outline focus-visible:outline-brand" :aria-label="`查看 ${row.name} 的刮削资料`" @click="showDetail(row)">
-            <span class="flex flex-wrap items-center gap-2"><span class="font-mono text-sm font-medium text-brand">{{ row.code || '待识别' }}</span><span class="rounded border px-2 py-0.5 text-[10px]" :class="row.status === 'complete' ? 'border-emerald-500/20 bg-emerald-500/10 text-emerald-400' : ['failed', 'interrupted'].includes(row.status) ? 'border-red-500/20 bg-red-500/10 text-red-400' : 'border-gray-700 bg-gray-800 text-gray-400'">{{ LABELS[row.status] || row.status }}</span></span>
+            <span class="flex flex-wrap items-center gap-2"><span class="font-mono text-sm font-medium text-brand">{{ row.status === 'ignored' ? '广告视频' : row.code || '待识别' }}</span><span class="rounded border px-2 py-0.5 text-[10px]" :class="row.status === 'complete' ? 'border-emerald-500/20 bg-emerald-500/10 text-emerald-400' : ['failed', 'interrupted'].includes(row.status) ? 'border-red-500/20 bg-red-500/10 text-red-400' : 'border-gray-700 bg-gray-800 text-gray-400'">{{ LABELS[row.status] || row.status }}</span></span>
             <span class="mt-1.5 block break-all text-sm text-gray-300 group-hover:text-white">{{ row.title || row.name }}</span>
             <span v-if="row.title" class="mt-1 block break-all text-xs text-gray-500">{{ row.name }}</span>
           </button>
@@ -164,7 +164,7 @@ onUnmounted(() => { disposed = true; request++; clearTimeout(timer); clearTimeou
         </div>
         <div class="flex shrink-0 flex-col items-end gap-3 pt-1 sm:flex-row sm:items-center">
           <button class="text-xs text-gray-400 hover:text-brand" @click="showDetail(row)">查看资料</button>
-          <button class="text-xs text-brand disabled:text-gray-600" :disabled="!selectable(row) || job.running" @click="open([row], !!row.links.length)">{{ !row.code ? '指定番号' : row.links.length ? '再次刮削' : '手动刮削' }}</button>
+          <button class="text-xs text-brand disabled:text-gray-600" :disabled="!selectable(row) || job.running" @click="open([row], !!row.links.length)">{{ row.status === 'ignored' ? '已跳过' : !row.code ? '指定番号' : row.links.length ? '再次刮削' : '手动刮削' }}</button>
         </div>
       </article>
     </div>

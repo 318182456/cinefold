@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from loguru import logger
 from pathlib import Path
 
-from app.utils import _CLEAN_CODE, _CODE_SUFFIX, find_serial_number, get_true_code
+from app.utils import _CLEAN_CODE, _CODE_SUFFIX, find_serial_number, get_true_code, normalize_serial_text
 
 # 分集标记的各种写法。实测样本里这几类占绝大多数：
 #
@@ -165,6 +165,7 @@ class MediaFileInfo:
     trailer: bool = False
     # 判定为欧美片命名，没有番号可提（见 looks_western）
     western: bool = False
+    ignored: bool = False
 
     @property
     def is_multipart(self) -> bool:
@@ -278,12 +279,22 @@ def _restore_version_suffix(code: str, source: str) -> str:
     避免把文件名里别处的 -C 误接上去。
     """
     flat = source.upper().replace("_", "-")
-    index = flat.find(code.upper())
+    index = flat.find(code.upper().replace('_', '-'))
     if index < 0:
         return code
     tail = flat[index + len(code):]
     match = _CODE_SUFFIX.match(tail)
     return f"{code}{match.group(0)}" if match else code
+
+
+def is_advertisement(stem: str) -> bool:
+    """只按明确的广告文案或纯站点文件名判断，不使用文件大小猜测。"""
+    compact = re.sub(r'\s+', '', stem).lower()
+    return bool(
+        any(phrase in compact for phrase in ('社区最新情报', '社區最新情報', '遊戲大全', '游戏大全',
+            '信誉保证服务全球', '信譽保證服務全球', '線上現場直播各式花式表演', '线上现场直播各式花式表演'))
+        or re.fullmatch(r'(?:www\.)?[a-z0-9-]+\.(?:com|net|cc|xyz|top|tv)', compact)
+    )
 
 
 def parse(path: Path | str) -> MediaFileInfo:
@@ -299,7 +310,10 @@ def parse(path: Path | str) -> MediaFileInfo:
     后者只有目录名带番号。
     """
     path = Path(path)
-    stem = path.stem
+    if is_advertisement(path.stem):
+        return MediaFileInfo(path=path, ignored=True)
+    stem = normalize_serial_text(path.stem).strip()
+    stem = re.sub(r'(?<=\d)([AB])$', r'-\1', stem, flags=re.IGNORECASE)
 
     part, part_raw = detect_part(stem)
     base = strip_part(stem) if part else stem
@@ -312,7 +326,7 @@ def parse(path: Path | str) -> MediaFileInfo:
     code = find_serial_number(base)
     if not code:
         # 文件名认不出来，试父目录。同样要先剥分集
-        parent = path.parent.name
+        parent = normalize_serial_text(path.parent.name)
         base = strip_part(parent) or parent
         code = find_serial_number(base)
 

@@ -55,6 +55,42 @@ CODE_PATTERN = re.compile(
 # 需要从标题里剔除的常见噪声，避免误判成番号
 NOISE_WORDS = {"1080P", "720P", "2160P", "4K", "8K", "H264", "H265", "X264", "X265", "HEVC"}
 
+# 下载站常在文件名前加域名，如 hhd800.com@DASD-875。
+# 只移除完整域名，不能把 MKV/MP4 等扩展名或合法的 HHD-800 番号当噪声。
+_SITE_DOMAIN = re.compile(
+    r"(?<![A-Za-z0-9])(?:https?://)?"
+    r"(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,62}[A-Za-z0-9])?\.)+"
+    r"(?:com|net|org|cc|tv|me|xyz|top|club|info|site|online|fun|vip|cn|jp|io|to|pw|la|ws|biz|pro|app|live)"
+    r"(?![A-Za-z0-9])(?::\d{2,5})?(?:\s*@)?", re.IGNORECASE,
+)
+
+
+def strip_site_domains(text: str) -> str:
+    """移除文件名/标题中的站点域名，保留域名后真正的番号。"""
+    return _SITE_DOMAIN.sub(' ', text)
+
+
+_DMM_FILENAME = re.compile(
+    r'(?<![A-Za-z0-9])(?:h_\d{2,6}|\d{1,4})?([A-Za-z]{2,6})(0\d{4})hhb'
+    r'(?:(\d{1,2})|_(\d{3}))?(?![A-Za-z0-9])', re.IGNORECASE,
+)
+
+
+def normalize_serial_text(text: str) -> str:
+    """只规范明确的发行文件名和版本标记，不截断未知尾字母。"""
+    def dmm(match):
+        core = f'{match[1].upper()}-{int(match[2]):03d}'
+        if match[3]:
+            return f'{core}-CD{int(match[3])}'
+        if match[4]:
+            return f'{core}-CD{int(match[4]) + 1}'
+        return core
+    text = _DMM_FILENAME.sub(dmm, strip_site_domains(text))
+    text = re.sub(r'(?<=\d)[-_]?uncensored(?:[-_](C|CH))?(?![A-Za-z0-9])',
+                  lambda m: '-UCH' if m[1] else '-U', text, flags=re.IGNORECASE)
+    text = re.sub(r'(?<=\d)(UCH|UC|CH|C|U)(?![A-Za-z0-9])', r'-\1', text, flags=re.IGNORECASE)
+    return text
+
 
 def is_code(text: str) -> bool:
     """判断字符串是否是一个番号。"""
@@ -79,14 +115,16 @@ def find_serial_number(text: str) -> str:
     # 下划线保留原样：日期型番号（032416_267）的下划线是官方写法的一部分，
     # 拍平成 - 会让 get_true_code 认不出它、也就吐不回正确的分隔符。
     # 其余番号的 _ 由 get_true_code 自己拍平，这里不做
-    cleaned = re.sub(r"\.(mp4|mkv|avi|wmv|rmvb|iso|torrent)$", "", text, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\.(mp4|mkv|avi|wmv|rmvb|iso|torrent)$", "", normalize_serial_text(text), flags=re.IGNORECASE)
     cleaned = cleaned.replace(" ", "-")
 
     for match in CODE_PATTERN.finditer(cleaned):
         candidate = match.group(1).upper().replace(" ", "-")
         if candidate.upper() in NOISE_WORDS:
             continue
-        return get_true_code(candidate)
+        code = get_true_code(candidate)
+        if code:
+            return code
     return ""
 
 
@@ -99,7 +137,7 @@ def find_serial_numbers(text: str, limit: int = 0) -> list[str]:
     if not text:
         return []
     # 下划线保留原样，理由同 find_serial_number
-    cleaned = re.sub(r"\.(mp4|mkv|avi|wmv|rmvb|iso|torrent)$", "", text, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\.(mp4|mkv|avi|wmv|rmvb|iso|torrent)$", "", normalize_serial_text(text), flags=re.IGNORECASE)
     cleaned = cleaned.replace(" ", "-")
 
     out: list[str] = []
@@ -184,6 +222,9 @@ def get_true_code(code: str) -> str:
     # 而这类番号的下划线是官方写法的一部分，换掉就查不到了。
     # 同理也不能落到「必须含字母」那道检查上 —— 它整个是纯数字
     stripped = code.strip()
+    versioned_date = re.fullmatch(r'(\d{6})[-_](\d{2,4})(-(?:C|CH|U|UC|UCH))', stripped, re.IGNORECASE)
+    if versioned_date and _is_mmddyy(versioned_date[1]):
+        return f'{versioned_date[1]}_{versioned_date[2]}{versioned_date[3].upper()}'
     date_match = _DATE_CODE.match(stripped) or _DATE_CODE_PLAIN.match(stripped)
     if date_match and _is_mmddyy(date_match.group(1)):
         return f"{date_match.group(1)}_{date_match.group(2)}"

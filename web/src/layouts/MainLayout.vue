@@ -53,7 +53,6 @@ const destinations = [
       { name: 'WatchDir', label: '监控目录', icon: 'M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z' },
       { name: 'Scrape', label: '入库管理', icon: 'M7 4v16M17 4v16M3 8h4m10 0h4M3 12h18M3 16h4m10 0h4M4 20h16a1 1 0 001-1V5a1 1 0 00-1-1H4a1 1 0 00-1 1v14a1 1 0 001 1z' },
       { name: 'Config', label: '设置', icon: 'M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z' },
-      { name: 'Migrate', label: '数据迁移', icon: 'M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4' },
       { name: 'Profile', label: '账户', icon: 'M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z' },
     ],
   },
@@ -70,8 +69,8 @@ const groups = [{ title: '工作区', items: [
   workspace('Subscribe', '订阅', [['Subscribe', '订阅列表'], ['SubscriptionRules', '条件与方案']]),
   workspace('Search', '发现', [['Search', '搜索'], ['Rank', '榜单'], ['Hot', '推荐'], ['Actors', '演员'], ['Brands', '厂牌']]),
   workspace('Scrape', '入库管理'),
-  workspace('Task', '运行记录', [['Task', '任务'], ['Logs', '日志']]),
-  workspace('Config', '设置', [['Config', '系统配置'], ['ToolConnections', '工具接入'], ['DataSource', '数据源'], ['Migrate', '数据迁移'], ['Profile', '账户']]),
+  workspace('Logs', '运行记录', [['Logs', '日志'], ['Task', '任务']]),
+  workspace('Config', '设置', [['Config', '系统配置'], ['ToolConnections', '工具接入'], ['DataSource', '数据源'], ['Maintenance', '维护'], ['Profile', '账户']]),
 ] }]
 const activeWorkspace = computed(() => groups[0].items.find(item => item.name === route.name || item.pages.some(page => page.name === route.name)))
 

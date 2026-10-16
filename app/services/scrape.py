@@ -422,11 +422,11 @@ def scrape_group(
     settings = get_settings()
     overwrite = settings.scrape_overwrite if overwrite is None else overwrite
 
-    playable = [i for i in items if not i.trailer]
-    dropped = [i for i in items if i.trailer]
+    playable = [i for i in items if not i.trailer and not i.ignored]
+    dropped = [i for i in items if i.trailer or i.ignored]
     for item in dropped:
         # 预告片不是正片，刮进媒体库会多出一堆几十秒的"影片"
-        result.skipped.append(f"预告片跳过: {item.path.name}")
+        result.skipped.append(f"{'广告视频' if item.ignored else '预告片'}跳过: {item.path.name}")
 
     if not playable:
         result.error = "这一组里没有正片"
