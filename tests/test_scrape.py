@@ -374,6 +374,7 @@ class Test人工指定番号:
             return {"code": target, "title": "T", "casts": "A"}
 
         with patch.object(service, "get_settings", lambda: _Settings()), \
+                patch('app.services.mediaduplicate.check_existing', lambda *a: ({}, [])), \
                 patch.object(service, "_load_meta", _meta), \
                 patch.object(service, "_cover_bytes", lambda m, c: b""), \
                 patch.object(service, "_download", lambda u, c: []), \

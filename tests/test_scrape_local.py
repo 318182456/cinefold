@@ -179,7 +179,7 @@ def test_preview_uses_local_metadata_and_includes_artwork(db, tmp_path, monkeypa
     assert not (tmp_path / 'output').exists()
 
 
-def test_skipped_part_does_not_shift_source_registration(tmp_path, monkeypatch):
+def test_skipped_part_does_not_shift_source_registration(tmp_path, monkeypatch, db):
     from app.core.config import Settings
     first = tmp_path / "ABS-001-CD1.mp4"; first.touch()
     second = tmp_path / "ABS-001-CD2.mp4"; second.touch()

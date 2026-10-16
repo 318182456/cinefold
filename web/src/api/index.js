@@ -131,6 +131,19 @@ export const generateReview = (code, force = false) =>
 export const getReview = (code) => http.get('/medialinks/review', { params: { code } })
 export const previewMediaLinkDelete = (payload) =>
   http.post('/medialinks/preview', payload)
+async function mediaDuplicateJob(action, payload) {
+  const { job_id: jobId } = await http.post(`/medialinks/duplicates/${action}`, payload)
+  for (;;) {
+    const job = await http.get(`/medialinks/duplicates/jobs/${jobId}`)
+    if (!job.running) {
+      if (job.error) throw new Error(job.error)
+      return job.result
+    }
+    await new Promise(resolve => setTimeout(resolve, 1500))
+  }
+}
+export const previewMediaDuplicates = (payload) => mediaDuplicateJob('preview', payload)
+export const mergeMediaDuplicates = (payload) => mediaDuplicateJob('merge', payload)
 export const deleteMediaLink = (payload) => http.post('/medialinks/delete', payload)
 // 只删库里的记录，不碰文件
 export const dropMediaLinkRecord = (linkPath) =>

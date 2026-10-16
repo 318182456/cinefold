@@ -501,6 +501,15 @@ def _lookup_links(link_path: str = "", code: str = "") -> list[MediaLink]:
     with session_scope() as session:
         if link_path:
             row = session.get(MediaLink, link_path)
+            from app.database.models import MediaMerge
+            merged = session.get(MediaMerge, link_path)
+            if merged is None:
+                merged = next((r for r in session.scalars(select(MediaMerge))
+                               if _norm_path(r.old_path) == _norm_path(link_path)), None)
+            if merged is not None and (row is None or row.create_time is None
+                                       or row.create_time <= merged.create_time):
+                logger.info(f'旧媒体路径已合并，忽略延迟删除事件: {link_path}')
+                return []
             if row is not None:
                 return [row]
             # Emby 报的路径可能与登记时的分隔符或大小写不一致，退回按名字匹配

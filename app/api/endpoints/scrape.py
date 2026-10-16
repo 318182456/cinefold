@@ -337,13 +337,18 @@ def _preview_sync(body: ScrapeRequest) -> dict:
     # 用户也就无从判断刮得对不对（原来这里写死了 fetch=False，
     # 那个勾选形同虚设）
     meta_cache: dict[str, dict] = {}
+    duplicate_warnings = []
     for code, infos in groups.items():
+        from app.services.mediaduplicate import check_existing
+        existing, conflicts = check_existing(code, infos)
+        duplicate_warnings.extend(conflicts)
         meta = meta_cache.get(code)
         if meta is None:
-            meta = scrape_service.load_group_meta(code, infos, fetch=body.fetch_meta)
+            meta = (scrape_service._read_meta(code) if conflicts else
+                    scrape_service.load_group_meta(code, infos, fetch=body.fetch_meta))
             meta_cache[code] = meta
         for info in infos:
-            target = scrape_service._target_path(meta, info, body.target_dir)
+            target = existing.get(str(info.path)) or scrape_service._target_path(meta, info, body.target_dir)
             preview_images = {} if info.trailer else _preview_images(meta, settings)
             items.append({
                 "code": code,
@@ -354,6 +359,8 @@ def _preview_sync(body: ScrapeRequest) -> dict:
                 "uncensored": info.uncensored,
                 "target": str(target),
                 "has_meta": bool(meta.get("title") or meta.get("cn_title")),
+                "duplicate_error": '；'.join(conflicts),
+                "reusing_existing": str(info.path) in existing,
                 "sources": meta.get("_sources", []),
                 # NFO 的实际内容与图片地址。让用户直接看到会写进去什么，
                 # 而不是只看到文件名 —— 元数据抓得对不对，看内容才知道。
@@ -361,7 +368,7 @@ def _preview_sync(body: ScrapeRequest) -> dict:
                 "nfo": "" if info.trailer else _preview_nfo(meta, info, target),
                 "images": preview_images,
                 "outputs": (
-                    [] if info.trailer
+                    [] if info.trailer or conflicts
                     else _planned_outputs(target, settings, preview_images)
                 ),
             })
@@ -371,7 +378,7 @@ def _preview_sync(body: ScrapeRequest) -> dict:
         "unknown": unknown,
         "dir_template": settings.scrape_dir_template,
         "file_template": settings.scrape_file_template,
-        "warnings": _warn_paths(items),
+        "warnings": duplicate_warnings + _warn_paths(items),
     })
 
 

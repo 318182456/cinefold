@@ -42,6 +42,44 @@ class DeleteRequest(BaseModel):
     dry_run: bool = True
 
 
+class MergeRequest(BaseModel):
+    code: str
+    keep_path: str
+    token: str = ''
+
+
+@router.post('/duplicates/preview')
+def preview_duplicates(body: MergeRequest, current_user: str = Depends(get_current_user)):
+    from app.services.mediaduplicate import preview, start_job
+    try:
+        return ResponseEntity.ok(start_job(lambda: preview(body.code, body.keep_path)))
+    except (ValueError, OSError) as exc:
+        return ResponseEntity.fail(str(exc), code=400)
+
+
+@router.post('/duplicates/merge')
+def merge_duplicates(body: MergeRequest, current_user: str = Depends(get_current_user)):
+    from app.services.mediaduplicate import merge, start_job
+    def run():
+        result = merge(body.code, body.keep_path, body.token)
+        _invalidate(*result['removed'], result['keep_path'])
+        _drop_stats_cache()
+        return result
+    try:
+        return ResponseEntity.ok(start_job(run))
+    except (ValueError, OSError) as exc:
+        return ResponseEntity.fail(str(exc), code=400)
+
+
+@router.get('/duplicates/jobs/{job_id}')
+def duplicate_job(job_id: str, current_user: str = Depends(get_current_user)):
+    from app.services.mediaduplicate import job_state
+    try:
+        return ResponseEntity.ok(job_state(job_id))
+    except ValueError as exc:
+        return ResponseEntity.fail(str(exc), code=404)
+
+
 class SubtitleRequest(BaseModel):
     code: str
     # 覆盖已有字幕。默认不覆盖，避免把用户手工放的那份冲掉

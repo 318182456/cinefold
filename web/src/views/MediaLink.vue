@@ -5,6 +5,7 @@ import {
   dropMediaLinkRecord, fetchSubtitle, generateReview, getMediaLinkStats,
   getReview, listMediaLinkOrphans, listMediaLinks, previewMediaLinkDelete,
   pruneMediaLinks, recoverMediaLinks, registerMediaLink,
+  previewMediaDuplicates, mergeMediaDuplicates,
 } from '@/api'
 import { useToast } from '@/composables/useToast'
 import LoadingBlock from '@/components/LoadingBlock.vue'
@@ -117,6 +118,36 @@ const confirming = ref(null)
 const preview = ref(null)
 const previewing = ref(false)
 const deleting = ref(false)
+const merging = ref(false), mergeChecking = ref(false), mergeGroup = ref(null), mergePlan = ref(null)
+const mergeKeep = ref('')
+function openMerge(group) {
+  mergeGroup.value = group
+  mergeKeep.value = group.links.find(l => l.link_exists && l.source_path !== l.link_path)?.link_path
+    || group.links.find(l => l.link_exists)?.link_path || ''
+  mergePlan.value = null
+}
+async function checkDuplicates() {
+  mergeChecking.value = true
+  mergePlan.value = null
+  try {
+    mergePlan.value = await previewMediaDuplicates({ code: mergeGroup.value.code, keep_path: mergeKeep.value })
+  } catch (err) { toast.error(err.message) }
+  finally { mergeChecking.value = false }
+}
+async function confirmMerge() {
+  const plan = mergePlan.value
+  merging.value = true
+  try {
+    const data = await mergeMediaDuplicates({ code: plan.code, keep_path: plan.keep_path, token: plan.token })
+    toast.success(`已合并 ${data.removed.length} 个重复视频，下载源和种子保留`)
+    mergeGroup.value = null
+    await Promise.all([load(), reloadStats()])
+  } catch (err) {
+    toast.error(err.message)
+    mergePlan.value = null
+    await load()
+  } finally { merging.value = false }
+}
 
 const pages = computed(() => Math.max(1, Math.ceil(total.value / size.value)))
 
@@ -1046,6 +1077,9 @@ onMounted(() => {
           >
             联动删除
           </button>
+          <button v-if="group.liveCount > 1" class="btn-ghost px-2 py-0.5 text-[11px] text-brand" @click="openMerge(group)">
+            合并重复
+          </button>
         </div>
 
         <div
@@ -1209,6 +1243,34 @@ onMounted(() => {
         </div>
       </div>
     </div>
+
+    <Teleport to="body">
+      <div v-if="mergeGroup" class="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
+        <div class="card max-h-[90vh] w-full max-w-3xl space-y-4 overflow-auto">
+          <h3 class="text-sm font-medium">合并重复影片 · {{ mergeGroup.code }}</h3>
+          <p class="text-xs text-gray-400">选择保留位置，再校验完整视频内容。不同内容和不同分段会保留。只移除重复的库内视频及关联，下载源和种子不删除；旧图片、NFO 和字幕保留，缺少的字幕会补到保留位置。</p>
+          <label class="block space-y-2 text-xs">
+            <span>保留的媒体库文件</span>
+            <select v-model="mergeKeep" class="input w-full" :disabled="mergeChecking || merging" @change="mergePlan = null">
+              <option v-for="link in mergeGroup.links.filter(l => l.link_exists)" :key="link.link_path" :value="link.link_path">{{ link.link_path }}</option>
+            </select>
+          </label>
+          <button class="btn-ghost text-xs" :disabled="mergeChecking || merging || !mergeKeep" @click="checkDuplicates">
+            {{ mergeChecking ? '正在读取并校验视频，大文件可能需要几分钟…' : '检查重复内容' }}
+          </button>
+          <div v-if="mergePlan" class="space-y-3 text-xs">
+            <p class="text-brand">将移除 {{ mergePlan.duplicates.length }} 个内容完全相同的库内视频入口：</p>
+            <p v-for="item in mergePlan.duplicates" :key="item.path" class="break-all text-gray-300">{{ item.path }}</p>
+            <p v-if="!mergePlan.duplicates.length" class="text-gray-400">没有可合并的重复视频。</p>
+            <div v-for="item in mergePlan.skipped" :key="item.path" class="break-all text-amber-400">保留：{{ item.path }} · {{ item.reason }}</div>
+          </div>
+          <div class="flex justify-end gap-2">
+            <button class="btn-ghost text-xs" :disabled="mergeChecking || merging" @click="mergeGroup = null">关闭</button>
+            <button class="btn-primary text-xs" :disabled="mergeChecking || merging || !mergePlan?.duplicates.length" @click="confirmMerge">{{ merging ? '重新校验并合并中…' : '确认合并重复视频' }}</button>
+          </div>
+        </div>
+      </div>
+    </Teleport>
 
     <!-- 删除确认：先演练，看清范围再动手 -->
     <div

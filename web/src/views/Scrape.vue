@@ -271,9 +271,11 @@ async function doRun() {
             <span v-if="item.trailer" class="text-[11px] text-gray-500">预告片·跳过</span>
             <span v-if="item.subbed" class="text-[11px] text-emerald-400">中文字幕</span>
             <span v-if="item.uncensored" class="text-[11px] text-amber-400">无码</span>
+            <span v-if="item.reusing_existing" class="text-[11px] text-emerald-400">复用已有位置</span>
             <span v-if="!item.has_meta" class="text-[11px] text-gray-600">无元数据</span>
           </div>
 
+          <p v-if="item.duplicate_error" class="mt-1 break-all text-xs text-amber-400">{{ item.duplicate_error }}</p>
           <p v-if="item.source" class="mt-0.5 break-all font-mono text-[11px] text-gray-600">
             源 {{ item.source }}
           </p>

@@ -526,6 +526,12 @@ def scrape_group(
         result.error = "这一组里没有正片"
         return result
 
+    from app.services.mediaduplicate import check_existing
+    existing_targets, duplicates = check_existing(code, playable, existing_targets)
+    if duplicates:
+        result.error = '；'.join(duplicates)
+        return result
+
     meta = (load_group_meta(code, playable, fetch=fetch_meta, refresh=True)
             if refresh_metadata else load_group_meta(code, playable, fetch=fetch_meta))
     result.sources = meta.get("_sources", [])
@@ -574,7 +580,10 @@ def scrape_group(
 
         # 先检查冲突，不能先覆盖另一份视频的图片/NFO。
         try:
-            conflict = target.exists() and not target.samefile(info.path)
+            from app.services.mediaduplicate import verified_existing
+            reused_copy = (existing_targets.get(str(info.path)) == target and target.exists()
+                           and not target.samefile(info.path) and verified_existing(info.path, target))
+            conflict = target.exists() and not target.samefile(info.path) and not reused_copy
         except OSError as exc:
             failures.append(f'无法检查目标文件: {exc}')
             continue
@@ -619,7 +628,10 @@ def scrape_group(
                 result.skipped.append(note)
                 continue
         # 元数据齐备后最后公开视频，让 Emby 首次扫描即可读到 NFO。
-        ok, note = _make_link(info.path, target)
+        if reused_copy and not verified_existing(info.path, target):
+            failures.append(f'已合并文件发生变化，请重新检查: {target}')
+            continue
+        ok, note = _make_link(target if reused_copy else info.path, target)
         if not ok:
             result.skipped.append(note)
             failures.append(note)
