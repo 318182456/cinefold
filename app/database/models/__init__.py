@@ -14,11 +14,10 @@ from app.database.models.curation import (
     CodeProfile, Collection, CollectionItem, DownloadProfile, EmbyWatch,
     LibraryPreference, RuleExclusion, SubscriptionRule,
 )
-from app.database.models.resource import Resource, ResourceFeed, ResourceMatch
 
 __all__ = [
     "Actor", "Cache", "Code", "CodeAlias", "CodeStatus", "DataSource", "History",
     "MediaLink", "Passkey", "PendingDelete", "Review", "User", "WatchDir",
     "CodeProfile", "Collection", "CollectionItem", "DownloadProfile", "EmbyWatch",
-    "LibraryPreference", "RuleExclusion", "SubscriptionRule", "Resource", "ResourceFeed", "ResourceMatch",
+    "LibraryPreference", "RuleExclusion", "SubscriptionRule",
 ]

@@ -75,31 +75,9 @@ def _load_meta(code: str, fetch: bool = True) -> dict:
     """
     from app import services
 
-    with session_scope() as session:
-        row = session.get(Code, code)
-        if row is not None and (row.title or row.cn_title):
-            return {
-                "code": row.code,
-                "title": row.title or "",
-                "cn_title": row.cn_title or "",
-                "outline": row.outline or "",
-                "release_date": row.release_date or "",
-                "duration": row.duration or "",
-                "producer": row.producer or "",
-                "publisher": row.publisher or "",
-                "series": row.series or "",
-                "genres": row.genres or "",
-                "casts": row.casts or "",
-                "star": row.star,
-                "banner": row.banner or "",
-                "poster": row.poster or "",
-                "still_photo": row.still_photo or "",
-                "local_banner": row.local_banner or "",
-                "portrait_side": row.portrait_side or "",
-            }
-
-    if not fetch:
-        return {}
+    current = _read_meta(code)
+    if not fetch or not _needs_metadata(current):
+        return current
 
     # 库里没有：多源抓取并合并。刮削比订阅更看重字段完整度，
     # 所以走 merge.fetch_merged（全抓完挑最好的）而不是 ladysite
@@ -109,7 +87,40 @@ def _load_meta(code: str, fetch: bool = True) -> dict:
     if detail:
         _save_meta(code, detail)
         _translate_quietly(code)
-    return _load_meta(code, fetch=False)
+    return _read_meta(code)
+
+
+def _read_meta(code: str) -> dict:
+    with session_scope() as session:
+        row = session.get(Code, code)
+        if row is None:
+            return {}
+        detail = merge.clean_detail(row.to_dict(), code)
+        if not detail:
+            return {}
+        return {**detail, "code": row.code, "local_banner": row.local_banner or "", "portrait_side": row.portrait_side or ""}
+
+
+def _needs_metadata(meta: dict) -> bool:
+    return not (
+        (meta.get("title") or meta.get("cn_title"))
+        and all(meta.get(key) for key in ("casts", "genres", "release_date", "duration"))
+        and any(meta.get(key) for key in ("banner", "poster", "local_banner", "_local_cover"))
+    )
+
+
+def load_group_meta(code: str, items: list[MediaFileInfo], fetch: bool = True) -> dict:
+    """预览与执行共用：本地文件补空 → 资料库 → 联网补缺，不覆盖已有资料。"""
+    from app import services
+    from app.modules.scrape import local
+    local_meta = local.read_group(code, [i.path for i in items])
+    if local_meta:
+        services._ensure_codes([code])
+        _save_meta(code, local_meta)
+        current = {**_read_meta(code), **{k: v for k, v in local_meta.items() if k.startswith("_local_")}}
+        meta = _load_meta(code, fetch=fetch and _needs_metadata(current))
+        return {"code": code, **meta, **{k: v for k, v in local_meta.items() if k.startswith("_local_")}}
+    return _load_meta(code, fetch=fetch)
 
 
 def _translate_quietly(code: str) -> None:
@@ -150,8 +161,9 @@ def _save_meta(code: str, detail: dict) -> None:
         row = session.get(Code, code)
         if row is None:
             return
-        for key, value in detail.items():
-            if value and hasattr(row, key) and not getattr(row, key, None):
+        for key, value in merge.clean_detail(detail, code).items():
+            existing = getattr(row, key, None)
+            if existing in (None, "") or key in ("title", "cn_title") and not merge.clean_detail({key: existing}).get(key):
                 setattr(row, key, value)
 
 
@@ -273,6 +285,12 @@ def _cover_bytes(meta: dict, code: str) -> bytes:
     """
     from app.utils import imagecache
 
+    if meta.get("_local_cover"):
+        try:
+            return Path(meta["_local_cover"]).read_bytes()
+        except OSError:
+            pass
+
     relative = (meta.get("local_banner") or "").split(",")[0].strip()
     if relative:
         path = imagecache.resolve_relative(relative)
@@ -375,7 +393,7 @@ def scrape_group(
         result.error = "这一组里没有正片"
         return result
 
-    meta = _load_meta(code, fetch=fetch_meta)
+    meta = load_group_meta(code, playable, fetch=fetch_meta)
     if not meta:
         result.error = f"取不到元数据: {code}"
         return result
@@ -393,6 +411,7 @@ def scrape_group(
     )
 
     total = len([i for i in playable if i.part > 0])
+    linked_items = []
     for info in playable:
         info_total = total
         target = _target_path(meta, info, target_dir)
@@ -403,6 +422,7 @@ def scrape_group(
             logger.warning(f"[{code}] {note}")
             continue
         result.links.append(target)
+        linked_items.append(info)
 
         written = scrape_images.write_images(
             target, image_set, overwrite=settings.scrape_overwrite
@@ -422,7 +442,7 @@ def scrape_group(
             result.nfo_written += 1
 
     if result.links:
-        _register(code, playable, result)
+        _register(code, linked_items, result)
 
     logger.info(
         f"[{code}] 刮削完成: {len(result.links)} 个产物, "

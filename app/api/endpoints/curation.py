@@ -332,6 +332,24 @@ class HealthRequest(BaseModel):
     hashes: bool = False
 
 
+class CloudRequest(BaseModel):
+    magnet: str = Field(min_length=1, max_length=16000)
+    save_path: str = Field(default="", max_length=1000)
+
+
+@router.post("/cloudnas/offline")
+def cloud_offline(body: CloudRequest):
+    from app.modules.cloudnas import add_offline
+    try:
+        return ResponseEntity.ok(add_offline(body.magnet, body.save_path))
+    except ImportError:
+        raise HTTPException(400, "CloudDrive 依赖未安装，请更新 requirements.txt 中的依赖后重试")
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except Exception:
+        raise HTTPException(502, "CloudDrive 请求失败，请检查服务地址、端口与网络")
+
+
 @router.get("/library/health/status")
 def health_status():
     from app.services.libraryhealth import snapshot

@@ -17,7 +17,21 @@ onUnmounted(() => { disposed = true; clearTimeout(timer) })
     <div><h1 class="text-xl font-semibold">收藏分析与健康检查</h1><p class="mt-1 text-sm text-gray-500">了解收藏分布，检查缺失文件、多版本和内容重复。</p></div>
     <template v-if="stats">
       <div class="grid grid-cols-2 gap-3 lg:grid-cols-4"><div v-for="[label, value] in [['库内影片',stats.total],['已看完',stats.watched],['累计播放',stats.plays],['收藏',stats.favorites]]" :key="label" class="card"><p class="text-sm text-gray-500">{{ label }}</p><p class="mt-2 text-2xl font-semibold">{{ value }}</p></div></div>
-      <div class="grid gap-4 lg:grid-cols-3"><div v-for="[label, rows] in [['演员分布',stats.actors],['标签分布',stats.genres],['发行商分布',stats.publishers]]" :key="label" class="card space-y-3"><h2 class="font-medium">{{ label }}</h2><div v-for="row in rows.slice(0,10)" :key="row.name"><div class="mb-1 flex justify-between text-xs text-gray-400"><span class="truncate pr-3">{{ row.name }}</span><span>{{ row.count }}</span></div><div class="h-1.5 rounded bg-gray-800"><div class="h-full rounded bg-brand/70" :style="{ width: `${row.count / (rows[0]?.count || 1) * 100}%` }" /></div></div><p v-if="!rows.length" class="text-sm text-gray-500">暂无资料</p></div></div>
+      <div class="grid gap-4 lg:grid-cols-3">
+        <div v-for="[label, rows, filter] in [['演员分布',stats.actors,'actor'],['标签分布',stats.genres,'genre'],['发行商分布',stats.publishers,'publisher']]" :key="label" class="card space-y-3">
+          <h2 class="font-medium">{{ label }}</h2>
+          <RouterLink v-for="row in rows.slice(0,10)" :key="row.name"
+            :to="{ name: 'Library', query: { [filter]: row.name } }"
+            class="group block rounded-lg p-2 -mx-2 transition-colors hover:bg-gray-800 focus-visible:outline focus-visible:outline-2 focus-visible:outline-brand"
+            :title="`查看「${row.name}」的库内作品`">
+            <div class="mb-1 flex justify-between text-xs text-gray-400 group-hover:text-brand">
+              <span class="truncate pr-3">{{ row.name }}</span><span>{{ row.count }} 部 ↗</span>
+            </div>
+            <div class="h-1.5 rounded bg-gray-800"><div class="h-full rounded bg-brand/70" :style="{ width: `${row.count / (rows[0]?.count || 1) * 100}%` }" /></div>
+          </RouterLink>
+          <p v-if="!rows.length" class="text-sm text-gray-500">暂无资料</p>
+        </div>
+      </div>
       <div class="card space-y-3"><div class="flex items-center gap-3"><h2 class="font-medium">年度观看回顾</h2><input v-model.number="year" class="input !w-28" type="number" min="1900" max="2200" @change="load"></div><p class="text-xs text-gray-500">{{ stats.watch_note }}</p><div class="flex flex-wrap gap-3"><div v-for="(count, month) in stats.last_watched_months" :key="month" class="rounded-lg bg-gray-800 px-4 py-3 text-center"><p class="text-xs text-gray-500">{{ month }}</p><p class="mt-1">{{ count }} 部</p></div><p v-if="!Object.keys(stats.last_watched_months).length" class="text-sm text-gray-500">该年暂无观看数据，请先在媒体库页面同步 Emby。</p></div></div>
     </template>
     <div class="card space-y-4"><div class="flex flex-wrap items-center justify-between gap-3"><h2 class="font-medium">媒体健康检查</h2><div class="flex gap-2"><button class="btn-ghost" :disabled="busy || health.running" @click="scan(false)">快速检查</button><button class="btn-primary" :disabled="busy || health.running" @click="scan(true)">完整内容查重</button></div></div><p class="text-xs text-gray-500">完整查重对同体积文件读取全部内容并计算 SHA-256，大库可能耗时较长。相同硬链接按一份文件计算。检查不会删除文件。</p><p v-if="health.running" class="text-sm text-brand">检查中：{{ health.done }} / {{ health.total }}，文件枚举完成后继续计算内容指纹…</p><p v-if="health.error" class="text-sm text-red-400">{{ health.error }}</p>

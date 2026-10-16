@@ -1,13 +1,15 @@
 <script setup>
 import { computed, onMounted, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import http, { codeCover, getConfig, saveConfig } from '@/api'
 import { useToast } from '@/composables/useToast'
 import PrivateImage from '@/components/PrivateImage.vue'
 import ModalDialog from '@/components/ModalDialog.vue'
 import MetadataConditions from '@/components/MetadataConditions.vue'
 const toast = useToast()
+const route = useRoute(), router = useRouter()
 const items = ref([]), total = ref(0), page = ref(1), busy = ref(false), collections = ref([]), selected = ref(null), recommendations = ref([])
-const filters = ref({ keyword: '', genre: '', actor: '', favorite: false, watch_later: false, unseen: false, include_skipped: false, collection_id: '', sort: 'recent' })
+const filters = ref({ keyword: '', genre: '', actor: '', publisher: '', favorite: false, watch_later: false, unseen: false, include_skipped: false, collection_id: '', sort: 'recent' })
 const collectionOpen = ref(false), collectionForm = ref({ name: '', kind: 'manual', conditions: {} }), collectionEditing = ref(null), chosenCollection = ref('')
 const embyOpen = ref(false), embyUsers = ref([]), embyUser = ref(''), embySyncing = ref(false)
 let request = 0
@@ -28,7 +30,19 @@ async function configureEmby() { embyOpen.value = true; await perform(async () =
 async function syncEmby() { embySyncing.value = true; try { if (!embyUser.value) throw new Error('请先选择 Emby 用户'); await saveConfig({ emby_user_id: embyUser.value }); const result = await http.post('/library/emby/sync', null, { timeout: 600000 }); toast.success(`同步 ${result.matched} 条，${result.ignored} 条无法匹配本地番号`); embyOpen.value = false; await load() } catch (e) { toast.error(e.message) } finally { embySyncing.value = false } }
 function search() { page.value = 1; load() }
 watch(page, load)
-onMounted(() => { load(); perform(reloadCollections) })
+watch(() => route.query, (query) => {
+  for (const key of ['actor', 'genre', 'publisher']) {
+    filters.value[key] = typeof query[key] === 'string' ? query[key] : ''
+  }
+  if (page.value !== 1) page.value = 1
+  else load()
+}, { immediate: true })
+function clearFilters() {
+  Object.assign(filters.value, { keyword: '', genre: '', actor: '', publisher: '', favorite: false, watch_later: false, unseen: false, include_skipped: false, collection_id: '', sort: 'recent' })
+  if (Object.keys(route.query).length) router.replace({ name: 'Library', query: {} })
+  else search()
+}
+onMounted(() => perform(reloadCollections))
 </script>
 <template>
   <div class="space-y-5">
@@ -36,7 +50,12 @@ onMounted(() => { load(); perform(reloadCollections) })
     <form class="card space-y-3" @submit.prevent="search">
       <div class="flex flex-wrap gap-3"><input v-model="filters.keyword" class="input !w-auto min-w-40 flex-1" placeholder="搜索番号、标题、演员、标签" aria-label="搜索媒体库"><select v-model="filters.collection_id" class="input !w-auto" @change="search"><option value="">全部影片</option><option v-for="c in collections" :key="c.id" :value="c.id">{{ c.kind === 'smart' ? '智能 · ' : '' }}{{ c.name }}</option></select><select v-model="filters.sort" class="input !w-auto" @change="search"><option value="recent">最近更新</option><option value="release">最新发行</option><option value="rating">个人评分</option><option value="plays">播放最多</option><option value="size">文件体积</option></select><button class="btn-ghost">搜索</button></div>
       <div class="flex flex-wrap items-center gap-4 text-sm"><label v-for="[key, label] in [['favorite','收藏'],['watch_later','想看'],['unseen','未看完'],['include_skipped','显示已跳过']]" :key="key" class="flex items-center gap-2"><input v-model="filters[key]" type="checkbox" @change="search">{{ label }}</label><span class="ml-auto text-gray-500">{{ total }} 部</span></div>
-      <div class="flex flex-wrap gap-3"><input v-model="filters.genre" class="input !w-auto" placeholder="精确标签"><input v-model="filters.actor" class="input !w-auto" placeholder="精确演员名"></div>
+      <div class="flex flex-wrap gap-3">
+        <input v-model="filters.genre" class="input !w-auto" placeholder="精确标签" aria-label="标签筛选">
+        <input v-model="filters.actor" class="input !w-auto" placeholder="精确演员名" aria-label="演员筛选">
+        <input v-model="filters.publisher" class="input !w-auto" placeholder="精确发行商" aria-label="发行商筛选">
+        <button type="button" class="btn-ghost" @click="clearFilters">清除筛选</button>
+      </div>
     </form>
     <div v-if="activeCollection" class="flex items-center gap-3 text-sm"><span class="text-gray-400">{{ activeCollection.kind === 'smart' ? '智能片单' : '手动片单' }} · {{ activeCollection.name }}</span><button class="text-brand" @click="newCollection(activeCollection)">编辑</button><button class="text-red-400" @click="deleteCollection">删除片单</button></div>
     <p v-if="busy" class="py-8 text-center text-gray-500">加载中…</p>

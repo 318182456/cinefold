@@ -8,6 +8,11 @@ import ModalDialog from '@/components/ModalDialog.vue'
 import PrivateImage from '@/components/PrivateImage.vue'
 
 const toast = useToast()
+function previewImage(url) {
+  if (!url?.startsWith('/api/v1/scrape/local-cover?')) return url
+  const token = localStorage.getItem('token') || ''
+  return `${url}&token=${encodeURIComponent(token)}`
+}
 // 隐私模式对刮削预览同样适用 —— 这里显示的就是封面与剧照本身，
 // 和番号卡片上那些是同一类内容，没理由在这个页面裸奔
 const configStore = useConfigStore()
@@ -178,7 +183,7 @@ async function doRun() {
 
         <label class="flex items-center gap-2">
           <input v-model="form.fetch_meta" type="checkbox" class="accent-brand">
-          <span class="text-xs text-gray-400">库里没有时去抓元数据</span>
+          <span class="text-xs text-gray-400">优先读取本地 NFO/JSON，联网补全缺失元数据</span>
           <span class="text-[11px] text-gray-600">关掉则只用本地已有的，省跨境请求</span>
         </label>
       </div>
@@ -395,14 +400,14 @@ async function doRun() {
               <div v-if="detail.images?.poster" class="space-y-1">
                 <p class="text-[11px] text-gray-600">海报（列表封面·已裁成竖版）</p>
                 <PrivateImage
-                  :src="detail.images.poster"
+                  :src="previewImage(detail.images.poster)"
                   img-class="max-h-56 rounded border border-gray-800 object-contain"
                 />
               </div>
               <div v-if="detail.images?.fanart" class="space-y-1">
                 <p class="text-[11px] text-gray-600">背景（详情页大图·原图不裁）</p>
                 <PrivateImage
-                  :src="detail.images.fanart"
+                  :src="previewImage(detail.images.fanart)"
                   img-class="max-h-56 rounded border border-gray-800 object-contain"
                 />
               </div>

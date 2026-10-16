@@ -83,6 +83,51 @@ class SourceResult:
     error: str = ""
 
 
+METADATA_FIELDS = {
+    "title", "cn_title", "outline", "release_date", "duration", "producer", "publisher",
+    "series", "genres", "casts", "star", "banner", "poster", "still_photo", "preview_url",
+}
+_BAD_TITLES = {
+    "just a moment", "access denied", "403 forbidden", "404 not found", "attention required! | cloudflare",
+    "无法访问此网站", "this site can't be reached", "this site can’t be reached", "err_connection_refused",
+    "err_name_not_resolved", "err_internet_disconnected",
+}
+
+
+def clean_detail(detail: dict, code: str = "") -> dict:
+    """丢弃错误页标题、错号结果和非元数据字段，禁止修改订阅状态。"""
+    if not isinstance(detail, dict):
+        return {}
+    if code and detail.get("code"):
+        from app.utils import get_true_code
+        actual = get_true_code(str(detail["code"])) or str(detail["code"]).upper()
+        expected = get_true_code(code) or code.upper()
+        if (base_code(actual) or actual) != (base_code(expected) or expected):
+            logger.warning(f"[{code}] 丢弃番号不符的刮削结果: {actual}")
+            return {}
+    result = {k: v for k, v in detail.items() if k in METADATA_FIELDS and v not in (None, "", [])}
+    for key, value in list(result.items()):
+        if key == "star":
+            try:
+                score = float(value)
+                if not 0 <= score <= 10:
+                    result.pop(key)
+                else:
+                    result[key] = score
+            except (ValueError, TypeError):
+                result.pop(key)
+        elif isinstance(value, (str, int, float)) and not isinstance(value, bool):
+            result[key] = str(value).strip()
+        elif key in ("genres", "casts", "still_photo") and isinstance(value, list):
+            result[key] = ",".join(str(x).strip() for x in value if isinstance(x, str) and x.strip())
+        else:
+            result.pop(key)
+    for key in ("title", "cn_title"):
+        if key in result and str(result[key]).casefold().strip(" .!…。\r\n") in _BAD_TITLES:
+            result.pop(key)
+    return result
+
+
 def _count_items(value: str) -> int:
     """逗号分隔字段的元素个数。"""
     return len([x for x in str(value or "").split(",") if x.strip()])
@@ -132,7 +177,7 @@ def merge_details(results: list[SourceResult], code: str = "") -> dict:
     for result in results:
         if not result.detail:
             continue
-        for field, value in result.detail.items():
+        for field, value in clean_detail(result.detail, code).items():
             if _better(field, merged.get(field), value):
                 merged[field] = value
                 origin[field] = result.site

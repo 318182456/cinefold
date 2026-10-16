@@ -25,7 +25,6 @@ const groups = [
       { name: 'LibraryInsights', label: '收藏分析与体检', icon: 'M4 20h16M7 16v-4m5 4V8m5 8V4' },
       { name: 'SubscriptionRules', label: '条件订阅与方案', icon: 'M4 6h16M7 12h10M10 18h4' },
       { name: 'ToolConnections', label: '工具接入', icon: 'M8 7h8v10H8zM5 10H3m18 4h-2M10 5V3m4 18v-2' },
-      { name: 'Resources', label: '资源索引', icon: 'M4 4h16v5H4zM4 12h16v8H4zM8 15h8' },
     ],
   },
   {

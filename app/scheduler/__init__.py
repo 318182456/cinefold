@@ -35,12 +35,6 @@ def sync_emby_watch() -> int:
     return scheduled_sync()
 
 
-def collect_resources() -> int:
-    from app.services.resources import start
-    start()
-    return 0
-
-
 def sub_rank() -> int:
     """榜单订阅任务。"""
     from app import services
@@ -464,7 +458,6 @@ JOBS: dict[str, dict] = {
 
 # 固定间隔任务，不走 crontab
 INTERVAL_JOBS: dict[str, dict] = {
-    "collect_resources": {"func": collect_resources, "name": "采集资源索引", "minutes": 60},
     "sync_emby_watch": {
         "func": sync_emby_watch,
         "name": "同步 Emby 观看状态", "minutes": 30,

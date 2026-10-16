@@ -121,6 +121,25 @@ def test_smart_collection_and_preferences(client, db):
     assert client.get("/api/v1/library", params={"favorite": True}).json()["data"]["items"][0]["preference"]["rating"] is None
 
 
+def test_analysis_filters_use_exact_actor_genre_and_publisher(client, db):
+    with db.begin() as session:
+        session.add_all([
+            Code(code="ABS-101", status=4, casts="演员甲,演员乙", genres="标签甲", publisher="厂牌甲"),
+            Code(code="ABS-102", status=4, casts="演员甲乙", genres="标签甲乙", publisher="厂牌甲乙"),
+            Code(code="ABS-103", status=0, casts="演员甲", genres="标签甲", publisher="厂牌甲"),
+        ])
+    for field, value in [("actor", "演员甲"), ("genre", "标签甲"), ("publisher", "厂牌甲")]:
+        result = client.get('/api/v1/library', params={field: value}).json()['data']
+        assert [item['code'] for item in result['items']] == ['ABS-101']
+
+
+def test_resource_index_routes_and_schedule_are_removed(client):
+    from app.scheduler import INTERVAL_JOBS
+    assert 'collect_resources' not in INTERVAL_JOBS
+    assert client.get('/api/v1/resources').status_code == 404
+    assert client.post('/api/v1/resources/collect').status_code == 404
+
+
 def test_health_does_not_count_hardlinks_as_duplicate(db, tmp_path):
     from app.services.libraryhealth import scan
     original = tmp_path / "SONE-001-CD1.mp4"; original.write_bytes(b"test content")
@@ -185,58 +204,7 @@ def test_new_endpoints_require_auth(db):
         assert client.get("/api/v1/library").status_code == 401
         assert client.get("/api/v1/profiles").status_code == 401
         assert client.post("/api/v1/mcp", json={}).status_code == 401
-        assert client.get("/api/v1/resources").status_code == 401
-
-
-def test_resource_import_deduplicates_and_does_not_subscribe(client, db):
-    magnet = "magnet:?xt=urn:btih:" + "a" * 40
-    items = [{"title": "SONE-001 中字", "magnet": [magnet]}, {"title": "SONE-001", "download_url": magnet + "&dn=test"}]
-    assert client.post("/api/v1/resources/import", json={"items": items}).json()["data"]["added"] == 1
-    assert client.post("/api/v1/resources/import", json={"items": items}).json()["data"]["added"] == 0
-    from app.services.resources import search
-    result = search("SONE-001")
-    assert len(result) == 1 and result[0].site == "BT"
-    assert result[0].chinese
-    with db() as session:
-        assert session.get(Code, "SONE-001") is None
-
-
-def test_resource_base32_hash_is_normalized(client, db):
-    import base64
-    from app.database.models import Resource
-    raw = bytes.fromhex("ab" * 20)
-    encoded = base64.b32encode(raw).decode()
-    items = [{"title": "SONE-001", "magnet": "magnet:?xt=urn:btih:" + encoded}, {"title": "SONE-001", "magnet": "magnet:?xt=urn:btih:" + raw.hex()}]
-    assert client.post("/api/v1/resources/import", json={"items": items}).json()["data"]["added"] == 1
-    with db() as session:
-        assert session.get(Resource, raw.hex()) is not None
-
-
-def test_feed_cookie_is_not_returned_and_preserved(client):
-    response = client.post("/api/v1/resources/feeds", json={"name": "feed", "url": "https://example.test/list", "cookie": "secret=token"}).json()["data"]
-    assert response["has_cookie"] and "cookie" not in response
-    changed = client.put(f"/api/v1/resources/feeds/{response['id']}", json={"name": "renamed", "url": "https://example.test/list"}).json()["data"]
-    assert changed["has_cookie"]
-    assert "secret=token" not in client.get("/api/v1/resources/feeds").text
-
-
-def test_forum_magnet_parser_handles_escaped_ampersand():
-    from app.services.resources import parse_html
-    result = parse_html('<h1>SONE-001</h1><code>magnet:?xt=urn:btih:' + 'a' * 40 + '&amp;dn=movie</code>', 'https://example.test/thread')
-    assert result[0]["title"] == "SONE-001"
-    assert result[0]["magnet"][0].endswith("&dn=movie")
-
-
-def test_local_resource_search_obeys_bt_auto_download_switch(db, monkeypatch):
-    from app import services
-    from app.services.resources import import_items
-    from app.core.config import Settings
-    monkeypatch.setattr(services, "_search_pt_cached", lambda *a, **kw: [])
-    monkeypatch.setattr(services, "get_settings", lambda: Settings(bt_auto_download=False, default_filter={}))
-    monkeypatch.setattr(services, "build_site_priority", lambda: [])
-    import_items([{"title": "SONE-001", "magnet": "magnet:?xt=urn:btih:" + "a" * 40}], "test")
-    assert len(services.search_torrents("SONE-001", use_filter=False)) == 1
-    assert services.find_torrent("SONE-001") is None
+        assert client.post("/api/v1/cloudnas/offline", json={"magnet": "x"}).status_code == 401
 
 
 def test_emby_success_replaces_user_and_preserves_subscription(db, monkeypatch):

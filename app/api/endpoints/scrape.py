@@ -13,7 +13,8 @@ from __future__ import annotations
 from pathlib import Path
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import Response
 from loguru import logger
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
@@ -26,6 +27,29 @@ from app.services import scrape as scrape_service
 from app.utils import get_true_code, mediafile
 
 router = APIRouter(prefix="/scrape", tags=["刮削"])
+
+
+@router.get("/local-cover")
+def local_cover(path: str, code: str, poster: bool = False, current_user: str = Depends(get_current_user)):
+    from app.modules.scrape import images, local
+    video = Path(path)
+    normalized = get_true_code(code)
+    if not normalized or video.suffix.lower() not in local.VIDEO_SUFFIXES or not video.is_file():
+        raise HTTPException(404, "本地封面不存在")
+    meta = local.read_group(normalized, [video])
+    cover = meta.get("_local_cover")
+    if not cover:
+        raise HTTPException(404, "本地封面不存在")
+    try:
+        data = Path(cover).read_bytes()
+    except OSError:
+        raise HTTPException(404, "本地封面不可读")
+    if poster:
+        side = scrape_service._read_meta(normalized).get("portrait_side", "")
+        data = images.crop_poster(data, side)
+    suffix = Path(cover).suffix.lower()
+    mime = {".png": "image/png", ".webp": "image/webp"}.get(suffix, "image/jpeg")
+    return Response(data, media_type="image/jpeg" if poster else mime, headers={"Cache-Control": "no-store"})
 
 
 class ScrapeRequest(BaseModel):
@@ -181,7 +205,7 @@ def _preview_sync(body: ScrapeRequest) -> dict:
     for code, infos in groups.items():
         meta = meta_cache.get(code)
         if meta is None:
-            meta = scrape_service._load_meta(code, fetch=body.fetch_meta)
+            meta = scrape_service.load_group_meta(code, infos, fetch=body.fetch_meta)
             meta_cache[code] = meta
         for info in infos:
             target = scrape_service._target_path(meta, info, body.target_dir)
@@ -304,7 +328,10 @@ def _preview_images(meta: dict, settings) -> dict:
         )
 
     relative = (meta.get("local_banner") or "").split(",")[0].strip()
-    if relative:
+    if meta.get("_local_cover") and meta.get("_local_video"):
+        local = f"/api/v1/scrape/local-cover?path={quote(meta['_local_video'], safe='')}&code={quote(code)}"
+        poster, fanart = f"{local}&poster=1", local
+    elif relative:
         local = f"/api/v1/image-local?path={quote(relative)}"
         poster, fanart = f"{local}&poster=1", local
     else:

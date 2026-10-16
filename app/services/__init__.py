@@ -50,10 +50,6 @@ def search_torrents(
     """
     settings = get_settings()
     torrents = _search_pt_cached(code, refresh=refresh)
-    from app.services.resources import search as search_index
-    indexed = search_index(code)
-    known_urls = {t.download_url for t in torrents}
-    torrents = list(torrents) + [t for t in indexed if t.download_url not in known_urls]
     if not torrents:
         return []
 
