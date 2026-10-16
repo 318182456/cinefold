@@ -251,10 +251,13 @@ def test_source_api_auth_and_invalid_inputs(env):
     app = FastAPI(); app.include_router(router)
     client = TestClient(app)
     assert client.get('/scrape/videos').status_code == 401
+    assert client.get('/scrape/videos/detail', params={'path': str(original)}).status_code == 401
     assert client.post('/scrape/videos/refresh').status_code == 401
     assert client.post('/scrape/jobs', json={'items': [{'path': str(original), 'code': 'SONE-725'}]}).status_code == 401
     app.dependency_overrides[get_current_user] = lambda: 'admin'
     assert client.get('/scrape/videos').json()['data']['total'] == 1
+    assert client.get('/scrape/videos/detail', params={'path': str(original)}).json()['data']['metadata'] == {}
+    assert client.get('/scrape/videos/detail', params={'path': str(root / 'missing.mp4')}).status_code == 404
     assert client.post('/scrape/jobs', json={'items': []}).status_code == 422
     assert client.post('/scrape/jobs', json={'items': [{'path': str(original)}]}).status_code == 400
     assert client.post('/scrape/jobs', json={'items': [{'path': str(original), 'code': 'SONE-725'}]}).json()['data']['running']
@@ -382,3 +385,75 @@ def test_direct_scrape_updates_cached_artifacts_without_directory_scan(env, monk
     assert scrape.scrape_file(original, fetch_meta=False).ok
     row = sources.list_videos()['items'][0]
     assert row['links'] and row['status'] == 'incomplete'  # 无封面时仍准确显示产物缺项。
+
+
+def test_video_detail_reads_saved_manual_metadata_without_disk_or_scraping(env, monkeypatch):
+    root, settings, db, _, _ = env
+    original = video(root, 'unknown.mp4')
+    scrapeinventory.refresh_now()
+    sources.record_attempt([{'path': str(original)}], 'SONE-725', status='failed', error='图片失败')
+    with db() as session:
+        session.add(Code(code='SONE-725', title='已保存标题', casts='演员甲,演员乙', outline='简介'))
+        session.commit()
+    original.unlink()
+    monkeypatch.setattr(scrape, '_load_meta', lambda *a, **kw: pytest.fail('详情不能触发联网刮削'))
+    monkeypatch.setattr(Path, 'stat', lambda *a, **kw: pytest.fail('详情不能探测源盘'))
+    monkeypatch.setattr(Path, 'resolve', lambda *a, **kw: pytest.fail('详情不能探测源盘'))
+    detail = sources.video_detail(str(original))
+    assert detail['code'] == 'SONE-725'
+    assert detail['metadata']['casts'] == '演员甲,演员乙'
+    assert detail['metadata']['title'] == '已保存标题'
+    assert detail['error'] == '图片失败'
+    assert detail['path'] == str(original)
+    settings.scrape_source_dirs = ''
+    with pytest.raises(ValueError): sources.video_detail(str(original))
+
+
+def test_video_detail_api_returns_metadata_and_existing_image_routes(env, monkeypatch):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from app.api.endpoints import get_current_user
+    from app.api.endpoints import scrape as endpoint
+    root, settings, db, _, _ = env
+    original = video(root)
+    scrapeinventory.refresh_now()
+    with db() as session:
+        session.add(Code(code='SONE-725', cn_title='已保存标题', local_banner='cover/sone.jpg'))
+        session.commit()
+    monkeypatch.setattr(endpoint, 'get_settings', lambda: settings)
+    app = FastAPI(); app.include_router(endpoint.router)
+    app.dependency_overrides[get_current_user] = lambda: 'admin'
+    response = TestClient(app).get('/scrape/videos/detail', params={'path': str(original)})
+    assert response.status_code == 200
+    result = response.json()['data']
+    assert result['metadata']['cn_title'] == '已保存标题'
+    assert result['images']['poster'].startswith('/api/v1/image-local?')
+    assert result['code'] == 'SONE-725'
+
+
+def test_medialink_detail_works_without_source_inventory_or_files(env, monkeypatch):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from app.api.endpoints import get_current_user
+    from app.api.endpoints import medialink as endpoint
+    root, settings, db, _, _ = env
+    source = str(root / 'already-gone.mp4')
+    target = str(Path(settings.medialink_scrape_dir) / 'SONE-725.mp4')
+    with db() as session:
+        session.add(MediaLink(code='SONE-725', source_path=source, link_path=target, size=1024))
+        session.add(Code(code='SONE-725', title='已入库作品', casts='演员甲'))
+        session.commit()
+    settings.scrape_source_dirs = ''
+    monkeypatch.setattr(endpoint, 'get_settings', lambda: settings)
+    app = FastAPI(); app.include_router(endpoint.router)
+    client = TestClient(app)
+    assert client.get('/medialinks/detail', params={'link_path': target}).status_code == 401
+    app.dependency_overrides[get_current_user] = lambda: 'admin'
+    response = client.get('/medialinks/detail', params={'link_path': target})
+    assert response.status_code == 200
+    data = response.json()['data']
+    assert data['metadata']['title'] == '已入库作品'
+    assert data['path'] == source
+    assert data['links'] == [target]
+    assert data['size'] == 1024
+    assert client.get('/medialinks/detail', params={'link_path': 'unknown'}).status_code == 404

@@ -135,6 +135,27 @@ def group_entries(entries: list[dict]):
     return groups
 
 
+def video_detail(path: str) -> dict:
+    """读取当前源清单和已保存的刮削资料，不扫描目录或触发刮削。"""
+    root_keys = [r['root_key'] for r in roots()]
+    with session_scope() as session:
+        video = session.scalar(select(ScrapeSourceVideo).where(
+            ScrapeSourceVideo.source_key == key(path),
+            exists(select(ScrapeSourceMembership.source_key).where(
+                ScrapeSourceMembership.source_key == ScrapeSourceVideo.source_key,
+                ScrapeSourceMembership.root_key.in_(root_keys)))))
+        if video is None:
+            raise ValueError('视频不在当前下载源清单中，请更新清单后重试')
+        attempt = session.get(ScrapeAttempt, video.source_key)
+        code = (attempt.code if attempt else '') or video.detected_code
+        row = session.get(Code, code) if code else None
+        return {'path': video.path, 'name': video.name, 'code': code, 'size': video.size,
+                'part': video.part, 'links': video.links, 'metadata': row.to_dict() if row else {},
+                'error': attempt.error if attempt else '',
+                'last_run': attempt.updated_at.isoformat() if attempt else None,
+                'indexed_at': video.indexed_at.isoformat()}
+
+
 def list_videos(*, root: str = '', keyword: str = '', status: str = '', page: int = 1, size: int = 30) -> dict:
     """只从持久化清单查询、筛选和分页，不触碰磁盘。"""
     configured_roots = roots()

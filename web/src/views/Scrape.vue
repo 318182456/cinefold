@@ -1,5 +1,5 @@
 <script setup>
-import { computed, nextTick, onMounted, reactive, ref } from 'vue'
+import { computed, defineAsyncComponent, nextTick, onMounted, reactive, ref, watch } from 'vue'
 import { previewScrape, runScrape, getScrapeFields } from '@/api'
 import { useToast } from '@/composables/useToast'
 import { useConfigStore } from '@/stores/config'
@@ -7,7 +7,10 @@ import EmptyState from '@/components/EmptyState.vue'
 import ModalDialog from '@/components/ModalDialog.vue'
 import PrivateImage from '@/components/PrivateImage.vue'
 import DownloadSources from '@/components/DownloadSources.vue'
+import { useRoute, useRouter } from 'vue-router'
 
+const MediaLinks = defineAsyncComponent(() => import('@/views/MediaLink.vue'))
+const WatchDirectories = defineAsyncComponent(() => import('@/views/WatchDir.vue'))
 const toast = useToast()
 function previewImage(url) {
   if (!url?.startsWith('/api/v1/scrape/local-cover?')) return url
@@ -36,7 +39,17 @@ const runResult = ref(null)
 const fields = ref([])
 const jinjaAvailable = ref(true)
 const mode = ref('')
-const workspace = ref('videos')
+const route = useRoute(), router = useRouter()
+const workspace = computed({
+  get: () => ['videos', 'links', 'watch', 'tools'].includes(route.query.tab) ? route.query.tab : 'videos',
+  set: tab => router.replace({ query: { ...route.query, tab } }),
+})
+const sourcesMounted = ref(workspace.value === 'videos'), linksMounted = ref(workspace.value === 'links')
+const sourcesRef = ref(null), linksRef = ref(null)
+watch(workspace, tab => {
+  if (tab === 'videos') { sourcesMounted.value = true; sourcesRef.value?.refresh() }
+  if (tab === 'links') { linksMounted.value = true; linksRef.value?.refresh() }
+})
 const showFields = ref(false)
 
 // 产物类型的显示名。kind 由后端给（与 images.planned_names 一致）
@@ -107,7 +120,7 @@ async function doPreview() {
 }
 
 async function previewSource({ path, code }) {
-  workspace.value = 'tools'
+  await router.replace({ query: { ...route.query, tab: 'tools' } })
   await nextTick()
   form.path = path
   form.code = code
@@ -135,19 +148,20 @@ async function doRun() {
 
 <template>
   <div class="space-y-4">
-    <div class="flex flex-wrap items-center justify-between gap-3"><div><h1 class="text-xl font-semibold">刮削工作台</h1><p class="mt-1 text-sm text-gray-500">管理源视频、指定番号和执行任务。</p></div><RouterLink :to="{ name: 'Config', query: { section: 'scrape' } }" class="btn-ghost">刮削设置 ↗</RouterLink></div>
-    <div class="flex gap-2" role="tablist" aria-label="刮削工作区"><button v-for="[value, label] in [['videos', '视频与任务'], ['tools', '路径试算与临时任务']]" :key="value" class="btn" :class="workspace === value ? 'bg-brand text-white' : 'btn-ghost'" role="tab" :aria-selected="workspace === value" @click="workspace = value">{{ label }}</button></div>
+    <div class="flex flex-wrap items-center justify-between gap-3"><div><h1 class="text-xl font-semibold">入库管理</h1><p class="mt-1 text-sm text-gray-500">从下载源到 Emby 媒体库，查看资料、补全元数据和管理入库任务。</p></div><RouterLink :to="{ name: 'Config', query: { section: 'scrape' } }" class="btn-ghost">刮削设置 ↗</RouterLink></div>
+    <div class="flex gap-5 overflow-x-auto border-b border-gray-800" role="tablist" aria-label="刮削工作区"><button v-for="[value, label] in [['videos', '源视频'], ['links', '媒体库关联'], ['watch', '目录监控'], ['tools', '路径试算']]" :key="value" class="shrink-0 border-b-2 px-1 py-3 text-sm transition" :class="workspace === value ? 'border-brand text-brand' : 'border-transparent text-gray-500 hover:text-gray-300'" role="tab" :aria-selected="workspace === value" @click="workspace = value">{{ label }}</button></div>
     <!-- 当前刮削方式。走 external 时这个页面只能手动刮，说清楚免得白等 -->
-    <div v-if="mode && mode !== 'builtin'" class="card">
+    <div v-if="workspace === 'videos' && mode && mode !== 'builtin'" class="card">
       <p class="text-[11px] text-amber-400">
-        当前刮削方式是「external」，下载完成后不会自动刮削 —— 那由 MDCng 等外部工具负责。
-        这个页面仍可手动刮任意路径。要改成自动，去
-        <RouterLink :to="{ name: 'Config' }" class="text-brand hover:underline">设置 → 刮削</RouterLink>
-        把「由谁刮削」切成 builtin。
+        当前使用外部工具自动刮削，本页支持手动处理。需要由 cinefold 自动入库时，在
+        <RouterLink :to="{ name: 'Config', query: { section: 'scrape' } }" class="text-brand hover:underline">刮削设置</RouterLink>
+        中选择 cinefold 内置刮削。
       </p>
     </div>
 
-    <DownloadSources v-show="workspace === 'videos'" @preview="previewSource" />
+    <DownloadSources v-if="sourcesMounted" v-show="workspace === 'videos'" ref="sourcesRef" @preview="previewSource" />
+    <MediaLinks v-if="linksMounted" v-show="workspace === 'links'" ref="linksRef" />
+    <WatchDirectories v-if="workspace === 'watch'" />
     <div v-show="workspace === 'tools'" class="space-y-4">
     <!-- 输入 -->
     <div id="scrape-preview-form" class="card space-y-3">

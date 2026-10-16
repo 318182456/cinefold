@@ -85,6 +85,17 @@ def source_job_status(current_user: str = Depends(get_current_user)):
     return ResponseEntity.ok(state())
 
 
+@router.get("/videos/detail")
+def source_video_detail(path: str, current_user: str = Depends(get_current_user)):
+    from app.services.scrapesources import video_detail
+    try:
+        result = video_detail(path)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    result['images'] = _preview_images(result['metadata'], get_settings()) if result['metadata'] else {}
+    return ResponseEntity.ok(result)
+
+
 @router.post("/videos/refresh")
 def refresh_source_inventory(root: str = '', current_user: str = Depends(get_current_user)):
     from app.services.scrapeinventory import start_refresh

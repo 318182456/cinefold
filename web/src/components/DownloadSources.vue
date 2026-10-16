@@ -3,6 +3,7 @@ import { computed, onMounted, onUnmounted, ref } from 'vue'
 import http from '@/api'
 import { useToast } from '@/composables/useToast'
 import ModalDialog from '@/components/ModalDialog.vue'
+import ScrapeMetadataDetail from '@/components/ScrapeMetadataDetail.vue'
 
 const emit = defineEmits(['preview'])
 const toast = useToast()
@@ -12,6 +13,20 @@ const root = ref(''), keyword = ref(''), status = ref(''), page = ref(1), select
 const job = ref({ running: false, results: [], total: 0, done: 0, ok: 0 })
 const dialog = ref(false), drafts = ref([]), submitting = ref(false)
 const options = ref({ overwrite: false, refresh_metadata: false, fetch_meta: true })
+const detailOpen = ref(false), detailRow = ref(null)
+const stats = computed(() => {
+  const c = data.value.counts
+  return [
+    { label: '全部视频', value: Object.values(c).reduce((a, b) => a + b, 0), status: '', color: 'text-gray-200' },
+    { label: '等待刮削', value: c.pending || 0, status: 'pending', color: 'text-sky-400' },
+    { label: '已完成', value: c.complete || 0, status: 'complete', color: 'text-emerald-400' },
+    { label: '需指定番号', value: c.unrecognized || 0, status: 'unrecognized', color: 'text-amber-400' },
+    { label: '刮削失败', value: c.failed || 0, status: 'failed', color: 'text-red-400' },
+  ]
+})
+function showDetail(row) { detailRow.value = row; detailOpen.value = true }
+function processDetail(detail) { detailOpen.value = false; open([{ ...detailRow.value, code: detail.code, links: detail.links }], !!detail.links.length) }
+function filterStatus(value) { status.value = value; search() }
 const LABELS = { pending: '未刮削', complete: '已刮削', incomplete: '产物缺失', failed: '刮削失败', unrecognized: '需指定番号', downloading: '下载中', queued: '排队中', running: '刮削中', interrupted: '上次中断', cancelled: '已停止', empty: '空文件' }
 let request = 0, timer, indexTimer, disposed = false, initialIndexRequested = false
 const selectable = row => !['downloading', 'queued', 'running', 'empty'].includes(row.status)
@@ -92,14 +107,27 @@ async function cancel() {
   try { job.value = await http.post('/scrape/jobs/current/cancel') } catch (e) { toast.error(e.message) }
 }
 function changePage(step) { page.value += step; selected.value = []; load() }
+defineExpose({ refresh: load })
 onMounted(() => { load(); poll() })
 onUnmounted(() => { disposed = true; request++; clearTimeout(timer); clearTimeout(indexTimer) })
 </script>
 
 <template>
-  <section class="card space-y-4">
+  <section class="space-y-5">
+    <div class="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-5">
+      <button v-for="item in stats" :key="item.label" class="rounded-xl border p-4 text-left transition hover:bg-gray-800/60 focus-visible:outline focus-visible:outline-brand" :class="status === item.status ? 'border-brand/60 bg-brand/5' : 'border-gray-800 bg-gray-900/40'" :aria-pressed="status === item.status" @click="filterStatus(item.status)">
+        <p class="text-xs text-gray-500">{{ item.label }}</p><p class="mt-2 text-2xl font-semibold tabular-nums" :class="item.color">{{ item.value }}</p>
+      </button>
+    </div>
+    <div v-if="job.job_id" class="space-y-3 rounded-xl border border-gray-700 bg-gray-900/50 p-4">
+      <div class="flex flex-wrap items-center gap-3"><p class="text-sm text-gray-300">{{ job.running ? '后台刮削中' : job.cancel_requested ? '后续任务已停止' : '最近一次手动刮削' }} · {{ job.done }} / {{ job.total }} 个番号 · 成功 {{ job.ok }} 个</p><button v-if="job.running" class="text-xs text-amber-400 disabled:opacity-40" :disabled="job.cancel_requested" @click="cancel">{{ job.cancel_requested ? '当前番号完成后停止' : '停止后续任务' }}</button></div>
+      <div class="h-1.5 overflow-hidden rounded-full bg-gray-800" role="progressbar" aria-label="刮削任务进度" :aria-valuenow="job.done" :aria-valuemin="0" :aria-valuemax="Math.max(job.total, 1)"><div class="h-full rounded-full bg-brand transition-all" :style="{ width: `${Math.min(100, job.total ? job.done / job.total * 100 : 0)}%` }"></div></div>
+      <p v-if="job.current" class="text-xs text-brand">当前处理 {{ job.current }}，可离开页面，任务会继续执行。</p><p v-if="job.error" class="text-xs text-red-400">{{ job.error }}</p>
+      <details v-if="job.results.length"><summary class="cursor-pointer text-xs text-gray-400">查看逐项结果</summary><div v-for="(row, i) in job.results" :key="i" class="mt-2 border-t border-gray-800 pt-2 text-xs"><p :class="row.ok ? 'text-emerald-400' : 'text-red-400'">{{ row.code }} · {{ row.ok ? '完成' : '失败' }} · NFO {{ row.nfo_written }} · 图片 {{ row.images_written }}</p><p v-if="row.error" class="mt-1 break-all text-red-400">{{ row.error }}</p><p v-for="(warning, n) in row.warnings" :key="n" class="mt-1 text-amber-400">{{ warning }}</p><p v-for="path in row.links" :key="path" class="mt-1 break-all text-gray-500">{{ path }}</p></div></details>
+    </div>
+    <div class="card space-y-4">
     <div class="flex flex-wrap items-start justify-between gap-3">
-      <div><h2 class="text-sm font-medium text-gray-300">源视频清单</h2><p class="mt-1 text-xs text-gray-500">清单已保存，搜索和翻页直接读取数据库。扫描目录后同步新增、变化和消失的视频。</p></div>
+      <div><h2 class="text-sm font-medium text-gray-300">视频清单</h2><p class="mt-1 text-xs text-gray-500">点击视频查看刮削资料。新增或移动文件后，扫描目录更新清单。</p></div>
       <RouterLink :to="{ name: 'Config', query: { section: 'scrape' } }" class="text-xs text-brand">管理目录与刮削规则 ↗</RouterLink>
     </div>
     <details v-if="data.roots.length" class="text-xs text-gray-500"><summary class="cursor-pointer">已配置 {{ data.roots.length }} 个源目录 · 查看扫描状态</summary>
@@ -114,21 +142,35 @@ onUnmounted(() => { disposed = true; request++; clearTimeout(timer); clearTimeou
       <select v-model="status" class="input !w-auto" aria-label="刮削状态筛选" @change="search"><option value="">全部状态</option><option v-for="(label, value) in LABELS" :key="value" :value="value">{{ label }}{{ data.counts[value] ? ` (${data.counts[value]})` : '' }}</option></select>
       <button class="btn-ghost" :disabled="loading">搜索</button><button type="button" class="btn-ghost" :disabled="inventory.running || !data.roots.length" @click="refreshIndex">{{ inventory.running ? '扫描中…' : '扫描目录更新清单' }}</button>
     </form>
-    <div class="flex flex-wrap items-center gap-2"><button class="btn-primary" :disabled="!selectedRows.length || job.running" @click="open(selectedRows)">处理选中（{{ selectedRows.length }}）</button><span class="ml-auto text-xs text-gray-500">{{ data.total }} 个视频 · 仅选择当前页</span></div>
+    <div class="flex flex-wrap items-center gap-3 border-t border-gray-800 pt-3">
+      <label class="flex cursor-pointer items-center gap-2 text-xs text-gray-400"><input type="checkbox" :checked="allSelected" aria-label="选择当前页可处理视频" @change="toggleAll" />全选当前页</label>
+      <button class="btn-primary !px-3 !py-1.5 !text-xs" :disabled="!selectedRows.length || job.running" @click="open(selectedRows)">批量刮削{{ selectedRows.length ? ` · ${selectedRows.length}` : '' }}</button>
+      <span class="ml-auto text-xs text-gray-500">{{ data.total }} 个视频<span v-if="keyword"> · 概况已按搜索条件筛选</span></span>
+    </div>
     <p v-for="(warning, i) in data.warnings" :key="i" class="text-xs text-amber-400">{{ warning }}</p>
     <p v-if="loading" class="py-5 text-center text-sm text-gray-500">正在查询清单…</p>
-    <div v-else-if="!data.items.length" class="py-6 text-center text-sm text-gray-500">没有符合条件的视频</div>
-    <div v-else class="overflow-x-auto">
-      <table class="w-full min-w-[720px] text-left text-xs"><thead class="text-gray-500"><tr class="border-b border-gray-800"><th class="w-8 py-2"><input type="checkbox" :checked="allSelected" aria-label="选择当前页可处理视频" @change="toggleAll" /></th><th class="py-2">视频</th><th>番号 / 状态</th><th>大小</th><th class="text-right">操作</th></tr></thead>
-        <tbody><tr v-for="row in data.items" :key="row.path" class="border-b border-gray-800/60 align-top"><td class="py-3"><input v-model="selected" :value="row.path" type="checkbox" :disabled="!selectable(row)" :aria-label="`选择 ${row.name}`" /></td><td class="max-w-sm py-3 pr-3"><p class="break-all text-gray-300">{{ row.name }}</p><p v-if="row.title" class="mt-1 line-clamp-1 text-gray-500">{{ row.title }}</p><p class="mt-1 break-all text-[10px] text-gray-600">{{ row.path }}</p><p v-if="row.error" class="mt-1 break-all text-red-400">{{ row.error }}</p><p v-if="row.links.length" class="mt-1 break-all text-[10px] text-gray-500">入库：{{ row.links[0] }}</p></td><td class="py-3 pr-3"><p class="font-mono text-brand">{{ row.code || '未识别' }}</p><p class="mt-1" :class="row.status === 'complete' ? 'text-emerald-400' : ['failed', 'interrupted'].includes(row.status) ? 'text-red-400' : 'text-gray-500'">{{ LABELS[row.status] || row.status }}</p><p v-if="row.last_run" class="mt-1 text-[10px] text-gray-600">{{ row.last_run }}</p></td><td class="whitespace-nowrap py-3 pr-3 text-gray-500">{{ formatSize(row.size) }}</td><td class="py-3 text-right"><div class="flex justify-end gap-3 whitespace-nowrap"><button class="text-brand disabled:text-gray-600" :disabled="!selectable(row) || job.running" @click="open([row], !!row.links.length)">{{ !row.code ? '指定番号' : row.links.length ? '再次刮削' : '手动刮削' }}</button></div></td></tr></tbody>
-      </table>
+    <div v-else-if="!data.items.length" class="rounded-xl border border-dashed border-gray-800 px-4 py-12 text-center"><p class="text-sm text-gray-400">{{ !data.roots.length ? '添加下载源，开始整理视频' : keyword || status ? '没有符合条件的视频' : '清单中还没有视频' }}</p><p class="mt-2 text-xs text-gray-600">{{ !data.roots.length ? '前往刮削设置，配置容器内可访问的下载目录。' : keyword || status ? '试试其他关键词，或切换到全部状态。' : '扫描下载目录后，视频会显示在这里。' }}</p><RouterLink v-if="!data.roots.length" :to="{ name: 'Config', query: { section: 'scrape' } }" class="mt-4 inline-block text-xs text-brand">配置下载源 ↗</RouterLink></div>
+    <div v-else class="divide-y divide-gray-800/70">
+      <article v-for="row in data.items" :key="row.path" class="group flex items-start gap-3 rounded-lg px-2 py-4 transition hover:bg-gray-800/30 sm:gap-4">
+        <input v-model="selected" :value="row.path" type="checkbox" class="mt-2 shrink-0" :disabled="!selectable(row)" :aria-label="`选择 ${row.name}`" />
+        <div class="min-w-0 flex-1">
+          <button class="block max-w-full text-left focus-visible:outline focus-visible:outline-brand" :aria-label="`查看 ${row.name} 的刮削资料`" @click="showDetail(row)">
+            <span class="flex flex-wrap items-center gap-2"><span class="font-mono text-sm font-medium text-brand">{{ row.code || '待识别' }}</span><span class="rounded border px-2 py-0.5 text-[10px]" :class="row.status === 'complete' ? 'border-emerald-500/20 bg-emerald-500/10 text-emerald-400' : ['failed', 'interrupted'].includes(row.status) ? 'border-red-500/20 bg-red-500/10 text-red-400' : 'border-gray-700 bg-gray-800 text-gray-400'">{{ LABELS[row.status] || row.status }}</span></span>
+            <span class="mt-1.5 block break-all text-sm text-gray-300 group-hover:text-white">{{ row.title || row.name }}</span>
+            <span v-if="row.title" class="mt-1 block break-all text-xs text-gray-500">{{ row.name }}</span>
+          </button>
+          <p class="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-gray-500"><span>{{ formatSize(row.size) }}</span><span v-if="row.part">分集 {{ row.part }}</span><span v-if="row.last_run">上次处理 {{ row.last_run }}</span></p>
+          <p v-if="row.error" class="mt-2 break-all text-xs text-red-400">{{ row.error }}</p>
+        </div>
+        <div class="flex shrink-0 flex-col items-end gap-3 pt-1 sm:flex-row sm:items-center">
+          <button class="text-xs text-gray-400 hover:text-brand" @click="showDetail(row)">查看资料</button>
+          <button class="text-xs text-brand disabled:text-gray-600" :disabled="!selectable(row) || job.running" @click="open([row], !!row.links.length)">{{ !row.code ? '指定番号' : row.links.length ? '再次刮削' : '手动刮削' }}</button>
+        </div>
+      </article>
     </div>
     <div v-if="data.total > data.size" class="flex items-center justify-center gap-4"><button class="btn-ghost" :disabled="page <= 1 || loading" @click="changePage(-1)">上一页</button><span class="text-xs text-gray-500">{{ page }} / {{ Math.max(1, Math.ceil(data.total / data.size)) }}</span><button class="btn-ghost" :disabled="page * data.size >= data.total || loading" @click="changePage(1)">下一页</button></div>
-    <div v-if="job.job_id" class="space-y-2 rounded-lg border border-gray-700 p-3">
-      <div class="flex flex-wrap items-center gap-3"><p class="text-sm text-gray-300">{{ job.running ? '后台刮削中' : job.cancel_requested ? '后续任务已停止' : '最近一次手动刮削' }} · {{ job.done }} / {{ job.total }} 个番号 · 成功 {{ job.ok }} 个</p><button v-if="job.running" class="text-xs text-amber-400 disabled:opacity-40" :disabled="job.cancel_requested" @click="cancel">{{ job.cancel_requested ? '当前番号完成后停止' : '停止后续任务' }}</button></div>
-      <p v-if="job.current" class="text-xs text-brand">当前处理 {{ job.current }}，可离开页面，任务会继续执行。</p><p v-if="job.error" class="text-xs text-red-400">{{ job.error }}</p>
-      <details v-if="job.results.length"><summary class="cursor-pointer text-xs text-gray-400">查看逐项结果</summary><div v-for="(row, i) in job.results" :key="i" class="mt-2 border-t border-gray-800 pt-2 text-xs"><p :class="row.ok ? 'text-emerald-400' : 'text-red-400'">{{ row.code }} · {{ row.ok ? '完成' : '失败' }} · NFO {{ row.nfo_written }} · 图片 {{ row.images_written }}</p><p v-if="row.error" class="mt-1 break-all text-red-400">{{ row.error }}</p><p v-for="(warning, n) in row.warnings" :key="n" class="mt-1 text-amber-400">{{ warning }}</p><p v-for="path in row.links" :key="path" class="mt-1 break-all text-gray-500">{{ path }}</p></div></details>
     </div>
+    <ScrapeMetadataDetail v-model:open="detailOpen" :row="detailRow" :status-label="LABELS[detailRow?.status] || detailRow?.status || ''" allow-process :process-disabled="!detailRow || !selectable(detailRow) || job.running" @process="processDetail" />
     <ModalDialog v-model:open="dialog" title="指定番号与手动刮削" size="2xl" scrollable>
       <div class="space-y-4">
         <p class="text-xs text-gray-500">每个文件使用自己的番号，同番号的分集会合并处理。请确认视频已下载完成；已有入库关联时优先更新原位置。此操作不删除源视频。</p>

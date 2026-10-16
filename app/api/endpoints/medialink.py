@@ -11,14 +11,14 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from loguru import logger
 from pydantic import BaseModel
 from sqlalchemy import func, or_, select
 
 from app.api.endpoints import get_current_user
 from app.core.config import get_settings
-from app.database.models import CodeAlias, History, MediaLink, PendingDelete
+from app.database.models import Code, CodeAlias, History, MediaLink, PendingDelete
 from app.database.session import session_scope
 from app.schemas.reponse import ResponseEntity
 from app.services.medialink import (
@@ -316,6 +316,24 @@ def _backfill_subtitles(session, rows: list) -> None:
         ))
     for row, has_sub in zip(rows, subs):
         row.has_subtitle = has_sub
+
+
+@router.get('/detail')
+def media_detail(link_path: str, current_user: str = Depends(get_current_user)):
+    """按已登记的硬链接读资料，源目录不必仍在下载源配置中。"""
+    from app.api.endpoints.scrape import _preview_images
+    with session_scope() as session:
+        link = session.get(MediaLink, link_path)
+        if link is None:
+            raise HTTPException(404, '硬链接记录不存在')
+        row = session.get(Code, link.code)
+        meta = row.to_dict() if row else {}
+        result = {'path': link.source_path, 'name': Path(link.link_path).name,
+                  'code': link.code, 'size': link.size, 'metadata': meta,
+                  'links': [link.link_path], 'error': '',
+                  'created_at': link.create_time.isoformat() if link.create_time else None}
+    result['images'] = _preview_images(meta, get_settings()) if meta else {}
+    return ResponseEntity.ok(result)
 
 
 @router.get("")

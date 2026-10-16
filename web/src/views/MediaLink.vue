@@ -8,6 +8,11 @@ import {
 } from '@/api'
 import { useToast } from '@/composables/useToast'
 import LoadingBlock from '@/components/LoadingBlock.vue'
+import ScrapeMetadataDetail from '@/components/ScrapeMetadataDetail.vue'
+
+const detailOpen = ref(false), detailRow = ref(null)
+function showDetail(row) { detailRow.value = row; detailOpen.value = true }
+defineExpose({ refresh: () => { load(); reloadStats() } })
 
 const toast = useToast()
 
@@ -868,7 +873,7 @@ onMounted(() => {
               :checked="isPicked(item.link_path)"
               @change="togglePick(item.link_path)"
             />
-            <span class="font-mono text-sm font-medium text-brand">{{ item.code }}</span>
+            <button class="font-mono text-sm font-medium text-brand hover:underline" :aria-label="`查看 ${item.code} 的刮削资料`" @click="showDetail(item)">{{ item.code }}</button>
             <span v-if="item.source_gone" class="badge bg-red-950/60 text-red-300">
               源文件已删
             </span>
@@ -904,9 +909,9 @@ onMounted(() => {
                 title="媒体库文件仍在，Emby 里仍可见"
               />
               <div class="min-w-0 flex-1">
-                <p class="truncate text-xs text-gray-300" :title="item.link_path">
+                <button class="block max-w-full truncate text-left text-xs text-gray-300 hover:text-brand" :title="item.link_path" @click="showDetail(item)">
                   {{ fileName(item.link_path) }}
-                </p>
+                </button>
                 <p class="truncate text-[11px] text-gray-600" :title="item.link_path">
                   {{ item.link_path }}
                 </p>
@@ -967,7 +972,7 @@ onMounted(() => {
             :title="`选中 ${group.code} 的全部 ${group.links.length} 条链接`"
             @change="toggleGroup(group)"
           />
-          <span class="font-mono text-sm font-medium text-brand">{{ group.code }}</span>
+          <button class="font-mono text-sm font-medium text-brand hover:underline" :aria-label="`查看 ${group.code} 的刮削资料`" @click="showDetail(group.links[0])">{{ group.code }}</button>
           <!-- 长片名放不进 code 列，code 是哈希 —— 把原文件名显示出来，
                否则这一组根本认不出是哪部片子 -->
           <span
@@ -1065,9 +1070,9 @@ onMounted(() => {
             />
             <div class="min-w-0 flex-1">
               <p class="flex items-baseline gap-2 text-xs text-gray-300">
-                <span class="truncate" :title="link.link_path">
+                <button class="truncate text-left hover:text-brand" :title="link.link_path" @click="showDetail(link)">
                   {{ fileName(link.link_path) }}
-                </span>
+                </button>
                 <span
                   v-if="link.size !== null && link.size !== undefined"
                   class="shrink-0 font-mono text-[11px] text-gray-500"
@@ -1507,5 +1512,6 @@ onMounted(() => {
         </div>
       </div>
     </div>
+    <ScrapeMetadataDetail v-model:open="detailOpen" :row="detailRow" kind="link" :status-label="detailRow ? (detailRow.link_exists ? '硬链接存在' : '硬链接缺失') + ' · ' + (detailRow.source_exists === false || detailRow.source_gone ? '源文件已删' : '源文件存在') : ''" />
   </div>
 </template>
