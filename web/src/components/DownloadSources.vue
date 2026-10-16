@@ -4,6 +4,7 @@ import http from '@/api'
 import { useToast } from '@/composables/useToast'
 import ModalDialog from '@/components/ModalDialog.vue'
 import ScrapeMetadataDetail from '@/components/ScrapeMetadataDetail.vue'
+import { READY_PHASES, rebuildRunReason } from '@/utils/rebuild'
 
 const emit = defineEmits(['preview'])
 const toast = useToast()
@@ -21,18 +22,16 @@ const rebuildRefreshMetadata = ref(false), releaseOpen = ref(false), releaseBusy
 const rebuildForce = ref(false)
 const rebuildMissingPolicy = ref('block'), rebuildConfirmDiscard = ref(false)
 const releaseOutput = ref(''), releaseConfirmation = ref('')
-let rebuildTimer, rebuildRequest = 0, rebuildPreviewPending = false
+let rebuildTimer, rebuildRequest = 0, rebuildPolicyEdited = false
 const rebuildLocked = computed(() => !rebuildKnown.value || rebuild.value.running || rebuildBusy.value)
 const rebuildPlan = computed(() => rebuild.value.plan || null)
 const rebuildOutput = computed(() => rebuildPlan.value?.output_dir || rebuild.value.output_dir || '')
 const rebuildPreviewing = computed(() => rebuild.value.running && ['preview', 'previewing', 'planning'].includes(rebuild.value.phase))
-const rebuildCanRun = computed(() => !!rebuildPlan.value?.output_dir && !!rebuildReadyToken.value
-  && rebuildReadyToken.value === rebuild.value.token && !rebuildLocked.value && !rebuild.value.error
-  && !rebuildStatusError.value && !rebuild.value.protection_error && !job.value.running && !inventory.value.running
-  && !rebuildPlan.value.blocked_count && !rebuildPlan.value.blockers?.length
-  && (rebuildPlan.value.missing_policy || 'block') === rebuildMissingPolicy.value
-  && (rebuildMissingPolicy.value !== 'discard' || !rebuildPlan.value.unrecoverable_count || rebuildConfirmDiscard.value)
-  && rebuildConfirmation.value === rebuildPlan.value.output_dir)
+const rebuildDisabledReason = computed(() => rebuildRunReason({ state: rebuild.value, known: rebuildKnown.value,
+  busy: rebuildBusy.value, statusError: rebuildStatusError.value, readyToken: rebuildReadyToken.value,
+  policy: rebuildMissingPolicy.value, confirmDiscard: rebuildConfirmDiscard.value, confirmation: rebuildConfirmation.value,
+  jobRunning: job.value.running, inventoryRunning: inventory.value.running }))
+const rebuildCanRun = computed(() => !rebuildDisabledReason.value)
 const REBUILD_PHASES = {
   idle: '尚未预览', queued: '等待执行', preview: '预览范围', previewing: '正在预览范围',
   ready: '等待确认', preview_ready: '等待确认', previewed: '预览完成', cleaning: '清理播放目录',
@@ -66,18 +65,16 @@ async function pollRebuild() {
     const result = await http.get('/scrape/rebuild/current')
     if (disposed || id !== rebuildRequest) return
     const wasRunning = rebuild.value.running
+    if (result.token !== rebuild.value.token) rebuildConfirmDiscard.value = false
     rebuild.value = result
+    if (!rebuildPolicyEdited && result.plan) rebuildMissingPolicy.value = result.plan.missing_policy || 'block'
     rebuildKnown.value = true
     rebuildStatusError.value = ''
+    rebuildReadyToken.value = !result.running && READY_PHASES.includes(result.phase) && result.plan && !result.error ? result.token || '' : ''
     if (result.running) scheduleRebuildPoll()
     else {
-      if (rebuildPreviewPending) {
-        rebuildPreviewPending = false
-        if (result.plan && result.token && !result.error) rebuildReadyToken.value = result.token
-      } else if (['ready', 'preview_ready', 'previewed'].includes(result.phase) && result.plan && result.token && !result.error) {
-        rebuildReadyToken.value = result.token
-      }
       if (wasRunning) await load()
+      if (rebuildOpen.value && READY_PHASES.includes(result.phase)) scheduleRebuildPoll(5000)
     }
   } catch (e) {
     if (!disposed && id === rebuildRequest) {
@@ -91,22 +88,21 @@ async function pollRebuild() {
 async function previewRebuild() {
   if (rebuildBusy.value || rebuild.value.running || job.value.running || inventory.value.running) return
   rebuildBusy.value = true
-  rebuildReadyToken.value = ''; rebuildPreviewPending = false
+  rebuildReadyToken.value = ''; rebuildConfirmDiscard.value = false
   clearTimeout(rebuildTimer); rebuildRequest++
   try {
     rebuild.value = await http.post('/scrape/rebuild/preview', { missing_policy: rebuildMissingPolicy.value })
     rebuildKnown.value = true
-    rebuildPreviewPending = true
     await pollRebuild()
   } catch (e) { rebuildKnown.value = false; toast.error(e.message); scheduleRebuildPoll(1000) }
   finally { rebuildBusy.value = false }
 }
 async function runRebuild() {
   if (!rebuildCanRun.value) return
-  const payload = { token: rebuildReadyToken.value, confirmation: rebuildConfirmation.value,
+  const payload = { token: rebuildReadyToken.value, confirmation: rebuildConfirmation.value.trim(),
     refresh_metadata: rebuildRefreshMetadata.value, force: rebuildForce.value, confirm_discard: rebuildConfirmDiscard.value }
   rebuildBusy.value = true
-  rebuildReadyToken.value = ''; rebuildConfirmation.value = ''; rebuildPreviewPending = false
+  rebuildReadyToken.value = ''; rebuildConfirmation.value = ''
   clearTimeout(rebuildTimer); rebuildRequest++
   try {
     rebuild.value = await http.post('/scrape/rebuild/run', payload)
@@ -116,8 +112,8 @@ async function runRebuild() {
   } catch (e) { rebuildKnown.value = false; toast.error(e.message); scheduleRebuildPoll(1000) }
   finally { rebuildBusy.value = false }
 }
-function openRebuild() { rebuildOpen.value = true; rebuildConfirmation.value = ''; pollRebuild() }
-function changeMissingPolicy() { rebuildReadyToken.value = ''; rebuildConfirmDiscard.value = false }
+function openRebuild() { rebuildOpen.value = true; rebuildConfirmation.value = ''; rebuildConfirmDiscard.value = false; rebuildPolicyEdited = false; rebuildKnown.value = false; pollRebuild() }
+function changeMissingPolicy() { rebuildPolicyEdited = true; rebuildReadyToken.value = ''; rebuildConfirmDiscard.value = false }
 function openReleaseProtection() {
   releaseOutput.value = protectedOutputs.value.includes(rebuildPlan.value?.output_dir)
     ? rebuildPlan.value.output_dir : protectedOutputs.value[0] || ''
@@ -374,7 +370,8 @@ onUnmounted(() => { disposed = true; request++; rebuildRequest++; clearTimeout(t
         <label v-if="!rebuildForce" class="flex items-start gap-2 text-xs text-gray-300"><input v-model="rebuildRefreshMetadata" type="checkbox" :disabled="rebuild.running && !rebuildPreviewing" class="mt-0.5" /><span>联网更新元数据<span class="mt-1 block text-gray-500">默认复用保留的数据库影片资料；开启后请求刮削源，失败时仍可沿用旧资料。</span></span></label>
         <label v-if="rebuildMissingPolicy === 'discard' && rebuildPlan?.missing_policy === 'discard' && rebuildPlan.unrecoverable_count" class="flex items-start gap-2 rounded-lg border border-red-500/40 bg-red-500/10 p-3 text-xs text-red-300"><input v-model="rebuildConfirmDiscard" type="checkbox" class="mt-0.5" /><span>确认不保留以上 {{ rebuildPlan.unrecoverable_count }} 个播放视频：它们可能是唯一副本，清理后无法从本次备份恢复视频。NFO、图片等资料仍备份。</span></label>
         <label class="block space-y-2 text-xs text-gray-400"><span>输入完整播放输出目录以确认</span><input v-model="rebuildConfirmation" class="input font-mono" :placeholder="rebuildOutput || '完整输出目录路径'" aria-label="确认全部重刮的输出目录" aria-describedby="rebuild-confirm-hint" autocomplete="off" spellcheck="false" /><span id="rebuild-confirm-hint" class="block text-gray-500">预览期间也可以输入或粘贴目录；只有预览成功、没有阻止项且输入目录完全一致时，才能执行。</span></label>
-        <div class="flex flex-wrap justify-end gap-2"><button class="btn-ghost !text-xs" @click="rebuildOpen = false">关闭</button><button class="btn-primary !text-xs" :disabled="!rebuildCanRun" @click="runRebuild">确认清空播放目录并全部重刮</button></div>
+        <p v-if="rebuildDisabledReason" id="rebuild-run-reason" role="status" class="text-xs text-amber-300">{{ rebuildDisabledReason }}</p>
+        <div class="flex flex-wrap justify-end gap-2"><button class="btn-ghost !text-xs" @click="rebuildOpen = false">关闭</button><button class="btn-primary !text-xs" :disabled="!rebuildCanRun" aria-describedby="rebuild-run-reason" @click="runRebuild">确认清空播放目录并全部重刮</button></div>
       </div>
     </ModalDialog>
     <ModalDialog v-model:open="releaseOpen" title="解除删除联动保护" size="lg">

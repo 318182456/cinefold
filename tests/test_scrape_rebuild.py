@@ -330,6 +330,50 @@ def test_rechecks_database_and_requires_exact_confirmation(library):
     assert library['video'].exists()
 
 
+def test_inventory_refresh_timestamps_do_not_invalidate_preview(library, monkeypatch):
+    value = preview()
+    with library['db']() as session:
+        root = session.get(ScrapeSourceRoot, scrapeinventory.key(library['root']))
+        root.last_scan = datetime(2030, 1, 1)
+        cached = session.get(ScrapeSourceVideo, scrapeinventory.key(library['source']))
+        cached.indexed_at = datetime(2030, 1, 1)
+        cached.artifact_status = 'incomplete'
+        session.get(Code, 'SONE-725').update_time = datetime(2030, 1, 1)
+        session.add(Code(code='UNRELATED-123', title='后台更新的其他影片'))
+        session.commit()
+    assert scraperebuild._collect()['fingerprint'] == scraperebuild._PLAN['fingerprint']
+    monkeypatch.setattr(scrape, 'scrape_group', lambda code, items, **kw:
+                        scrape.ScrapeResult(code=code, links=[items[0].path]))
+    scraperebuild.start(value['token'], str(library['output']))
+    result = wait()
+    assert result['phase'] == 'completed', result
+
+
+def test_revalidation_ignores_database_row_order(library, monkeypatch):
+    value = preview()
+    with library['db']() as session:
+        session.add(Code(code='OTHER-456', title='无关影片'))
+        session.commit()
+    assert scraperebuild._collect()['fingerprint'] == scraperebuild._PLAN['fingerprint']
+    library['settings'].scrape_dir_template = '{number}/changed'
+    scraperebuild.start(value['token'], str(library['output']))
+    result = wait()
+    assert result['phase'] == 'failed' and '刮削设置' in result['error']
+    assert library['video'].exists() and not result['quarantine_dir']
+
+
+def test_revalidation_detects_source_number_override(library):
+    value = preview()
+    with library['db']() as session:
+        session.add(ScrapeAttempt(source_key=scrapeinventory.key(library['source']),
+                                 source_path=str(library['source']), code='SONE-726', status='failed'))
+        session.commit()
+    scraperebuild.start(value['token'], str(library['output']))
+    result = wait()
+    assert result['phase'] == 'failed' and '下载源或源视频' in result['error']
+    assert library['video'].exists() and not result['quarantine_dir']
+
+
 @pytest.mark.parametrize('source_code', ['SONE-725', 'SONE-725-C'])
 def test_rebuild_retains_metadata_download_and_old_artwork(library, monkeypatch, source_code):
     from app.modules.scrape import merge

@@ -365,16 +365,35 @@ def _collect(missing_policy='block'):
         blockers.append('没有可用于重建的已完成源视频')
     model_dump = getattr(settings, 'model_dump', None)
     settings_data = model_dump() if model_dump else vars(settings)
-    database_digest = _digest([roots, inventory, links, attempts, codes])
+    # Compare the effective rebuild plan, not whole mutable tables. A directory
+    # refresh rewrites indexed_at/last_scan without changing a single video.
+    # Subscription updates for unrelated films must not invalidate this plan.
+    settings_data = {key: value for key, value in settings_data.items()
+                     if key.startswith('scrape_') or key in ('medialink_scrape_dir', 'medialink_library_path')}
+    output_links = [row for row in links if _under(row['link_path'], output)]
+    relevant_codes = {row['code'] for row in sources}
+    relevant_codes.update(row['code'] for row in output_links)
+    relevant_codes.update(merge.base_code(code) for code in list(relevant_codes))
+    relevant_codes.discard(None)
+    code_details = [{key: value for key, value in row.items() if key not in ('create_time', 'update_time', 'status')}
+                    for row in codes if row['code'] in relevant_codes]
     keep_dirs = {str(Path(path).parent) for path in unrecoverable} if missing_policy == 'keep' else set()
     retained = [str(output / relative) for relative, _, kind in output_manifest if kind == 'file'
                 and any((output / relative).is_relative_to(Path(folder)) for folder in keep_dirs)]
     if unrecoverable and missing_policy != 'block':
         warnings.append(f'{len(unrecoverable)} 个视频无法验证独立下载源；' +
                         ('保留其所在目录的文件，其余影片继续重建' if missing_policy == 'keep' else '确认后删除这些播放视频，不保留视频备份'))
-    fingerprint = _digest([str(output), output.exists(), output_manifest, sources, evidence, database_digest, settings_data,
-                           missing_policy, unrecoverable, retained,
-                           quarantine_mode, str(quarantine_parent), backup_bytes])
+    signatures = {
+        'output': _digest([str(output), output.exists(), output_manifest]),
+        'sources': _digest([sorted(configured), sorted(str(path) for path in allowed),
+                            sorted(([row['path'], row['code'], row['stamp']] for row in sources), key=lambda row: row[0])]),
+        'links': _digest(sorted(([row['link_path'], row['source_path'], row['code']] for row in output_links))),
+        'metadata': _digest([sorted(code_details, key=lambda row: row['code']), metadata]),
+        'settings': _digest(settings_data),
+        'recovery': _digest([evidence, missing_policy, unrecoverable, retained,
+                             quarantine_mode, str(quarantine_parent), backup_bytes]),
+    }
+    fingerprint = _digest(signatures)
     plan = {'output_dir': str(output), 'source_count': len(sources), 'video_count': len(old_videos),
             'deduplicated_count': deduplicated,
             'quarantine_mode': quarantine_mode, 'quarantine_parent': str(quarantine_parent), 'backup_bytes': backup_bytes,
@@ -383,12 +402,12 @@ def _collect(missing_policy='block'):
             'sample_paths': [str(path) for path in old_videos[:20]], 'metadata_count': len(metadata)}
     plan.update(missing_policy=missing_policy, unrecoverable_count=len(unrecoverable),
                 unrecoverable_paths=unrecoverable, retained_file_count=len(retained))
-    return {'public': plan, 'fingerprint': fingerprint, 'manifest': output_manifest, 'sources': sources,
+    return {'public': plan, 'fingerprint': fingerprint, 'signatures': signatures, 'manifest': output_manifest, 'sources': sources,
             'quarantine_parent': str(quarantine_parent),
             'quarantine_mode': quarantine_mode,
             'missing_policy': missing_policy, 'unrecoverable': unrecoverable, 'retained': retained,
             'evidence': evidence, 'metadata': metadata,
-            'links': [row for row in links if _under(row['link_path'], output)],
+            'links': output_links,
             'codes': codes, 'inventory': inventory, 'issued': time.time()}
 
 
@@ -432,6 +451,7 @@ def preview(missing_policy='block'):
                 plan = _collect(missing_policy) if missing_policy != 'block' else _collect()
                 token = hmac.new(_SECRET, f"{plan['fingerprint']}:{plan['issued']}".encode(), hashlib.sha256).hexdigest()
                 plan['token'] = token
+                plan['public']['expires_at'] = plan['issued'] + _TOKEN_LIFETIME
                 with _LOCK:
                     _PLAN = plan
                     _STATE.update(phase='ready', plan=plan['public'], token=token,
@@ -717,7 +737,14 @@ def _run(plan, refresh_metadata, force=False):
         policy = plan.get('missing_policy', 'block')
         checked = _collect(policy) if policy != 'block' else _collect()
         if checked['fingerprint'] != plan['fingerprint'] or checked['public']['blocked_count']:
-            raise ValueError('文件、配置或数据库已变化，请重新预览；尚未移动任何文件')
+            labels = {'output': '播放目录文件', 'sources': '下载源或源视频', 'links': '媒体库关联',
+                      'metadata': '本次影片资料', 'settings': '刮削设置', 'recovery': '恢复范围'}
+            changed = [label for key, label in labels.items()
+                       if checked.get('signatures', {}).get(key) != plan.get('signatures', {}).get(key)]
+            reason = '、'.join(changed) or '文件、配置或数据库'
+            if checked['public']['blocked_count']:
+                reason += '；存在阻止项：' + '；'.join(checked['public']['blockers'][:3])
+            raise ValueError(f'{reason}已变化，请重新预览；尚未移动任何文件')
         output = Path(plan['public']['output_dir'])
         # Persist deletion protection before the first rename; release() must not
         # remove it, including on failure or application restart.
