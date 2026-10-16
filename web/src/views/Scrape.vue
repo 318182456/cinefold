@@ -7,6 +7,7 @@ import EmptyState from '@/components/EmptyState.vue'
 import ModalDialog from '@/components/ModalDialog.vue'
 import PrivateImage from '@/components/PrivateImage.vue'
 import WatermarkPreview from '@/components/WatermarkPreview.vue'
+import DownloadSources from '@/components/DownloadSources.vue'
 
 const toast = useToast()
 function previewImage(url) {
@@ -107,6 +108,14 @@ async function doPreview() {
   }
 }
 
+function previewSource({ path, code }) {
+  form.path = path
+  form.code = code
+  result.value = null
+  document.getElementById('scrape-preview-form')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  doPreview()
+}
+
 async function doRun() {
   running.value = true
   try {
@@ -136,8 +145,9 @@ async function doRun() {
       </p>
     </div>
 
+    <DownloadSources @preview="previewSource" />
     <!-- 输入 -->
-    <div class="card space-y-3">
+    <div id="scrape-preview-form" class="card space-y-3">
       <div>
         <p class="text-sm font-medium text-gray-300">刮削试算</p>
         <p class="mt-0.5 text-[11px] text-gray-600">

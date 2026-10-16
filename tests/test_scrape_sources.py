@@ -1,0 +1,251 @@
+import os
+import time
+from pathlib import Path
+
+import pytest
+from sqlalchemy import create_engine, select
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
+
+from app.core.config import Settings
+from app.database.base import DBBase
+from app.database.models import Code, CodeStatus, MediaLink, ScrapeAttempt
+from app.modules.scrape import local, merge, nfo
+from app.services import scrape, scrapesources as sources, scrapewatch
+
+
+@pytest.fixture
+def env(tmp_path, monkeypatch):
+    import app.database.session as database
+    engine = create_engine('sqlite://', connect_args={'check_same_thread': False}, poolclass=StaticPool)
+    DBBase.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine, expire_on_commit=False)
+    monkeypatch.setattr(database, 'SessionLocal', factory)
+    root = tmp_path / 'downloads'; root.mkdir()
+    settings = Settings(scrape_source_dirs=str(root), medialink_scrape_dir=str(tmp_path / 'library'),
+                        scrape_dir_template='{number}', scrape_still_limit=0, scrape_notify=False)
+    for module in (sources, scrape, scrapewatch):
+        monkeypatch.setattr(module, 'get_settings', lambda reload=False: settings)
+    writes = []
+    def save(updates):
+        writes.append(updates)
+        settings.scrape_source_dirs = updates['SCRAPE_SOURCE_DIRS']
+    monkeypatch.setattr(sources, 'save_settings', save)
+    monkeypatch.setattr(sources, '_STATE', {'running': False, 'job_id': '', 'total': 0, 'done': 0,
+        'ok': 0, 'current': '', 'results': [], 'error': '', 'cancel_requested': False})
+    tasks = []
+    class DeferredThread:
+        def __init__(self, *, target, args, **kwargs): self.target, self.args = target, args
+        def start(self): tasks.append(self)
+        def run(self): self.target(*self.args)
+    monkeypatch.setattr(sources.threading, 'Thread', DeferredThread)
+    yield root, settings, factory, writes, tasks
+    engine.dispose()
+
+
+def video(root, name='SONE-725.mp4'):
+    target = root / name; target.write_bytes(b'video-data')
+    return target
+
+
+def test_directory_management_saves_config_without_deleting_files(env, tmp_path):
+    root, settings, _, writes, _ = env
+    original = video(root)
+    second = tmp_path / 'other'; second.mkdir()
+    assert len(sources.add_root(str(second))) == 2
+    sources.add_root(str(second / '.'))
+    assert len(writes) == 1
+    sources.remove_root(str(root))
+    assert settings.scrape_source_dirs == str(second)
+    assert original.read_bytes() == b'video-data'
+    with pytest.raises(ValueError): sources.add_root('relative')
+    with pytest.raises(ValueError): sources.add_root(str(tmp_path / 'missing'))
+    with pytest.raises(ValueError): sources.add_root(str(Path(settings.medialink_scrape_dir).parent))
+
+
+def test_video_listing_filters_paginates_and_never_scrapes(env, monkeypatch):
+    root, _, db, _, _ = env
+    first = video(root)
+    unknown = video(root, 'random-name.mkv')
+    video(root, 'SONE-725-trailer.mp4')
+    (root / 'readme.txt').write_text('text')
+    with db() as session:
+        session.add(Code(code='SONE-725', title='已知标题')); session.commit()
+    monkeypatch.setattr(scrape, 'scrape_group', lambda *a, **kw: pytest.fail('列表不能刮削'))
+    result = sources.list_videos(size=1)
+    assert result['total'] == 2 and len(result['items']) == 1
+    assert sources.list_videos(status='unrecognized')['items'][0]['path'] == str(unknown)
+    assert sources.list_videos(keyword='已知标题')['items'][0]['path'] == str(first)
+    assert sources.list_videos(page=2, size=1)['items'][0]['path'] != result['items'][0]['path']
+    with pytest.raises(ValueError): sources.list_videos(root='not-configured')
+
+
+def test_listing_shows_complete_missing_failed_and_interrupted(env):
+    root, settings, db, _, _ = env
+    original = video(root)
+    target = Path(settings.medialink_scrape_dir) / 'SONE-725.mp4'
+    target.parent.mkdir(); os.link(original, target)
+    nfo.write(target.with_suffix('.nfo'), nfo.NfoData(code='SONE-725', title='标题'))
+    for kind in ('poster', 'fanart', 'thumb'): target.with_name(f'{target.stem}-{kind}.jpg').write_bytes(b'image')
+    with db() as session:
+        session.add(MediaLink(code='SONE-725', source_path=str(original), link_path=str(target))); session.commit()
+    assert sources.list_videos()['items'][0]['status'] == 'complete'
+    target.with_name(f'{target.stem}-poster.jpg').unlink()
+    assert sources.list_videos()['items'][0]['status'] == 'incomplete'
+    sources.record_attempt([{'path': str(original)}], 'SONE-725', status='failed', error='网络失败')
+    row = sources.list_videos()['items'][0]
+    assert row['status'] == 'failed' and row['error'] == '网络失败'
+    sources.record_attempt([{'path': str(original)}], 'SONE-725', status='running', job_id='old-process')
+    assert sources.list_videos()['items'][0]['status'] == 'interrupted'
+
+
+def test_manual_codes_apply_per_video_and_parts_are_grouped(env):
+    root, _, _, _, tasks = env
+    first = video(root, 'unknown-A.mp4')
+    second = video(root, 'unknown-B.mp4')
+    third = video(root, 'another.mp4')
+    got = sources.start([{'path': str(first), 'code': 'SONE-725'}, {'path': str(second), 'code': 'SONE-725'},
+                         {'path': str(third), 'code': 'SSIS-001'}])
+    groups = tasks[0].args[0]
+    assert got['total'] == 2 and got['running']
+    assert [x.part for x in groups['SONE-725']] == [1, 2]
+    assert groups['SSIS-001'][0].path == third
+    assert not list(root.parent.glob('library/**/*'))
+    assert sources.list_videos(keyword='unknown-A')['items'][0]['code'] == 'SONE-725'
+    with pytest.raises(ValueError, match='已有手动刮削'): sources.start([{'path': str(first), 'code': 'SONE-725'}])
+
+
+def test_manual_queue_rejects_unknown_invalid_outside_empty_and_downloading(env, tmp_path):
+    root, _, db, _, _ = env
+    unknown = video(root, 'unknown.mp4')
+    with pytest.raises(ValueError, match='有效番号'): sources.start([{'path': str(unknown)}])
+    with pytest.raises(ValueError, match='有效番号'): sources.start([{'path': str(unknown), 'code': 'bad'}])
+    outside = video(tmp_path, 'SONE-725.mp4')
+    with pytest.raises(ValueError, match='源目录'): sources.start([{'path': str(outside)}])
+    empty = root / 'SONE-726.mp4'; empty.touch()
+    with pytest.raises(ValueError, match='空文件'): sources.start([{'path': str(empty)}])
+    known = video(root)
+    with db() as session:
+        session.add(Code(code='SONE-725', status=CodeStatus.DOWNLOADING)); session.commit()
+    with pytest.raises(ValueError, match='下载中'): sources.start([{'path': str(known)}])
+    assert sources.list_videos(keyword='SONE-725')['items'][0]['status'] == 'downloading'
+
+
+def test_queue_rejects_symlink_escape(env, tmp_path):
+    root, _, _, _, _ = env
+    outside = video(tmp_path)
+    link = root / 'SONE-725.mp4'
+    try: link.symlink_to(outside)
+    except OSError: pytest.skip('当前环境不允许建立符号链接')
+    assert sources.list_videos()['total'] == 0
+    with pytest.raises(ValueError): sources.start([{'path': str(link)}])
+
+
+def test_failed_group_does_not_block_remaining_files_and_records_survive(env, monkeypatch):
+    root, _, db, _, tasks = env
+    first = video(root); second = video(root, 'SONE-726.mp4')
+    def run(code, items, **options):
+        assert options['overwrite'] and options['refresh_metadata']
+        if code == 'SONE-725': raise OSError('模拟失败')
+        return scrape.ScrapeResult(code=code, links=[items[0].path], nfo_written=1)
+    monkeypatch.setattr(scrape, 'scrape_group', run)
+    sources.start([{'path': str(first)}, {'path': str(second)}], overwrite=True, refresh_metadata=True)
+    tasks[0].run()
+    result = sources.state()
+    assert not result['running'] and result['done'] == 2 and result['ok'] == 1
+    with db() as session:
+        assert session.get(ScrapeAttempt, sources.key(first)).status == 'failed'
+        assert session.get(ScrapeAttempt, sources.key(second)).status == 'succeeded'
+
+
+def test_cancel_skips_queued_work_and_keeps_source_files(env, monkeypatch):
+    root, _, db, _, tasks = env
+    original = video(root)
+    monkeypatch.setattr(scrape, 'scrape_group', lambda *a, **kw: pytest.fail('已取消的任务不能刮削'))
+    sources.start([{'path': str(original)}])
+    sources.cancel(); tasks[0].run()
+    assert original.exists() and sources.state()['done'] == 0 and not sources.state()['running']
+    with db() as session: assert session.get(ScrapeAttempt, sources.key(original)).status == 'cancelled'
+
+
+def test_worker_revalidates_root_scope_before_writing(env, monkeypatch):
+    root, settings, _, _, tasks = env
+    original = video(root)
+    sources.start([{'path': str(original)}])
+    settings.scrape_source_dirs = ''
+    monkeypatch.setattr(scrape, 'scrape_group', lambda *a, **kw: pytest.fail('已撤销的目录不能处理'))
+    tasks[0].run()
+    assert sources.state()['ok'] == 0 and '源目录' in sources.state()['results'][0]['error']
+
+
+def test_overwrite_is_per_run_and_preserves_existing_target(env, monkeypatch):
+    root, settings, db, _, tasks = env
+    original = video(root)
+    old_target = Path(settings.medialink_scrape_dir) / 'original-position' / 'old-name.mp4'
+    old_target.parent.mkdir(parents=True); os.link(original, old_target)
+    nfo.write(old_target.with_suffix('.nfo'), nfo.NfoData(code='SONE-725', title='手动旧标题'))
+    with db() as session:
+        session.add(Code(code='SONE-725'))
+        session.add(MediaLink(code='SONE-725', source_path=str(original), link_path=str(old_target)))
+        session.commit()
+    monkeypatch.setattr(scrape, 'load_group_meta', lambda *a, **kw: {'title': '重刮新标题'})
+    monkeypatch.setattr(scrape, '_cover_bytes', lambda *a, **kw: b'')
+    from app.services import medialink
+    monkeypatch.setattr(medialink, '_fetch_subtitle_quietly', lambda *a: None)
+    monkeypatch.setattr(medialink, '_generate_review_quietly', lambda *a: None)
+    sources.start([{'path': str(original)}], overwrite=True, fetch_meta=False)
+    tasks[0].run()
+    assert sources.state()['ok'] == 1
+    assert local.read(old_target.with_suffix('.nfo'), 'SONE-725')['title'] == '重刮新标题'
+    assert old_target.samefile(original) and not settings.scrape_overwrite
+    assert list(Path(settings.medialink_scrape_dir).rglob('*.mp4')) == [old_target]
+
+
+def test_refresh_updates_returned_fields_and_preserves_status_and_translation(env, monkeypatch):
+    _, _, db, _, _ = env
+    with db() as session:
+        session.add(Code(code='SONE-725', title='旧标题', cn_title='手动译文', casts='旧演员', genres='旧标签',
+            release_date='2025-01-01', duration='120', banner='https://old.invalid/cover.jpg', local_banner='old.jpg', status=CodeStatus.COMPLETED))
+        session.commit()
+    monkeypatch.setattr(merge, 'fetch_merged', lambda code: {'title': '新标题', 'casts': '新演员', 'banner': 'https://new.invalid/cover.jpg', 'status': 0})
+    got = scrape._load_meta('SONE-725', refresh=True)
+    assert got['title'] == '新标题' and got['casts'] == '新演员' and got['cn_title'] == '手动译文'
+    with db() as session:
+        row = session.get(Code, 'SONE-725')
+        assert row.status == CodeStatus.COMPLETED and row.genres == '旧标签' and row.local_banner == ''
+    monkeypatch.setattr(merge, 'fetch_merged', lambda code: {})
+    got = scrape._load_meta('SONE-725', refresh=True)
+    assert got['_refresh_failed'] and got['title'] == '新标题'
+
+
+def test_auto_scan_retries_saved_manual_number(env, monkeypatch):
+    root, settings, _, _, _ = env
+    settings.scrape_mode = 'builtin'
+    unknown = video(root, 'cannot-detect.mp4')
+    os.utime(unknown, (time.time() - 500, time.time() - 500))
+    sources.record_attempt([{'path': str(unknown)}], 'SONE-725', status='failed', error='此前失败')
+    monkeypatch.setattr(scrapewatch, '_OBSERVED', {})
+    monkeypatch.setattr(scrapewatch, '_RETRY', {})
+    now = [1000.0]; monkeypatch.setattr(scrapewatch.time, 'monotonic', lambda: now[0])
+    calls = []
+    monkeypatch.setattr(scrape, 'scrape_group', lambda code, items, **kw: calls.append(code) or scrape.ScrapeResult(code=code, error='offline'))
+    scrapewatch.scan(); now[0] += 130; scrapewatch.scan()
+    assert calls == ['SONE-725']
+
+
+def test_source_api_auth_and_invalid_inputs(env):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from app.api.endpoints import get_current_user
+    from app.api.endpoints.scrape import router
+    root, _, _, _, _ = env
+    original = video(root, 'unknown.mp4')
+    app = FastAPI(); app.include_router(router)
+    client = TestClient(app)
+    assert client.get('/scrape/videos').status_code == 401
+    assert client.post('/scrape/jobs', json={'items': [{'path': str(original), 'code': 'SONE-725'}]}).status_code == 401
+    app.dependency_overrides[get_current_user] = lambda: 'admin'
+    assert client.get('/scrape/videos').json()['data']['total'] == 1
+    assert client.post('/scrape/jobs', json={'items': []}).status_code == 422
+    assert client.post('/scrape/jobs', json={'items': [{'path': str(original)}]}).status_code == 400
+    assert client.post('/scrape/jobs', json={'items': [{'path': str(original), 'code': 'SONE-725'}]}).json()['data']['running']

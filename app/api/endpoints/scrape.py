@@ -13,10 +13,10 @@ from __future__ import annotations
 from pathlib import Path
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
 from loguru import logger
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
 from app.api.endpoints import get_current_user
@@ -27,6 +27,78 @@ from app.services import scrape as scrape_service
 from app.utils import get_true_code, mediafile
 
 router = APIRouter(prefix="/scrape", tags=["刮削"])
+
+
+class SourceDirectoryRequest(BaseModel):
+    path: str = Field(min_length=1, max_length=4000)
+
+
+class SourceVideoRequest(BaseModel):
+    path: str = Field(min_length=1, max_length=4000)
+    code: str = Field(default="", max_length=128)
+
+
+class SourceJobRequest(BaseModel):
+    items: list[SourceVideoRequest] = Field(min_length=1, max_length=500)
+    overwrite: bool = False
+    refresh_metadata: bool = False
+    fetch_meta: bool = True
+
+
+@router.get("/sources")
+def source_directories(current_user: str = Depends(get_current_user)):
+    from app.services.scrapesources import roots
+    return ResponseEntity.ok(roots())
+
+
+@router.post("/sources")
+def add_source(body: SourceDirectoryRequest, current_user: str = Depends(get_current_user)):
+    from app.services.scrapesources import add_root
+    try:
+        return ResponseEntity.ok(add_root(body.path))
+    except (ValueError, OSError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.delete("/sources")
+def remove_source(path: str, current_user: str = Depends(get_current_user)):
+    from app.services.scrapesources import remove_root
+    try:
+        return ResponseEntity.ok(remove_root(path))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.get("/videos")
+def source_videos(root: str = '', keyword: str = '', status: str = '', page: int = Query(1, ge=1),
+                  size: int = Query(30, ge=1, le=100), current_user: str = Depends(get_current_user)):
+    from app.services.scrapesources import list_videos
+    try:
+        return ResponseEntity.ok(list_videos(root=root, keyword=keyword, status=status, page=page, size=size))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.get("/jobs/current")
+def source_job_status(current_user: str = Depends(get_current_user)):
+    from app.services.scrapesources import state
+    return ResponseEntity.ok(state())
+
+
+@router.post("/jobs")
+def start_source_job(body: SourceJobRequest, current_user: str = Depends(get_current_user)):
+    from app.services.scrapesources import start
+    try:
+        return ResponseEntity.ok(start([i.model_dump() for i in body.items], overwrite=body.overwrite,
+            refresh_metadata=body.refresh_metadata, fetch_meta=body.fetch_meta))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.post("/jobs/current/cancel")
+def cancel_source_job(current_user: str = Depends(get_current_user)):
+    from app.services.scrapesources import cancel
+    return ResponseEntity.ok(cancel())
 
 
 @router.get("/local-cover")

@@ -80,7 +80,7 @@ class ScrapeResult:
         return bool(self.links) and not self.error
 
 
-def _load_meta(code: str, fetch: bool = True) -> dict:
+def _load_meta(code: str, fetch: bool = True, refresh: bool = False) -> dict:
     """取番号元数据。库里没有且 fetch=True 时去抓。
 
     抓完写回库 —— 下次刮削同一番号（重刮、补分集）就不用再跨境请求。
@@ -90,7 +90,7 @@ def _load_meta(code: str, fetch: bool = True) -> dict:
     from app import services
 
     current = _read_meta(code)
-    if not fetch or not _needs_metadata(current):
+    if not fetch or not refresh and not _needs_metadata(current):
         return current
 
     # 库里没有：多源抓取并合并。刮削比订阅更看重字段完整度，
@@ -99,12 +99,17 @@ def _load_meta(code: str, fetch: bool = True) -> dict:
     services._ensure_codes([code])
     detail = merge.fetch_merged(code)
     if detail:
-        _save_meta(code, detail)
+        if refresh:
+            _save_meta(code, detail, overwrite=True)
+        else:
+            _save_meta(code, detail)
         _translate_quietly(code)
     meta = _read_meta(code)
     sources = detail.get("_sources", []) or getattr(detail, "sources", [])
     if sources:
         meta["_sources"] = sources
+    if refresh and not detail:
+        meta["_refresh_failed"] = True
     return meta
 
 
@@ -127,11 +132,17 @@ def _needs_metadata(meta: dict) -> bool:
     )
 
 
-def load_group_meta(code: str, items: list[MediaFileInfo], fetch: bool = True) -> dict:
+def load_group_meta(code: str, items: list[MediaFileInfo], fetch: bool = True, refresh: bool = False) -> dict:
     """预览与执行共用：本地文件补空 → 资料库 → 联网补缺，不覆盖已有资料。"""
     from app import services
     from app.modules.scrape import local
     local_meta = local.read_group(code, [i.path for i in items])
+    if refresh:
+        meta = _load_meta(code, fetch=fetch, refresh=True)
+        # 重新抓取优先使用本轮远程封面；未获得远程图时才借用本地图片。
+        if not (meta.get("banner") or meta.get("poster")):
+            meta.update({k: v for k, v in local_meta.items() if k.startswith("_local_")})
+        return meta
     if local_meta:
         services._ensure_codes([code])
         _save_meta(code, local_meta)
@@ -169,7 +180,7 @@ def _translate_quietly(code: str) -> None:
         logger.debug(f"[{code}] 标题翻译失败，NFO 将用原标题: {exc}")
 
 
-def _save_meta(code: str, detail: dict) -> None:
+def _save_meta(code: str, detail: dict, overwrite: bool = False) -> None:
     """把抓来的元数据落库。只补空字段，不动已有值。
 
     与 fill_lack_codes_by_list 同一语义：已翻译的 cn_title、
@@ -181,8 +192,13 @@ def _save_meta(code: str, detail: dict) -> None:
             return
         for key, value in merge.clean_detail(detail, code).items():
             existing = getattr(row, key, None)
-            if existing in (None, "") or key in ("title", "cn_title") and not merge.clean_detail({key: existing}).get(key):
+            if overwrite or existing in (None, "") or key in ("title", "cn_title") and not merge.clean_detail({key: existing}).get(key):
                 setattr(row, key, value)
+                if overwrite and existing != value:
+                    if key == "banner":
+                        row.local_banner = ""
+                    elif key == "still_photo":
+                        row.local_still_photo = ""
 
 
 def _context(meta: dict, info: MediaFileInfo, resolution: str = "") -> naming.NamingContext:
@@ -291,7 +307,7 @@ def _download(urls: list[str], code: str) -> list[bytes]:
         return list(pool.map(fetch, urls))
 
 
-def _cover_bytes(meta: dict, code: str) -> bytes:
+def _cover_bytes(meta: dict, code: str, refresh: bool = False) -> bytes:
     """取封面内容。
 
     本地缓存优先：Web UI 那边通常已经缓存过（cache_lack_photos），
@@ -310,7 +326,7 @@ def _cover_bytes(meta: dict, code: str) -> bytes:
             pass
 
     relative = (meta.get("local_banner") or "").split(",")[0].strip()
-    if relative:
+    if relative and not refresh:
         path = imagecache.resolve_relative(relative)
         if path is not None and path.is_file():
             try:
@@ -329,7 +345,7 @@ def _cover_bytes(meta: dict, code: str) -> bytes:
     candidates: list[tuple[str, bytes]] = []
     for kind, url in urls:
         # 缓存里可能已经有这张（库里只是没记 local_banner）
-        hit = imagecache.find_cached(url, code, kind)
+        hit = None if refresh else imagecache.find_cached(url, code, kind)
         if hit is not None:
             try:
                 candidates.append((f"{kind}(缓存)", hit.read_bytes()))
@@ -393,6 +409,9 @@ def scrape_group(
     items: list[MediaFileInfo],
     fetch_meta: bool = True,
     target_dir: str = "",
+    overwrite: bool | None = None,
+    refresh_metadata: bool = False,
+    existing_targets: dict[str, Path] | None = None,
 ) -> ScrapeResult:
     """刮削同一番号的一组文件（可能是多个分集）。
 
@@ -401,6 +420,7 @@ def scrape_group(
     """
     result = ScrapeResult(code=code)
     settings = get_settings()
+    overwrite = settings.scrape_overwrite if overwrite is None else overwrite
 
     playable = [i for i in items if not i.trailer]
     dropped = [i for i in items if i.trailer]
@@ -412,14 +432,17 @@ def scrape_group(
         result.error = "这一组里没有正片"
         return result
 
-    meta = load_group_meta(code, playable, fetch=fetch_meta)
+    meta = (load_group_meta(code, playable, fetch=fetch_meta, refresh=True)
+            if refresh_metadata else load_group_meta(code, playable, fetch=fetch_meta))
     result.sources = meta.get("_sources", [])
+    if meta.get("_refresh_failed"):
+        result.warnings.append("本轮未取得新的网络元数据，沿用现有资料；请检查数据源后重试")
     if not (meta.get("title") or meta.get("cn_title")):
         result.error = f"取不到元数据: {code}"
         return result
 
     # 图片对一个番号只准备一份，各分集共用同一份内容
-    cover = _cover_bytes(meta, code)
+    cover = _cover_bytes(meta, code, refresh=True) if refresh_metadata else _cover_bytes(meta, code)
     if not cover:
         result.warnings.append("未获取到封面，请检查图源和网络后补刮")
     still_urls = [
@@ -437,7 +460,7 @@ def scrape_group(
     failures = []
     for info in playable:
         info_total = total
-        target = _target_path(meta, info, target_dir)
+        target = (existing_targets or {}).get(str(info.path)) or _target_path(meta, info, target_dir)
 
         ok, note = _make_link(info.path, target)
         if not ok:
@@ -448,7 +471,7 @@ def scrape_group(
         from app.modules.scrape import watermark
         marked_images = watermark.apply(image_set, info, getattr(settings, "scrape_watermark", {}))
         written = scrape_images.write_images(
-            target, marked_images, overwrite=settings.scrape_overwrite
+            target, marked_images, overwrite=overwrite
         )
         if written:
             result.images_written += 1
@@ -466,12 +489,12 @@ def scrape_group(
             fanart_file=written.get("fanart", ""),
         )
         if nfo.write(
-            target.with_suffix(".nfo"), data, overwrite=settings.scrape_overwrite
+            target.with_suffix(".nfo"), data, overwrite=overwrite
         ):
             result.nfo_written += 1
         else:
             from app.modules.scrape import local
-            if settings.scrape_overwrite or not local.read(target.with_suffix(".nfo"), code).get("title"):
+            if overwrite or not local.read(target.with_suffix(".nfo"), code).get("title"):
                 note = f"NFO 未能写入或已有 NFO 无效: {target.with_suffix('.nfo')}"
                 failures.append(note)
                 result.skipped.append(note)

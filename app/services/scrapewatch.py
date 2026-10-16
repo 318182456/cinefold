@@ -11,7 +11,7 @@ from loguru import logger
 from sqlalchemy import select
 
 from app.core.config import get_settings
-from app.database.models import Code, CodeStatus, MediaLink
+from app.database.models import Code, CodeStatus, MediaLink, ScrapeAttempt
 from app.database.session import session_scope
 from app.modules.scrape import local
 from app.services import scrape
@@ -80,6 +80,7 @@ def _scan(settings) -> int:
         for source, link in session.execute(select(MediaLink.source_path, MediaLink.link_path)):
             registered.setdefault(source, []).append(link)
         downloading = set(session.scalars(select(Code.code).where(Code.status == CodeStatus.DOWNLOADING)))
+        overrides = {a.source_key: a.code for a in session.scalars(select(ScrapeAttempt)) if a.code}
 
     now = time.monotonic()
     wall = time.time()
@@ -116,8 +117,13 @@ def _scan(settings) -> int:
             _RETRY.pop(key, None)
 
     # 先分组再跳过已入库分集，保持分集编号与冲突消解稳定。
-    groups = mediafile.group_parts(candidates)
-    groups.pop("", None)
+    from app.services.scrapesources import group_entries, key, record_attempt
+    entries = []
+    for path in candidates:
+        code = overrides.get(key(path)) or mediafile.parse(path).code
+        if code:
+            entries.append({'path': str(path), 'code': code})
+    groups = group_entries(entries)
     processed = successful = 0
     for code, items in sorted(groups.items(), key=lambda pair: max(_RETRY.get(str(i.path), 0) for i in pair[1])):
         if code in downloading:
@@ -132,12 +138,16 @@ def _scan(settings) -> int:
         for item in items:
             _RETRY[str(item.path)] = now + max(600, settings.scrape_scan_interval * 60)
         try:
-            result = scrape.scrape_group(code, items)
+            record_attempt(items, code, status='running')
+            existing = {str(i.path): Path(registered[str(i.path)][0]) for i in items if registered.get(str(i.path))}
+            result = scrape.scrape_group(code, items, existing_targets=existing) if existing else scrape.scrape_group(code, items)
+            record_attempt(items, code, status='succeeded' if result.ok else 'failed', error=result.error)
             if result.ok:
                 successful += 1
             else:
                 logger.warning(f"[{code}] 自动刮削未完成，将在后续扫描重试: {result.error}")
         except Exception:
+            record_attempt(items, code, status='failed', error='自动刮削异常，请查看日志或手动重试')
             logger.exception(f"[{code}] 自动刮削失败，将在后续扫描重试")
     if processed:
         logger.info(f"[自动刮削] 本轮处理 {processed} 个番号，成功 {successful} 个")
