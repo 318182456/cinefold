@@ -330,10 +330,16 @@ def _fetch_one(code: str, timeout: float) -> dict:
             next_index += 1
 
     submit_available()
-    while pending:
+    while pending or next_index < len(sites):
         remaining = merge_deadline - time.perf_counter()
         if remaining <= 0:
             break
+        if not pending:
+            # 上一轮超时的网络请求可能仍占着全部线程。等待容量恢复，
+            # 不能把“尚未发出请求”当成所有站点都没有资料。
+            time.sleep(min(0.05, remaining))
+            submit_available()
+            continue
         ready, _ = wait(pending, timeout=remaining, return_when=FIRST_COMPLETED)
         if not ready:
             break

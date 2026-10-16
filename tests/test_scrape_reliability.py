@@ -71,6 +71,60 @@ def test_all_sources_timeout_is_bounded(monkeypatch):
             stop.set()
 
 
+def test_busy_pool_waits_for_capacity_instead_of_reporting_no_metadata(monkeypatch):
+    from app.modules import ladysite
+    slots = threading.BoundedSemaphore(1)
+    slots.acquire()
+    called = []
+    monkeypatch.setattr(ladysite, '_sites_for_code', lambda code: ('javbus',))
+    def fetch(site, code):
+        called.append(code)
+        return {'code': code, 'title': 'Recovered after capacity became available'}
+    monkeypatch.setattr(ladysite, '_fetch_detail', fetch)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        monkeypatch.setattr(merge, '_POOL', pool)
+        monkeypatch.setattr(merge, '_SLOTS', slots)
+        release = threading.Timer(0.05, slots.release)
+        release.start()
+        try:
+            result = merge.fetch_merged('483DAM-001', timeout=0.5)
+            assert result['title'] == 'Recovered after capacity became available'
+            assert called == ['483DAM-001']
+        finally:
+            release.join()
+
+
+def test_busy_pool_deadline_is_bounded_and_reports_unqueried_sources(monkeypatch):
+    from app.modules import ladysite
+    slots = threading.BoundedSemaphore(1)
+    slots.acquire()
+    monkeypatch.setattr(merge, '_SLOTS', slots)
+    monkeypatch.setattr(ladysite, '_sites_for_code', lambda code: ('javbus', 'javdb'))
+    monkeypatch.setattr(ladysite, '_fetch_detail', lambda *a: pytest.fail('No slot was available'))
+    started = time.perf_counter()
+    result = merge.fetch_merged('483DAM-001', timeout=0.05)
+    assert 0.04 <= time.perf_counter() - started < 0.5
+    assert not result
+    assert all(s['status'] == 'not_started' for s in result.sources)
+
+
+@pytest.mark.parametrize('code,lookup', [('ZSD-074-U', 'ZSD-074'), ('JUL-915-C', 'JUL-915'), ('483DAM-001', '483DAM-001')])
+def test_failed_examples_lookup_base_number_without_changing_numeric_prefix(monkeypatch, code, lookup):
+    calls = []
+    monkeypatch.setattr(merge, '_fetch_one', lambda value, timeout: calls.append(value) or {})
+    merge.fetch_merged(code)
+    assert calls == [lookup]
+
+
+def test_capacity_timeout_is_not_reported_as_missing_metadata(scrape_case, monkeypatch):
+    video, _ = scrape_case
+    monkeypatch.setattr(scrape, 'load_group_meta', lambda *a, **kw: {
+        '_sources': [{'site': 'javbus', 'status': 'not_started', 'elapsed': 0}]})
+    result = scrape.scrape_file(video)
+    assert '尚未查询数据源' in result.error
+    assert '取不到元数据' not in result.error
+
+
 def test_field_priority_and_exclusion_override_longest(monkeypatch):
     from app.core import config
     settings = Settings(scrape_field_priority={'casts': 'javbus,javdb', 'outline': 'airav'}, scrape_field_exclude={'title': 'javdb'})

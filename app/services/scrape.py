@@ -532,7 +532,10 @@ def scrape_group(
     if meta.get("_refresh_failed"):
         result.warnings.append("本轮未取得新的网络元数据，沿用现有资料；请检查数据源后重试")
     if not (meta.get("title") or meta.get("cn_title")):
-        result.error = f"取不到元数据: {code}"
+        if result.sources and all(s.get('status') == 'not_started' for s in result.sources):
+            result.error = f"刮削线程繁忙，等待超时，尚未查询数据源: {code}"
+        else:
+            result.error = f"取不到元数据: {code}"
         return result
 
     # 图片对一个番号只准备一份，各分集共用同一份内容
