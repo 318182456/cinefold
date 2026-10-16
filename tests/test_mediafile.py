@@ -371,3 +371,34 @@ def test_zh_subtitle_flag_survives_single_letter_file_suffix():
 def test_actor_name_only_is_not_enough_to_identify_a_unique_movie():
     info = mediafile.parse(Path('/downloads/日本AV') / '蒼井そら、無碼流出版.1080p.x264.mp4')
     assert info.code == ''
+
+
+@pytest.mark.parametrize('filename,part', [
+    ('STARS-043 小倉由菜 1.mp4', 1),
+    ('STARS-043 小倉由菜_2.mp4', 2),
+    ('STARS-043 小倉由菜 3.mp4', 3),
+    ('STARS-043 小倉由菜_4_1080p.mp4', 4),
+    ('STARS-043-C 小倉由菜_2.mp4', 2),
+])
+def test_numbered_parts_allow_actor_and_title_after_complete_code(filename, part):
+    info = mediafile.parse(filename)
+    assert info.code in ('STARS-043', 'STARS-043-C')
+    assert info.part == part
+    assert info.stem_for_output.endswith(f'-CD{part}')
+
+
+@pytest.mark.parametrize('filename', [
+    'STARS-043 小倉由菜 2026.mp4',
+    'STARS-043 小倉由菜 1080.mp4',
+    '小倉由菜_2.mp4',
+    '032416_267.mp4',
+    '300MIUM-123.mp4',
+])
+def test_actor_numeric_part_rule_does_not_invent_code_or_reinterpret_year(filename):
+    assert mediafile.parse(filename).part == 0
+
+
+def test_titled_numeric_parts_group_in_numeric_order():
+    paths = ['STARS-043 小倉由菜_2.mp4', 'STARS-043 小倉由菜 1.mp4', 'STARS-043 小倉由菜 3.mp4']
+    group = mediafile.group_parts(paths)['STARS-043']
+    assert [info.part for info in group] == [1, 2, 3]

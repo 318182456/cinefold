@@ -20,6 +20,8 @@ Overview 不渲染 markdown，列表符号只能用纯文本的「·」，换行
 """
 from __future__ import annotations
 
+from app.services.scrapemaintenance import guarded as maintenance_guarded
+
 from datetime import datetime
 from pathlib import Path
 from xml.etree import ElementTree
@@ -416,6 +418,7 @@ def _nfo_paths(code: str) -> list[Path]:
     return out
 
 
+@maintenance_guarded
 def _write_nfo(code: str, block: str) -> bool:
     """改写 NFO 里的 plot。返回是否至少写成了一处。
 
@@ -424,6 +427,8 @@ def _write_nfo(code: str, block: str) -> bool:
     NFO 不存在时不新建：没有刮削产物说明这条链路还没走完，
     我们凭元数据造一份只会和后来的刮削结果打架。
     """
+    from app.services.scrape import _SCRAPE_LOCK
+
     written = 0
     for path in _nfo_paths(code):
         if not path.is_file():
@@ -431,23 +436,25 @@ def _write_nfo(code: str, block: str) -> bool:
             continue
 
         try:
-            tree = ElementTree.parse(path)
-            root = tree.getroot()
+            # 与刮削产物提交互斥；只锁本地读改写，不锁 AI 网络请求。
+            with _SCRAPE_LOCK:
+                tree = ElementTree.parse(path)
+                root = tree.getroot()
 
-            plot = root.find("plot")
-            if plot is None:
-                plot = ElementTree.SubElement(root, "plot")
-            plot.text = merge_text(plot.text or "", block)
+                plot = root.find("plot")
+                if plot is None:
+                    plot = ElementTree.SubElement(root, "plot")
+                plot.text = merge_text(plot.text or "", block)
 
-            # Emby 详情页在标题下方单独显示 tagline，一行看点放这儿最显眼
-            if _tagline(block):
-                tagline = root.find("tagline")
-                if tagline is None:
-                    tagline = ElementTree.SubElement(root, "tagline")
-                tagline.text = _tagline(block)
+                # Emby 详情页在标题下方单独显示 tagline，一行看点放这儿最显眼
+                if _tagline(block):
+                    tagline = root.find("tagline")
+                    if tagline is None:
+                        tagline = ElementTree.SubElement(root, "tagline")
+                    tagline.text = _tagline(block)
 
-            tree.write(path, encoding="utf-8", xml_declaration=True)
-            written += 1
+                tree.write(path, encoding="utf-8", xml_declaration=True)
+                written += 1
         except ElementTree.ParseError as exc:
             # 刮削工具写坏过的 NFO 不少见。解析不了就别碰，
             # 硬写会把整份文件毁掉

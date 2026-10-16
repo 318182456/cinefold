@@ -1,6 +1,8 @@
 """配置、日志、任务管理。"""
 from __future__ import annotations
 
+from app.services.scrapemaintenance import guarded as maintenance_guarded
+
 from dataclasses import fields
 
 from fastapi import APIRouter, Depends
@@ -34,6 +36,7 @@ def get_config(current_user: str = Depends(get_current_user)):
 
 
 @router.post("/config")
+@maintenance_guarded
 def save_config(body: ConfigRequest, current_user: str = Depends(get_current_user)):
     """保存配置。打码占位的字段会被跳过，避免把掩码写回去。"""
     from app.modules.scrape.preferences import validate

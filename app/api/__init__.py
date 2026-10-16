@@ -90,6 +90,14 @@ def create_app() -> FastAPI:
         openapi_url="/api/openapi.json",
     )
 
+    from app.services.scrapemaintenance import MaintenanceBusy
+
+    @app.exception_handler(MaintenanceBusy)
+    async def maintenance_busy(request, exc):
+        return JSONResponse(status_code=409, content={
+            'code': 409, 'message': str(exc), 'data': None,
+        })
+
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],

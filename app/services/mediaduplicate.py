@@ -1,6 +1,8 @@
 """重复入库检查与内容校验合并；不调用联动删除或下载器删除接口。"""
 from __future__ import annotations
 
+from app.services.scrapemaintenance import guarded as maintenance_guarded
+
 import hashlib
 import copy
 import json
@@ -296,12 +298,15 @@ def check_existing(code, items, provided=None):
             target = Path(row.link_path)
             if not target.is_file():
                 continue
+            # 已登记的同一物理源（或合并时验证过的源）优先复用原位置。
+            # 源名和产物名的分段/版本标记可能不同，不能因此误报新副本。
+            if target.samefile(info.path) or verified_existing(info.path, target):
+                identical.append(target)
+                continue
             other = _file_info(target)
             if other.part != info.part or other.uncensored != info.uncensored:
                 continue
             candidates.append(target)
-            if target.samefile(info.path) or verified_existing(info.path, target):
-                identical.append(target)
         if identical:
             preferred = (provided or {}).get(str(info.path))
             targets[str(info.path)] = preferred if preferred in identical else identical[0]
@@ -409,6 +414,7 @@ def _copy_subtitles(source, target):
             raise ValueError(f'字幕目标发生变化，请重新检查: {dest}')
 
 
+@maintenance_guarded
 def merge(code, keep_path, token):
     from app.services.scrape import _SCRAPE_LOCK
     with LOCK, _SCRAPE_LOCK:

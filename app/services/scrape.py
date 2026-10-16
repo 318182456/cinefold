@@ -20,13 +20,15 @@
 """
 from __future__ import annotations
 
+from app.services.scrapemaintenance import guarded as maintenance_guarded
+
 import os
 import re
 import threading
 from contextlib import contextmanager
 from functools import wraps
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import httpx
@@ -419,6 +421,9 @@ def _cover_bytes(meta: dict, code: str, refresh: bool = False) -> bytes:
 
 def _poster_bytes(meta: dict, code: str, refresh: bool = False) -> bytes:
     """保留独立竖版海报，背景始终使用完整封面。"""
+    local = _preserved_image(meta.get('_local_poster'))
+    if local:
+        return local
     url = meta.get('poster') or ''
     if not url or url == meta.get('banner'):
         return b''
@@ -438,6 +443,16 @@ def _poster_bytes(meta: dict, code: str, refresh: bool = False) -> bytes:
             finally:
                 image.close()
     return b''
+
+
+def _preserved_image(path) -> bytes:
+    if not path:
+        return b''
+    try:
+        data = Path(path).read_bytes()
+        return data if scrape_images.jpeg_bytes(data) else b''
+    except OSError:
+        return b''
 
 
 def inspect_source(path: Path | str, subtitle_probe=None, identity_resolver=None) -> MediaFileInfo:
@@ -526,6 +541,7 @@ def scrape_file(
 
 
 @_by_code
+@maintenance_guarded
 def scrape_group(
     code: str,
     items: list[MediaFileInfo],
@@ -534,6 +550,7 @@ def scrape_group(
     overwrite: bool | None = None,
     refresh_metadata: bool = False,
     existing_targets: dict[str, Path] | None = None,
+    preserved_meta: dict | None = None,
 ) -> ScrapeResult:
     """刮削同一番号的一组文件（可能是多个分集）。
 
@@ -562,6 +579,9 @@ def scrape_group(
 
     meta = (load_group_meta(code, playable, fetch=fetch_meta, refresh=True)
             if refresh_metadata else load_group_meta(code, playable, fetch=fetch_meta))
+    if preserved_meta:
+        meta = {**{k: v for k, v in preserved_meta.items() if v}, **meta,
+                **{k: v for k, v in preserved_meta.items() if k.startswith('_local_') and v}}
     result.sources = meta.get("_sources", [])
     if meta.get("_refresh_failed"):
         result.warnings.append("本轮未取得新的网络元数据，沿用现有资料；请检查数据源后重试")
@@ -581,12 +601,18 @@ def scrape_group(
         for u in (meta.get("still_photo") or "").split(",")
         if u.strip()
     ][: max(0, settings.scrape_still_limit)]
-    stills = _download(still_urls, code) if still_urls else []
+    stills = [data for path in meta.get('_local_stills', [])
+              if (data := _preserved_image(path))][:scrape_images.MAX_STILLS]
+    if len(stills) < len(still_urls):
+        stills.extend(_download(still_urls[len(stills):], code))
     image_set = scrape_images.build_image_set(
         cover, stills, meta.get("portrait_side") or "",
         crop=scrape_images.should_crop(code, meta, getattr(settings, 'scrape_poster_crop', 'auto')),
         poster=_poster_bytes(meta, code, refresh_metadata),
     )
+    thumb = _preserved_image(meta.get('_local_thumb'))
+    if thumb:
+        image_set.thumb = thumb
     # 一个来源的剧照不可用时，使用本轮校验过身份的其他来源补全。
     for urls in meta.get('_image_candidates', {}).get('still_photo', []):
         if len(image_set.stills) >= len(still_urls):
@@ -599,35 +625,40 @@ def scrape_group(
     if stills_missing:
         result.warnings.append(f'剧照下载不完整：{len(image_set.stills)}/{len(still_urls)}')
 
+    preserved_sets = {}
+    for part, saved in meta.get('_local_by_part', {}).items():
+        part_images = replace(image_set, stills=list(image_set.stills))
+        for key, kind in (('_local_cover', 'fanart'), ('_local_poster', 'poster'), ('_local_thumb', 'thumb')):
+            data = _preserved_image(saved.get(key))
+            if data:
+                setattr(part_images, kind, data)
+        saved_stills = [data for path in saved.get('_local_stills', [])
+                        if (data := _preserved_image(path))]
+        if saved_stills:
+            part_images.stills = saved_stills[:scrape_images.MAX_STILLS]
+        preserved_sets[str(part)] = part_images
+    meta['_preserved_image_sets'] = preserved_sets
+
     result, registered_new = _commit_group(
         code, playable, meta, settings, overwrite, target_dir, existing_targets,
         image_set, stills_missing, result,
     )
     if result.links:
-        # 慢的字幕/AI请求放在提交锁之外；同一番号仍由 _code_lock 保护。
-        from app.services import medialink
-        for action in (medialink._fetch_subtitle_quietly, medialink._generate_review_quietly):
-            try:
-                action(code)
-            except Exception:
-                logger.exception(f"[{code}] 入库后的附加处理失败")
-                result.warnings.append("入库完成，字幕或看点处理失败，可稍后补全")
-    if result.ok and (result.nfo_written or registered_new) and getattr(settings, "scrape_notify", False):
+        # 影片已提交；慢的附加任务使用独立有界队列，不占刮削工作线程。
         try:
-            from html import escape
-            from app.modules.notify import get_notifiers
-            notifiers = get_notifiers()
-            sent = 0
-            text = f"刮削入库完成：{escape(code)}\n{escape(str(meta.get('cn_title') or meta.get('title') or ''))}\n{len(result.links)} 个影片文件"
-            for notifier in notifiers:
-                try:
-                    sent += bool(notifier.send_text_message(text))
-                except Exception:
-                    continue
-            if sent < len(notifiers):
-                result.warnings.append("入库完成，部分通知渠道发送失败")
+            from app.services.scrapefollowup import schedule
+            followup = schedule(
+                code, str(meta.get('cn_title') or meta.get('title') or ''), len(result.links),
+                subtitles=bool(getattr(settings, 'subtitle_enabled', False)),
+                review=bool(getattr(settings, 'review_enabled', False)),
+                notify=bool(result.ok and (result.nfo_written or registered_new)
+                            and getattr(settings, 'scrape_notify', False)),
+            )
+            if followup in ('full', 'error'):
+                result.warnings.append("入库完成，后台补全队列已满或不可用；字幕、看点和通知可稍后补全")
         except Exception:
-            result.warnings.append("入库完成，但通知发送失败")
+            logger.exception(f"[{code}] 无法提交后台补全")
+            result.warnings.append("入库完成，未能提交字幕、看点和通知后台任务")
 
     logger.info(
         f"[{code}] 刮削{'未完成' if result.error else '完成'}: {len(result.links)} 个产物, "
@@ -666,14 +697,15 @@ def _commit_group(code, playable, meta, settings, overwrite, target_dir,
             failures.append(f'目标已存在且不是同一文件: {target}')
             continue
         from app.modules.scrape import watermark
-        marked_images = watermark.apply(image_set, info, getattr(settings, "scrape_watermark", {}))
+        selected_images = meta.get('_preserved_image_sets', {}).get(str(info.part), image_set)
+        marked_images = watermark.apply(selected_images, info, getattr(settings, "scrape_watermark", {}))
         written = scrape_images.write_images(
             target, marked_images, overwrite=overwrite
         )
         if written:
             result.images_written += 1
         missing_images = [kind for kind in ("poster", "fanart", "thumb") if not scrape_images.valid_file(target.with_name(f"{target.stem}-{kind}.jpg"))]
-        if image_set.stills and 'stills' not in written:
+        if selected_images.stills and 'stills' not in written:
             missing_images.append('stills')
         if missing_images:
             note = f"图片产物缺失（{', '.join(missing_images)}）: {target.name}"

@@ -45,6 +45,50 @@ class SourceJobRequest(BaseModel):
     fetch_meta: bool = True
 
 
+class RebuildRequest(BaseModel):
+    token: str = Field(min_length=1, max_length=256)
+    confirmation: str = Field(min_length=1, max_length=4000)
+    refresh_metadata: bool = False
+
+
+class RebuildProtectionRequest(BaseModel):
+    confirmation: str = Field(min_length=1, max_length=4000)
+
+
+@router.post('/rebuild/preview')
+def preview_rebuild(current_user: str = Depends(get_current_user)):
+    from app.services import scraperebuild
+    try:
+        return ResponseEntity.ok(scraperebuild.preview())
+    except (ValueError, OSError) as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@router.get('/rebuild/current')
+def rebuild_state(current_user: str = Depends(get_current_user)):
+    from app.services import scraperebuild
+    return ResponseEntity.ok(scraperebuild.state())
+
+
+@router.post('/rebuild/run')
+def run_rebuild(body: RebuildRequest, current_user: str = Depends(get_current_user)):
+    from app.services import scraperebuild
+    try:
+        return ResponseEntity.ok(scraperebuild.start(body.token, body.confirmation,
+                                refresh_metadata=body.refresh_metadata))
+    except (ValueError, OSError) as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@router.post('/rebuild/protection/release')
+def release_rebuild_protection(body: RebuildProtectionRequest, current_user: str = Depends(get_current_user)):
+    from app.services.scrapemaintenance import release_protection
+    try:
+        return ResponseEntity.ok(release_protection(body.confirmation))
+    except (ValueError, OSError) as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
 @router.get("/sources")
 def source_directories(current_user: str = Depends(get_current_user)):
     from app.services.scrapesources import roots

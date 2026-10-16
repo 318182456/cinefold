@@ -1,6 +1,8 @@
 """后台扫描源目录，将文件清单与产物检查结果持久化。"""
 from __future__ import annotations
 
+from app.services.scrapemaintenance import guarded as maintenance_guarded
+
 import copy
 import hashlib
 import os
@@ -70,6 +72,7 @@ def state() -> dict:
         return copy.deepcopy(_STATE)
 
 
+@maintenance_guarded
 def _begin(root: str):
     paths = configured()
     if root and root not in paths:
@@ -165,6 +168,17 @@ def _flush(root_key, batch, started):
 
 
 def _run(paths):
+    from app.services.scrapemaintenance import activity, MaintenanceBusy
+    try:
+        with activity():
+            return _run_active(paths)
+    except MaintenanceBusy as exc:
+        with _STATE_LOCK:
+            _STATE.update(running=False, current='', errors=[str(exc)], finished_at=datetime.now().isoformat())
+        _LOCK.release()
+
+
+def _run_active(paths):
     try:
         if not paths:
             return

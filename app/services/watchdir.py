@@ -22,6 +22,8 @@
 """
 from __future__ import annotations
 
+from app.services.scrapemaintenance import guarded as maintenance_guarded
+
 import hashlib
 import os
 import threading
@@ -485,6 +487,7 @@ def _existing_links(rule: WatchDir, base: Path) -> dict[str, MediaLink]:
     return out
 
 
+@maintenance_guarded
 def sync_rule(rule_id: int, dry_run: bool = False) -> SyncResult:
     """对账一条监控规则：让媒体库与源目录一致。
 
@@ -1578,6 +1581,7 @@ def _record_probe(pending: list[dict], mapping: dict, now: datetime) -> None:
             )
 
 
+@maintenance_guarded
 def adopt_scrape_dir(
     dry_run: bool = True, fallback_passthrough: bool = False,
 ) -> dict:

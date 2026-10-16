@@ -15,6 +15,8 @@ Emby 会显示成「未知」，用户得手动挑。
 """
 from __future__ import annotations
 
+from app.services.scrapemaintenance import guarded as maintenance_guarded
+
 import os
 import tempfile
 from pathlib import Path
@@ -322,6 +324,7 @@ def _has_embedded(video: Path) -> bool:
     return has_embedded_subtitle(video)
 
 
+@maintenance_guarded
 def _write_beside(video: Path, item) -> bool:
     """把字幕写到影片旁边。写成功返回 True。
 

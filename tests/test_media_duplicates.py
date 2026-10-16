@@ -62,6 +62,43 @@ def test_other_parts_and_uncensored_version_do_not_block(library, db):
     assert mediaduplicate.check_existing('MEYD-568', [parse(source)]) == ({}, [])
 
 
+def test_titled_numbered_sources_reuse_matching_existing_cd_targets(library, db):
+    root, download = library
+    sources, expected = [], {}
+    for index in (1, 2, 3, 4):
+        name = f'STARS-043 小倉由菜{("_" if index == 2 else " ")}{index}.mp4'
+        source, target = download / name, root / f'STARS-043-CD{index}.mp4'
+        source.write_bytes(f'part {index}'.encode())
+        os.link(source, target)
+        register(db, target, source, code='STARS-043')
+        sources.append(source)
+        expected[str(source)] = target
+    infos = scrape.group_sources(sources)['STARS-043']
+    assert [info.part for info in infos] == [1, 2, 3, 4]
+    assert mediaduplicate.check_existing('STARS-043', infos) == (expected, [])
+
+
+def test_verified_same_source_reuses_existing_target_despite_old_part_inference(library, db):
+    root, download = library
+    source, target = download / 'STARS-043 小倉由菜.mp4', root / 'STARS-043-CD2.mp4'
+    source.write_bytes(b'part two')
+    os.link(source, target)
+    register(db, target, source, code='STARS-043')
+    assert parse(source).part == 0 and parse(target).part == 2
+    assert mediaduplicate.check_existing('STARS-043', [parse(source)]) == ({str(source): target}, [])
+
+
+def test_different_titled_file_with_existing_part_is_still_blocked(library, db):
+    root, download = library
+    source, target = download / 'STARS-043 小倉由菜_2.mp4', root / 'STARS-043-CD2.mp4'
+    source.write_bytes(b'different copy')
+    target.write_bytes(b'existing part two')
+    register(db, target, code='STARS-043')
+    targets, conflicts = mediaduplicate.check_existing('STARS-043', [parse(source)])
+    assert not targets and conflicts
+    assert source.exists() and target.exists()
+
+
 def test_merge_preserves_download_history_subtitles_and_late_delete_callback(library, db):
     root, download = library
     first, second = root / 'old' / 'MEYD-568.mp4', root / 'new' / 'MEYD-568.mp4'

@@ -134,4 +134,4 @@ def apply(images, info, raw):
     detected = labels(info)
     return replace(images, poster=render(images.poster, detected, raw, "poster"),
                    fanart=render(images.fanart, detected, raw, "fanart"),
-                   thumb=render(images.fanart, detected, raw, "thumb"))
+                   thumb=render(images.thumb or images.fanart, detected, raw, "thumb"))

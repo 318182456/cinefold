@@ -1,6 +1,8 @@
 """下载源视频列表、指定番号与后台手动刮削任务。"""
 from __future__ import annotations
 
+from app.services.scrapemaintenance import guarded as maintenance_guarded
+
 import copy
 import os
 import threading
@@ -64,6 +66,7 @@ def roots(probe: bool = False) -> list[dict]:
     return result
 
 
+@maintenance_guarded
 def add_root(path: str) -> list[dict]:
     if any(c in path for c in (',', '\r', '\n')):
         raise ValueError("请一次添加一个目录，目录名不能包含逗号或换行")
@@ -76,6 +79,7 @@ def add_root(path: str) -> list[dict]:
     return roots()
 
 
+@maintenance_guarded
 def remove_root(path: str) -> list[dict]:
     with _CONFIG_LOCK:
         existing = configured()
@@ -173,10 +177,14 @@ def list_videos(*, root: str = '', keyword: str = '', status: str = '', page: in
         raise ValueError("所选目录未配置")
     root_keys = [r['root_key'] for r in configured_roots if not root or r['path'] == root]
     job = state()
+    from app.services import scraperebuild
+    rebuild = scraperebuild.active_job()
     video, attempt = ScrapeSourceVideo, ScrapeAttempt
     number = case((video.artifact_status == 'ignored', ''), else_=func.coalesce(func.nullif(attempt.code, ''), video.detected_code))
     title = func.coalesce(func.nullif(Code.cn_title, ''), Code.title, '')
     active = or_(and_(attempt.job_id == job['job_id'], literal(job['running'])),
+                 and_(attempt.job_id == rebuild.get('job_id', ''),
+                      literal(rebuild['running'] and rebuild.get('phase') == 'rebuilding')),
                  and_(attempt.job_id == '', literal(scrapewatch._LOCK.locked())))
     queued = case((active, attempt.status), else_='interrupted')
     downloading = video.detected_code.in_(select(Code.code).where(Code.status == CodeStatus.DOWNLOADING).correlate(None))
@@ -212,6 +220,7 @@ def list_videos(*, root: str = '', keyword: str = '', status: str = '', page: in
             'inventory': scrapeinventory.state(), 'needs_refresh': any(r['last_scan'] is None for r in configured_roots)}
 
 
+@maintenance_guarded
 def start(entries: list[dict], *, overwrite: bool = False, refresh_metadata: bool = False, fetch_meta: bool = True) -> dict:
     if refresh_metadata and not fetch_meta:
         raise ValueError("重新获取元数据时需要开启联网")
@@ -270,6 +279,7 @@ def cancel() -> dict:
         return state()
 
 
+@maintenance_guarded
 def _run(groups, job_id, overwrite, refresh_metadata, fetch_meta):
     """两组影片并行准备网络资料；scrape 内部仍串行提交文件。"""
     queue = iter(groups.items())

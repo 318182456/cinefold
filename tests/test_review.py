@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from datetime import datetime
 from unittest.mock import patch
+from concurrent.futures import ThreadPoolExecutor
+from threading import Event
 
 import pytest
 
@@ -16,6 +18,34 @@ from app.database.session import session_scope
 from app.modules.review import reviewai
 from app.modules.review.profile import _aggregate, actor_profile, studio_profile
 from app.services import review as service
+
+
+def test_background_review_preserves_concurrent_rescrape(tmp_path, monkeypatch):
+    from app.services.scrape import _SCRAPE_LOCK
+    path = tmp_path / 'ABC-123.nfo'
+    path.write_text('<movie><title>old</title></movie>', encoding='utf-8')
+    entered, parsed = Event(), Event()
+    parse = service.ElementTree.parse
+
+    def paths(code):
+        entered.set()
+        return [path]
+
+    def read(*args, **kwargs):
+        parsed.set()
+        return parse(*args, **kwargs)
+
+    monkeypatch.setattr(service, '_nfo_paths', paths)
+    monkeypatch.setattr(service.ElementTree, 'parse', read)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with _SCRAPE_LOCK:
+            future = pool.submit(service._write_nfo, 'ABC-123', 'review')
+            assert entered.wait(2)
+            assert not parsed.wait(0.05)
+            path.write_text('<movie><title>new</title></movie>', encoding='utf-8')
+        assert future.result(timeout=2)
+    assert parse(path).findtext('title') == 'new'
+    assert 'review' in parse(path).findtext('plot')
 
 
 @pytest.fixture(autouse=True)

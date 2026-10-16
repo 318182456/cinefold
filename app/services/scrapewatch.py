@@ -1,6 +1,8 @@
 """自建刮削下载目录补漏。源文件始终保留，重启后通过关联与产物检查去重。"""
 from __future__ import annotations
 
+from app.services.scrapemaintenance import guarded as maintenance_guarded
+
 import os
 import re
 import threading
@@ -41,6 +43,9 @@ def _complete(source: Path, code: str, links: list[str], require_images: bool = 
 
 
 def scan() -> int:
+    from app.services.scrapemaintenance import busy, MaintenanceBusy
+    if busy():
+        return 0
     settings = get_settings()
     if settings.scrape_mode != "builtin" or not settings.scrape_source_dirs.strip():
         return 0
@@ -48,10 +53,13 @@ def scan() -> int:
         return 0
     try:
         return _scan(settings)
+    except MaintenanceBusy:
+        return 0
     finally:
         _LOCK.release()
 
 
+@maintenance_guarded
 def _scan(settings) -> int:
     output = settings.medialink_scrape_dir or settings.medialink_library_path
     if not output or not Path(output).is_absolute():

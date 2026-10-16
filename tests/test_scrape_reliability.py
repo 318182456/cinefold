@@ -349,6 +349,41 @@ def test_strict_images_prevent_completed_status(scrape_case, db):
         assert session.get(Code, 'SONE-725').status == CodeStatus.DOWNLOADED
 
 
+def test_rebuild_moves_preserved_artwork_to_new_paths_per_part(scrape_case, tmp_path, monkeypatch):
+    video, settings = scrape_case
+    settings.scrape_still_limit = 2
+    settings.scrape_require_images = True
+    first, second = video.with_name('SONE-725-cd1.mp4'), video.with_name('SONE-725-cd2.mp4')
+    first.write_bytes(b'part1')
+    second.write_bytes(b'part2')
+    retained = tmp_path / 'retained'
+    retained.mkdir()
+    images = {}
+    for name, color, size in [('cover', 'blue', (400, 300)), ('poster1', 'red', (200, 300)),
+                              ('poster2', 'green', (200, 300)), ('thumb', 'yellow', (400, 300)),
+                              ('still', 'purple', (400, 300))]:
+        path = retained / f'{name}.jpg'
+        Image.new('RGB', size, color).save(path, 'JPEG')
+        images[name] = str(path)
+    monkeypatch.setattr(scrape, '_cover_bytes', lambda meta, *a: scrape._preserved_image(meta['_local_cover']))
+    monkeypatch.setattr(scrape, '_download', lambda *a: pytest.fail('preserved images must not be downloaded again'))
+    result = scrape.scrape_group('SONE-725', [parse(first), parse(second)], preserved_meta={
+        '_local_cover': images['cover'], '_local_thumb': images['thumb'],
+        '_local_poster': images['poster1'], '_local_stills': [images['still']],
+        '_local_by_part': {'1': {'_local_poster': images['poster1']},
+                           '2': {'_local_poster': images['poster2']}},
+    })
+    assert result.ok and len(result.links) == 2 and result.nfo_written == 2
+    for index, target in enumerate(result.links):
+        assert retained not in target.parents
+        with Image.open(target.with_name(f'{target.stem}-poster.jpg')) as image:
+            r, g, b = image.getpixel((40, 40))
+            assert (r > 200 and g < 40) if index == 0 else (g > 80 and r < 40)
+        with Image.open(target.with_name(f'{target.stem}-thumb.jpg')) as image:
+            r, g, b = image.getpixel((40, 40))
+            assert r > 200 and g > 200 and b < 40
+
+
 def test_auto_scan_waits_for_stable_file_retries_without_starvation(db, tmp_path, monkeypatch):
     source = tmp_path / 'downloads'; source.mkdir()
     first = source / 'SONE-725.mp4'; first.write_bytes(b'video')

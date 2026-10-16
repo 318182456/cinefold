@@ -45,7 +45,8 @@ _PART_PATTERNS = (
 # 纯数字式分集：ABP-554-1 / ABP-554-2。单独处理，因为它和番号本身的
 # 数字段形状完全一样，必须要求「前面已经是一个完整番号」才认。
 #
-# 判据是前缀能被 _CLEAN_CODE 整串匹配（ABP-554-1 → 前缀 ABP-554 合格），
+# 判据是前缀以一个完整番号开头（可带演员/标题，再由 _CLEAN_CODE 校验），
+# ABP-554-1 和 STARS-043 小倉由菜_2 都合格。
 # 这样 300MIUM-123 不会被劈成 300MIUM + 第 123 集（前缀 300MIUM 没有
 # 数字段，不合格），日期型 032416_267 也不会（前缀纯数字，不合格）。
 #
@@ -227,11 +228,14 @@ def detect_part(stem: str) -> tuple[int, str]:
             return _PART_CN[match.group(1)], match.group(1)
 
         # 纯数字式放最后：它形状最宽，前面几种都不匹配时才轮到它，
-        # 且要求剥掉序号后剩下的正好是个完整番号
+        # 且要求剥掉序号后有完整番号开头；允许番号后保留演员/标题。
+        # 标题式下载名如 STARS-043 小倉由菜_2 仍是第二段，不能当单文件。
         match = _PART_NUMERIC.match(candidate)
         if match:
             head = match.group("head").strip(" -_.")
-            if _CLEAN_CODE.fullmatch(head.upper()):
+            code = get_true_code(head)
+            core = _VERSION_SUFFIX.sub('', code)
+            if _CLEAN_CODE.fullmatch(core):
                 return int(match.group("num")), match.group("num")
 
     return 0, ""

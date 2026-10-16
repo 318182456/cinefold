@@ -20,6 +20,8 @@
 """
 from __future__ import annotations
 
+from app.services.scrapemaintenance import guarded as maintenance_guarded
+
 import os
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -387,6 +389,7 @@ def refresh_subtitles(limit: int = 500) -> dict:
     return {"probed": len(rows), "remaining": remaining}
 
 
+@maintenance_guarded
 def register_scrape(
     code: str, source_path: str, link_path: str = ""
 ) -> list[str]:
@@ -1303,6 +1306,25 @@ def _preview_cleanup(videos: list[str]) -> tuple[list[str], list[str]]:
 
 
 def handle_media_deleted(
+    link_path: str = "", code: str = "", dry_run: bool = False
+) -> DeleteResult:
+    from app.services.scrapemaintenance import activity, protects_delete, MaintenanceBusy
+    try:
+        with activity():
+            if not dry_run and protects_delete(link_path):
+                result = DeleteResult(dry_run=dry_run)
+                result.code = code
+                result.errors.append('全量重建的删除保护已启用；确认 Emby 扫描完成后再手动解除')
+                logger.warning(f'重建删除保护已阻止联动清理: {link_path or code}')
+                return result
+            return _handle_media_deleted(link_path, code, dry_run)
+    except MaintenanceBusy as exc:
+        result = DeleteResult(dry_run=dry_run)
+        result.errors.append(str(exc))
+        return result
+
+
+def _handle_media_deleted(
     link_path: str = "", code: str = "", dry_run: bool = False
 ) -> DeleteResult:
     """媒体服务器删除影片后的联动清理。
