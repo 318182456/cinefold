@@ -1,10 +1,11 @@
 <script setup>
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import http from '@/api'
 import { useToast } from '@/composables/useToast'
 import ModalDialog from '@/components/ModalDialog.vue'
 import ScrapeMetadataDetail from '@/components/ScrapeMetadataDetail.vue'
-import { READY_PHASES, rebuildRunReason } from '@/utils/rebuild'
+import RebuildProgress from '@/components/RebuildProgress.vue'
+import { READY_PHASES, discardScope, rebuildRunReason } from '@/utils/rebuild'
 
 const emit = defineEmits(['preview'])
 const toast = useToast()
@@ -21,6 +22,8 @@ const rebuildConfirmation = ref(''), rebuildReadyToken = ref(''), rebuildStatusE
 const rebuildRefreshMetadata = ref(false), releaseOpen = ref(false), releaseBusy = ref(false)
 const rebuildForce = ref(false)
 const rebuildMissingPolicy = ref('block'), rebuildConfirmDiscard = ref(false)
+const rebuildAutoCheck = ref(false)
+let rebuildDiscardScope = null
 const releaseOutput = ref(''), releaseConfirmation = ref('')
 let rebuildTimer, rebuildRequest = 0, rebuildPolicyEdited = false
 const rebuildLocked = computed(() => !rebuildKnown.value || rebuild.value.running || rebuildBusy.value)
@@ -33,8 +36,8 @@ const rebuildDisabledReason = computed(() => rebuildRunReason({ state: rebuild.v
   jobRunning: job.value.running, inventoryRunning: inventory.value.running }))
 const rebuildCanRun = computed(() => !rebuildDisabledReason.value)
 const REBUILD_PHASES = {
-  idle: '尚未预览', queued: '等待执行', preview: '预览范围', previewing: '正在预览范围',
-  ready: '等待确认', preview_ready: '等待确认', previewed: '预览完成', cleaning: '清理播放目录',
+  idle: '等待自动检查', queued: '等待执行', preview: '正在检查范围', previewing: '正在检查范围',
+  ready: '等待确认', preview_ready: '等待确认', previewed: '检查完成', cleaning: '清理播放目录',
   cleanup: '清理播放目录', indexing: '重新扫描下载源', scraping: '全量重新刮削', running: '全量重新刮削',
   completed: '处理完成', finished: '处理完成', done: '处理完成', failed: '处理失败', error: '处理失败',
   planning: '准备重建范围', revalidating: '重新核对文件与源目录', quarantining: '隔离旧播放产物', rebuilding: '全量重新刮削',
@@ -65,7 +68,11 @@ async function pollRebuild() {
     const result = await http.get('/scrape/rebuild/current')
     if (disposed || id !== rebuildRequest) return
     const wasRunning = rebuild.value.running
-    if (result.token !== rebuild.value.token) rebuildConfirmDiscard.value = false
+    if (result.plan && !result.running && READY_PHASES.includes(result.phase) && rebuildConfirmDiscard.value) {
+      const scope = discardScope(result.plan)
+      if (rebuildDiscardScope !== null && rebuildDiscardScope !== scope) rebuildConfirmDiscard.value = false
+      rebuildDiscardScope = scope
+    }
     rebuild.value = result
     if (!rebuildPolicyEdited && result.plan) rebuildMissingPolicy.value = result.plan.missing_policy || 'block'
     rebuildKnown.value = true
@@ -88,7 +95,7 @@ async function pollRebuild() {
 async function previewRebuild() {
   if (rebuildBusy.value || rebuild.value.running || job.value.running || inventory.value.running) return
   rebuildBusy.value = true
-  rebuildReadyToken.value = ''; rebuildConfirmDiscard.value = false
+  rebuildReadyToken.value = ''
   clearTimeout(rebuildTimer); rebuildRequest++
   try {
     rebuild.value = await http.post('/scrape/rebuild/preview', { missing_policy: rebuildMissingPolicy.value })
@@ -112,8 +119,27 @@ async function runRebuild() {
   } catch (e) { rebuildKnown.value = false; toast.error(e.message); scheduleRebuildPoll(1000) }
   finally { rebuildBusy.value = false }
 }
-function openRebuild() { rebuildOpen.value = true; rebuildConfirmation.value = ''; rebuildConfirmDiscard.value = false; rebuildPolicyEdited = false; rebuildKnown.value = false; pollRebuild() }
-function changeMissingPolicy() { rebuildPolicyEdited = true; rebuildReadyToken.value = ''; rebuildConfirmDiscard.value = false }
+function openRebuild() { rebuildOpen.value = true; rebuildConfirmation.value = ''; rebuildConfirmDiscard.value = false; rebuildDiscardScope = null; rebuildPolicyEdited = false; rebuildKnown.value = false; rebuildAutoCheck.value = true; pollRebuild() }
+function changeMissingPolicy() { rebuildPolicyEdited = true; rebuildReadyToken.value = ''; rebuildConfirmDiscard.value = false; rebuildDiscardScope = null; rebuildAutoCheck.value = true }
+function changeDiscardConfirmation() {
+  rebuildDiscardScope = rebuildConfirmDiscard.value ? discardScope(rebuildPlan.value) : null
+  if (rebuildConfirmDiscard.value && rebuildMissingPolicy.value !== 'discard') {
+    rebuildMissingPolicy.value = 'discard'; rebuildPolicyEdited = true
+    rebuildReadyToken.value = ''; rebuildAutoCheck.value = true
+  }
+}
+watch([rebuildOpen, rebuildKnown, rebuildBusy, rebuildAutoCheck,
+  () => rebuild.value.running, () => job.value.running, () => inventory.value.running], () => {
+  if (!rebuildOpen.value) { rebuildAutoCheck.value = false; return }
+  if (!rebuildAutoCheck.value || !rebuildKnown.value || rebuildBusy.value || rebuild.value.running
+      || job.value.running || inventory.value.running) return
+  rebuildAutoCheck.value = false
+  const plan = rebuildPlan.value
+  if (READY_PHASES.includes(rebuild.value.phase) && !rebuild.value.error && rebuildReadyToken.value
+      && plan?.missing_policy === rebuildMissingPolicy.value
+      && (!plan.expires_at || plan.expires_at * 1000 > Date.now())) return
+  previewRebuild()
+}, { flush: 'post' })
 function openReleaseProtection() {
   releaseOutput.value = protectedOutputs.value.includes(rebuildPlan.value?.output_dir)
     ? rebuildPlan.value.output_dir : protectedOutputs.value[0] || ''
@@ -243,10 +269,10 @@ onUnmounted(() => { disposed = true; request++; rebuildRequest++; clearTimeout(t
     </div>
     <div v-if="rebuild.phase !== 'idle' || rebuild.deletion_protected || rebuildStatusError" class="space-y-3 rounded-xl border border-amber-600/30 bg-amber-500/5 p-4">
       <div class="flex flex-wrap items-center justify-between gap-3">
-        <p class="text-sm text-gray-300">全部重新刮削 · {{ rebuildPhase }}<span v-if="rebuild.total"> · {{ rebuild.done || 0 }} / {{ rebuild.total }} 项 · 成功 {{ rebuild.ok || 0 }} 项</span></p>
+        <p class="text-sm text-gray-300">全部重新刮削 · {{ rebuildPhase }}</p>
         <button class="text-xs text-brand" @click="openRebuild">查看范围与进度</button>
       </div>
-      <div v-if="rebuild.running && rebuild.total" class="h-1.5 overflow-hidden rounded-full bg-gray-800" role="progressbar" aria-label="全部重新刮削进度" :aria-valuenow="rebuild.done || 0" :aria-valuemin="0" :aria-valuemax="Math.max(rebuild.total, 1)"><div class="h-full rounded-full bg-brand transition-all" :style="{ width: `${Math.min(100, (rebuild.done || 0) / rebuild.total * 100)}%` }"></div></div>
+      <RebuildProgress :state="rebuild" :phase="rebuildPhase" />
       <p v-if="rebuild.running" class="text-xs text-gray-400">后台任务会继续执行，可以离开页面，返回后查看进度。</p>
       <p v-if="rebuild.error || rebuildStatusError" class="break-all text-xs text-red-400">{{ rebuild.error || rebuildStatusError }}</p>
       <p v-if="rebuild.protection_error" class="break-all text-xs text-red-400">{{ rebuild.protection_error }}</p>
@@ -336,13 +362,13 @@ onUnmounted(() => { disposed = true; request++; rebuildRequest++; clearTimeout(t
           <p>下载源文件和数据库中的影片信息保留。重建期间部分影片会暂时无法播放，失败项需要从失败列表重试。</p>
           <p>重建会启用删除联动保护；确认 Emby 扫描完成后再手动解除。</p>
         </div>
-        <label class="block space-y-2 text-xs text-gray-300"><span>无法验证独立下载源的视频</span><select v-model="rebuildMissingPolicy" class="input" :disabled="rebuild.running || rebuildBusy" @change="changeMissingPolicy"><option value="block">暂不继续，先处理缺失源</option><option value="keep">保留视频及所在目录文件，继续重建其余影片</option><option value="discard">不保留这些播放视频，清理后继续重建</option></select><span class="block text-gray-500">改变处理方式后，请重新预览范围；其他目录冲突或文件变化仍会阻止执行。</span></label>
+        <label class="block space-y-2 text-xs text-gray-300"><span>无法验证独立下载源的视频</span><select v-model="rebuildMissingPolicy" class="input" :disabled="rebuild.running || rebuildBusy" @change="changeMissingPolicy"><option value="block">暂不继续，先处理缺失源</option><option value="keep">保留视频及所在目录文件，继续重建其余影片</option><option value="discard">不保留这些播放视频，清理后继续重建</option></select><span class="block text-gray-500">打开弹窗或改变处理方式后自动检查，无需手动预览。检查完成后确认执行。</span></label>
         <div class="flex flex-wrap items-center gap-3">
-          <button class="btn-ghost !text-xs" :disabled="rebuildBusy || rebuild.running || job.running || inventory.running" @click="previewRebuild">{{ rebuildBusy ? '正在提交…' : '预览全部重建范围' }}</button>
+          <button class="btn-ghost !text-xs" :disabled="rebuildBusy || rebuild.running || job.running || inventory.running" @click="previewRebuild">{{ rebuildBusy ? '正在检查…' : '重新检查范围' }}</button>
           <span class="text-xs text-gray-400">{{ rebuildPhase }}</span>
           <button class="text-xs text-brand" @click="pollRebuild">刷新状态</button>
         </div>
-        <p v-if="job.running || inventory.running" class="text-xs text-amber-400">请先等待当前刮削或目录索引任务完成，再预览重建范围。</p>
+        <p v-if="job.running || inventory.running" class="text-xs text-amber-400">等待当前刮削或目录扫描完成后，自动检查重建范围。</p>
         <p v-if="rebuild.error || rebuildStatusError" class="break-all text-xs text-red-400">{{ rebuild.error || rebuildStatusError }}</p>
         <p v-if="rebuildOutput && !rebuildPlan" class="break-all text-xs text-gray-400">播放输出目录：<span class="select-all font-mono text-amber-300">{{ rebuildOutput }}</span></p>
         <p v-if="rebuild.protection_error" class="break-all text-xs text-red-400">{{ rebuild.protection_error }}</p>
@@ -354,21 +380,21 @@ onUnmounted(() => { disposed = true; request++; rebuildRequest++; clearTimeout(t
             <p>移出文件 {{ rebuildPlan.file_count ?? 0 }}</p><p>保留影片资料 {{ rebuildPlan.metadata_count ?? 0 }}</p>
             <p>无法验证独立源 {{ rebuildPlan.unrecoverable_count ?? 0 }} 个视频</p><p v-if="rebuildPlan.retained_file_count">原位保留 {{ rebuildPlan.retained_file_count }} 个文件（含同目录资料）</p>
           </div>
-          <div v-if="rebuildPlan.blocked_count || rebuildPlan.blockers?.length" class="space-y-1 text-red-400">
-            <p>有 {{ rebuildPlan.blocked_count || rebuildPlan.blockers.length }} 项阻止执行，请先处理缺失下载源或目录冲突，再重新预览。</p>
+          <details v-if="rebuildPlan.blocked_count || rebuildPlan.blockers?.length" class="space-y-1 text-red-400">
+            <summary class="cursor-pointer">阻止执行 {{ rebuildPlan.blocked_count || rebuildPlan.blockers.length }} 项 · 点击查看明细</summary>
             <p v-for="(item, index) in rebuildPlan.blockers || []" :key="index" class="break-all">{{ rebuildMessage(item) }}</p>
-          </div>
-          <p v-for="(item, index) in rebuildPlan.warnings || []" :key="index" class="break-all text-amber-400">{{ rebuildMessage(item) }}</p>
+          </details>
+          <details v-if="rebuildPlan.warnings?.length" class="space-y-2 text-amber-400"><summary class="cursor-pointer">提示与警告 {{ rebuildPlan.warning_count || rebuildPlan.warnings.length }} 项 · 点击查看明细</summary><p v-if="rebuildPlan.warning_count > rebuildPlan.warnings.length" class="text-gray-500">仅显示前 {{ rebuildPlan.warnings.length }} 项</p><p v-for="(item, index) in rebuildPlan.warnings" :key="index" class="break-all">{{ rebuildMessage(item) }}</p></details>
           <details v-if="rebuildPlan.unrecoverable_paths?.length"><summary class="cursor-pointer text-amber-300">查看无法验证独立源的视频（{{ rebuildPlan.unrecoverable_count }} 个）</summary><p v-for="path in rebuildPlan.unrecoverable_paths" :key="path" class="mt-2 break-all font-mono text-gray-400">{{ path }}</p></details>
           <details v-if="rebuildPlan.sample_paths?.length"><summary class="cursor-pointer text-gray-400">查看范围样例</summary><p v-for="(path, index) in rebuildPlan.sample_paths" :key="index" class="mt-2 break-all font-mono text-gray-500">{{ rebuildMessage(path) }}</p></details>
         </div>
         <div v-if="rebuild.quarantine_dir" class="text-xs text-gray-400"><p>旧资料与恢复清单保存目录</p><p class="mt-1 break-all font-mono">{{ rebuild.quarantine_dir }}</p></div>
         <p v-if="rebuildPreviewing" class="text-xs text-brand">正在扫描全部源视频并核对播放目录，尚未开始清空或重刮。可以先输入确认目录，等待预览完成；任务在后台执行，可以离开页面。</p>
-        <p v-else-if="rebuild.running" class="text-xs text-brand">{{ rebuildPhase }} · {{ rebuild.done || 0 }} / {{ rebuild.total || 0 }} 项 · 成功 {{ rebuild.ok || 0 }} 项。任务在后台执行，可以离开页面。</p>
+        <RebuildProgress :state="rebuild" :phase="rebuildPhase" />
         <p v-if="rebuild.deletion_protected" class="text-xs text-amber-300">删除联动保护保持启用；重建完成并确认 Emby 扫描完成后，再在视频清单上方解除。</p>
         <label class="flex items-start gap-2 text-xs text-amber-300"><input v-model="rebuildForce" type="checkbox" :disabled="rebuild.running && !rebuildPreviewing" class="mt-0.5" /><span>强制重新刮削全部影片<span class="mt-1 block text-gray-500">重新联网抓取资料、重新下载图片，不复用旧资料生成产物。旧资料仍备份保留；抓取失败的影片需重试或从备份恢复。</span></span></label>
         <label v-if="!rebuildForce" class="flex items-start gap-2 text-xs text-gray-300"><input v-model="rebuildRefreshMetadata" type="checkbox" :disabled="rebuild.running && !rebuildPreviewing" class="mt-0.5" /><span>联网更新元数据<span class="mt-1 block text-gray-500">默认复用保留的数据库影片资料；开启后请求刮削源，失败时仍可沿用旧资料。</span></span></label>
-        <label v-if="rebuildMissingPolicy === 'discard' && rebuildPlan?.missing_policy === 'discard' && rebuildPlan.unrecoverable_count" class="flex items-start gap-2 rounded-lg border border-red-500/40 bg-red-500/10 p-3 text-xs text-red-300"><input v-model="rebuildConfirmDiscard" type="checkbox" class="mt-0.5" /><span>确认不保留以上 {{ rebuildPlan.unrecoverable_count }} 个播放视频：它们可能是唯一副本，清理后无法从本次备份恢复视频。NFO、图片等资料仍备份。</span></label>
+        <label class="flex items-start gap-2 rounded-lg border border-red-500/40 bg-red-500/10 p-3 text-xs text-red-300"><input v-model="rebuildConfirmDiscard" type="checkbox" :disabled="rebuild.running && !rebuildPreviewing" class="mt-0.5" @change="changeDiscardConfirmation" /><span>强制删除无法恢复的视频，不保留<span v-if="rebuildPlan">（当前检查 {{ rebuildPlan.unrecoverable_count || 0 }} 个）</span><span v-else>（检查中，数量稍后显示）</span><span class="mt-1 block">勾选后自动切换为“不保留”并检查范围。这些视频可能是唯一副本，清理后无法从备份恢复视频；NFO、图片等资料仍备份。若检查发现删除范围变化，需要重新勾选确认。</span></span></label>
         <label class="block space-y-2 text-xs text-gray-400"><span>输入完整播放输出目录以确认</span><input v-model="rebuildConfirmation" class="input font-mono" :placeholder="rebuildOutput || '完整输出目录路径'" aria-label="确认全部重刮的输出目录" aria-describedby="rebuild-confirm-hint" autocomplete="off" spellcheck="false" /><span id="rebuild-confirm-hint" class="block text-gray-500">预览期间也可以输入或粘贴目录；只有预览成功、没有阻止项且输入目录完全一致时，才能执行。</span></label>
         <p v-if="rebuildDisabledReason" id="rebuild-run-reason" role="status" class="text-xs text-amber-300">{{ rebuildDisabledReason }}</p>
         <div class="flex flex-wrap justify-end gap-2"><button class="btn-ghost !text-xs" @click="rebuildOpen = false">关闭</button><button class="btn-primary !text-xs" :disabled="!rebuildCanRun" aria-describedby="rebuild-run-reason" @click="runRebuild">确认清空播放目录并全部重刮</button></div>

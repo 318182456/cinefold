@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { rebuildRunReason } from '../src/utils/rebuild.js'
+import { discardScope, rebuildRunReason } from '../src/utils/rebuild.js'
 
 function ready() {
   return { state: { phase: 'ready', running: false, token: 'current', error: '', plan: {
@@ -10,6 +10,15 @@ function ready() {
   confirmDiscard: true, confirmation: '/media/library', jobRunning: false, inventoryRunning: false, now: 100000 }
 }
 
+test('discard confirmation scope ignores ordering but detects changed paths, count and output', () => {
+  const plan = {output_dir:'/media/library', unrecoverable_count:2, unrecoverable_paths:['b.mp4','a.mp4']}
+  assert.equal(discardScope(null), null)
+  assert.equal(discardScope(plan), discardScope({...plan, unrecoverable_paths:['a.mp4','b.mp4']}))
+  assert.notEqual(discardScope(plan), discardScope({...plan, unrecoverable_paths:['a.mp4','c.mp4']}))
+  assert.notEqual(discardScope(plan), discardScope({...plan, unrecoverable_count:3}))
+  assert.notEqual(discardScope(plan), discardScope({...plan, output_dir:'/other/library'}))
+})
+
 test('valid confirmed preview enables execution including pasted whitespace', () => {
   assert.equal(rebuildRunReason(ready()), '')
   assert.equal(rebuildRunReason({ ...ready(), confirmation: '  /media/library\n' }), '')
@@ -18,7 +27,7 @@ test('valid confirmed preview enables execution including pasted whitespace', ()
 for (const phase of ['idle', 'failed', 'completed', 'partial', 'interrupted']) {
   test(`${phase} cannot reuse an old token`, () => {
     const args = ready(); args.state.phase = phase
-    assert.match(rebuildRunReason(args), /预览/)
+    assert.match(rebuildRunReason(args), /检查/)
   })
 }
 
@@ -31,8 +40,8 @@ test('policy changes and unconfirmed discard disable execution', () => {
 
 test('running and expired previews or stale tokens disable execution', () => {
   const args = ready(); args.state.running = true; args.state.phase = 'preview'
-  assert.match(rebuildRunReason(args), /正在预览/)
-  assert.match(rebuildRunReason({ ...ready(), readyToken: 'old' }), /预览/)
+  assert.match(rebuildRunReason(args), /正在自动检查/)
+  assert.match(rebuildRunReason({ ...ready(), readyToken: 'old' }), /检查/)
   assert.match(rebuildRunReason({ ...ready(), now: 200000 }), /过期/)
 })
 

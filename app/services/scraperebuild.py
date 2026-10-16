@@ -40,6 +40,48 @@ _STATE = {"running": False, "phase": "idle", "done": 0, "total": 0, "ok": 0,
           "error": "", "token": "", "plan": None, "quarantine_dir": "", "results": []}
 _TOKEN_LIFETIME = 3600
 _STATE_FILE = DATA_DIR / 'scrape-rebuild-state.json'
+_PROGRESS_SAVED = 0.0
+_GENERATED_SIDECARS = {'.nfo', '.json', '.jpg', '.jpeg', '.png', '.webp', '.tbn'}
+
+
+def _progress_start(stage, label, total=0, unit='文件', bytes_total=0):
+    now = time.time()
+    with _LOCK:
+        steps = _STATE.setdefault('progress_steps', {})
+        previous = _STATE.get('progress')
+        if previous and previous.get('stage') != stage:
+            previous['finished_at'] = now
+        value = dict(stage=stage, label=label, done=0, total=total, unit=unit,
+                     bytes_done=0, bytes_total=bytes_total, current='', current_bytes=0,
+                     current_total_bytes=0, started_at=now, updated_at=now)
+        steps[stage] = value
+        _STATE['progress'] = value
+        _persist_state()
+
+
+def _progress(**values):
+    """Frequent in-memory progress; throttle recovery-journal disk writes."""
+    global _PROGRESS_SAVED
+    with _LOCK:
+        current = _STATE.get('progress')
+        if current is None:
+            return
+        current.update(values, updated_at=time.time())
+        if time.monotonic() - _PROGRESS_SAVED >= 2:
+            _persist_state()
+            _PROGRESS_SAVED = time.monotonic()
+
+
+def _progress_hash(path):
+    processed = 0
+    _progress(current=str(path), current_bytes=0, current_total_bytes=Path(path).stat().st_size)
+    def advance(size):
+        nonlocal processed
+        processed += size
+        _progress(current_bytes=processed)
+    result = stable_digest(path, progress=advance)
+    _progress(current_bytes=Path(path).stat().st_size)
+    return result
 
 
 def _maintenance():
@@ -52,9 +94,9 @@ def state():
         if _STATE['phase'] == 'idle' and _STATE_FILE.is_file():
             try:
                 saved = json.loads(_STATE_FILE.read_text(encoding='utf-8'))
-                _STATE.update({key: value for key, value in saved.items() if key in _STATE or key in ('job_id', 'output_dir', 'quarantine_mode', 'backup_bytes')})
+                _STATE.update({key: value for key, value in saved.items() if key in _STATE or key in ('job_id', 'output_dir', 'quarantine_mode', 'backup_bytes', 'progress', 'progress_steps', 'started_at', 'finished_at', 'cleanup_note_count', 'cleanup_notes', 'retained_file_count')})
                 if saved.get('running'):
-                    _STATE.update(running=False, phase='interrupted',
+                    _STATE.update(running=False, phase='interrupted', finished_at=time.time(),
                                   error='进程重启，重建中断；请核对隔离目录和恢复清单。跨盘模式仅备份非视频文件，视频从下载源恢复')
             except (OSError, ValueError, TypeError):
                 _STATE.update(error='无法读取上次重建恢复记录，请检查数据目录')
@@ -63,6 +105,13 @@ def state():
         settings = get_settings()
         value['output_dir'] = settings.medialink_scrape_dir or settings.medialink_library_path or ''
     value.update(_maintenance().protection())
+    now = time.time()
+    if value.get('started_at'):
+        value['elapsed_seconds'] = max(0, (value.get('finished_at') or now) - value['started_at'])
+    progress = value.get('progress')
+    if progress:
+        progress['elapsed_seconds'] = max(0, (progress.get('finished_at') or value.get('finished_at') or now) - progress['started_at'])
+        progress['idle_seconds'] = max(0, (value.get('finished_at') or now) - progress['updated_at'])
     return value
 
 
@@ -84,7 +133,8 @@ def _update(**values):
 def _persist_state():
     if not _STATE.get('quarantine_dir'):
         return
-    keys = ('running', 'phase', 'done', 'total', 'ok', 'error', 'quarantine_dir', 'job_id', 'output_dir', 'quarantine_mode', 'backup_bytes')
+    keys = ('running', 'phase', 'done', 'total', 'ok', 'error', 'quarantine_dir', 'job_id', 'output_dir', 'quarantine_mode', 'backup_bytes',
+            'progress', 'progress_steps', 'started_at', 'finished_at', 'cleanup_note_count', 'cleanup_notes', 'retained_file_count')
     _STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
     _write_manifest(_STATE_FILE, {key: _STATE.get(key) for key in keys})
 
@@ -384,21 +434,23 @@ def _collect(missing_policy='block'):
         warnings.append(f'{len(unrecoverable)} 个视频无法验证独立下载源；' +
                         ('保留其所在目录的文件，其余影片继续重建' if missing_policy == 'keep' else '确认后删除这些播放视频，不保留视频备份'))
     signatures = {
-        'output': _digest([str(output), output.exists(), output_manifest]),
+        'output': _digest([str(output), output.exists(),
+                           [[raw, stamp[:2] if kind == 'dir' else stamp, kind] for raw, stamp, kind in output_manifest
+                            if kind == 'dir' or Path(raw).suffix.lower() not in _GENERATED_SIDECARS]]),
         'sources': _digest([sorted(configured), sorted(str(path) for path in allowed),
                             sorted(([row['path'], row['code'], row['stamp']] for row in sources), key=lambda row: row[0])]),
         'links': _digest(sorted(([row['link_path'], row['source_path'], row['code']] for row in output_links))),
-        'metadata': _digest([sorted(code_details, key=lambda row: row['code']), metadata]),
+        'metadata': _digest(sorted(code_details, key=lambda row: row['code'])),
         'settings': _digest(settings_data),
         'recovery': _digest([evidence, missing_policy, unrecoverable, retained,
-                             quarantine_mode, str(quarantine_parent), backup_bytes]),
+                             quarantine_mode, str(quarantine_parent)]),
     }
     fingerprint = _digest(signatures)
     plan = {'output_dir': str(output), 'source_count': len(sources), 'video_count': len(old_videos),
             'deduplicated_count': deduplicated,
             'quarantine_mode': quarantine_mode, 'quarantine_parent': str(quarantine_parent), 'backup_bytes': backup_bytes,
             'file_count': sum(item[2] == 'file' for item in output_manifest),
-            'blocked_count': len(blockers), 'blockers': blockers[:200], 'warnings': warnings[:200],
+            'blocked_count': len(blockers), 'blockers': blockers[:200], 'warning_count': len(warnings), 'warnings': warnings[:200],
             'sample_paths': [str(path) for path in old_videos[:20]], 'metadata_count': len(metadata)}
     plan.update(missing_policy=missing_policy, unrecoverable_count=len(unrecoverable),
                 unrecoverable_paths=unrecoverable, retained_file_count=len(retained))
@@ -443,10 +495,12 @@ def preview(missing_policy='block'):
         _PLAN = None
         settings = get_settings()
         _STATE.update(running=True, phase='preview', done=0, total=0, ok=0, error='', token='', plan=None, quarantine_dir='', results=[],
+                      progress=None, progress_steps={}, active_codes=[], cleanup_note_count=0, cleanup_notes=[], retained_file_count=0, started_at=time.time(), finished_at=None,
                       output_dir=settings.medialink_scrape_dir or settings.medialink_library_path or '', quarantine_mode='', backup_bytes=0)
     def work():
         global _PLAN
         try:
+            _progress_start('checking', '检查源视频与播放目录', unit='项')
             with _maintenance().activity():
                 plan = _collect(missing_policy) if missing_policy != 'block' else _collect()
                 token = hmac.new(_SECRET, f"{plan['fingerprint']}:{plan['issued']}".encode(), hashlib.sha256).hexdigest()
@@ -460,7 +514,7 @@ def preview(missing_policy='block'):
             logger.exception('全量重建预览失败')
             _update(phase='failed', error=str(exc))
         finally:
-            _update(running=False)
+            _update(running=False, finished_at=time.time())
     try:
         Thread(target=work, daemon=True, name='rebuild-preview').start()
     except Exception:
@@ -490,6 +544,7 @@ def start(token: str, confirmation: str, *, refresh_metadata: bool = False, forc
             _maintenance().release()
             raise
         _STATE.update(running=True, phase='checking', done=0, total=plan['public']['source_count'], ok=0, error='', results=[],
+                      progress=None, progress_steps={}, active_codes=[], cleanup_note_count=0, cleanup_notes=[], retained_file_count=0, started_at=time.time(), finished_at=None,
                       job_id=uuid.uuid4().hex, output_dir=plan['public']['output_dir'])
     try:
         Thread(target=_run, args=(plan, refresh_metadata, force), daemon=True, name='library-rebuild').start()
@@ -523,7 +578,7 @@ def _save_metadata(plan):
         # newly added pending row. Multiple parts must reuse one stored row.
         rows = {}
         insert = sqlite_insert if session.get_bind().dialect.name == 'sqlite' else pg_insert
-        for item in plan['metadata']:
+        for index, item in enumerate(plan['metadata'], 1):
             for code in dict.fromkeys([item['code'], item.get('target_code', item['code'])]):
                 row = rows.get(code)
                 if row is None:
@@ -542,6 +597,8 @@ def _save_metadata(plan):
                     existing = getattr(row, key, None)
                     if existing in (None, '') or key in ('title', 'cn_title') and not merge.clean_detail({key: existing}, code).get(key):
                         setattr(row, key, value)
+            if _STATE.get('running') and (_STATE.get('progress') or {}).get('stage') == 'metadata':
+                _progress(done=index, current=item['code'])
 
 
 def _map_cache_paths(output, storage, retained=()):
@@ -573,9 +630,13 @@ def _fsync_directory(path):
         os.close(descriptor)
 
 
-def _check_tree(plan, output):
+def _check_tree(plan, output, mutable_sidecars=False):
     current, _, blockers = _tree(output)
-    if blockers or current != plan['manifest']:
+    def essential(items):
+        return [[raw, stamp[:2] if kind == 'dir' else stamp, kind] for raw, stamp, kind in items
+                if kind == 'dir' or Path(raw).suffix.lower() not in _GENERATED_SIDECARS]
+    changed = essential(current) != essential(plan['manifest']) if mutable_sidecars else current != plan['manifest']
+    if blockers or changed:
         raise ValueError('输出目录在清理前变化，停止操作；尚未清理的文件保留原位')
 
 
@@ -604,9 +665,14 @@ def _append_operation(quarantine, operation):
 
 
 def _backup_sidecars(plan, storage):
-    """Complete and verify every non-video backup before removing any file."""
+    """Back up sidecars; regenerable artwork/NFO failures do not block jobs."""
     output = Path(plan['public']['output_dir'])
     backups = []
+    files = [(relative, stamp) for relative, stamp, kind in plan['manifest']
+             if kind == 'file' and Path(relative).suffix.lower() not in local.VIDEO_SUFFIXES]
+    _progress_start('backup', '备份并校验图片、NFO、字幕', len(files), bytes_total=sum(stamp[2] for _, stamp in files))
+    copied_bytes = 0
+    processed = 0
     for relative, expected, kind in plan['manifest']:
         original = output / relative
         destination = storage / relative
@@ -617,19 +683,38 @@ def _backup_sidecars(plan, storage):
             continue
         if original.suffix.lower() in local.VIDEO_SUFFIXES:
             continue
+        generated = original.suffix.lower() in _GENERATED_SIDECARS
+        if generated and (not original.is_file() or _stamp(original) != expected):
+            processed += 1
+            _progress(done=processed, current=str(original))
+            continue
         if _stamp(original) != expected:
             raise ValueError(f'备份前文件已变化: {original}')
         destination.parent.mkdir(parents=True, exist_ok=True)
         digest = hashlib.sha256()
-        with original.open('rb') as incoming, destination.open('xb') as outgoing:
-            while chunk := incoming.read(4 * 1024 * 1024):
-                outgoing.write(chunk)
-                digest.update(chunk)
-            outgoing.flush()
-            os.fsync(outgoing.fileno())
-        if _stamp(original) != expected or destination.stat().st_size != expected[2] or stable_digest(destination) != digest.hexdigest():
-            raise ValueError(f'备份完整校验失败，未开始清理: {original}')
+        _progress(current=str(original), current_bytes=0, current_total_bytes=expected[2])
+        file_bytes = 0
+        try:
+            with original.open('rb') as incoming, destination.open('xb') as outgoing:
+                while chunk := incoming.read(4 * 1024 * 1024):
+                    outgoing.write(chunk)
+                    digest.update(chunk)
+                    file_bytes += len(chunk)
+                    _progress(bytes_done=copied_bytes + file_bytes, current_bytes=file_bytes)
+                outgoing.flush()
+                os.fsync(outgoing.fileno())
+            if _stamp(original) != expected or destination.stat().st_size != expected[2] or _progress_hash(destination) != digest.hexdigest():
+                raise ValueError(f'备份完整校验失败，未开始清理: {original}')
+        except (OSError, ValueError):
+            if not generated:
+                raise
+            processed += 1
+            _progress(done=processed, current=str(original))
+            continue
         backups.append({'path': relative, 'size': expected[2], 'sha256': digest.hexdigest()})
+        copied_bytes += expected[2]
+        processed += 1
+        _progress(done=processed, bytes_done=copied_bytes)
     for folder, _, _ in os.walk(storage, topdown=False):
         _fsync_directory(Path(folder))
     _fsync_directory(storage.parent)
@@ -639,17 +724,25 @@ def _backup_sidecars(plan, storage):
 
 def _clear_copied_output(plan, output, storage, quarantine, manifest):
     """Remove only snapshotted files, with per-video independent-source checks."""
-    _check_tree(plan, output)
+    _check_tree(plan, output, mutable_sidecars=True)
     _check_sources(plan)
     sources = {source['path']: source for source in plan['sources']}
     evidence = {item['video']: item for item in plan['evidence']}
     retained = set(plan.get('retained', []))
     discarded = set(plan.get('unrecoverable', [])) if plan.get('missing_policy') == 'discard' else set()
     backups = {item['path']: item for item in manifest['sidecar_backups']}
-    for backup in backups.values():
+    _progress_start('verify_backups', '清理前复核备份', len(backups))
+    for index, backup in enumerate(backups.values(), 1):
         saved = storage / backup['path']
-        if not _under(saved, storage) or _unsafe_links(saved) or not saved.is_file() or stable_digest(saved) != backup['sha256']:
-            raise ValueError('备份在清理开始前已变化，尚未删除任何文件')
+        if not _under(saved, storage) or _unsafe_links(saved) or not saved.is_file() or _progress_hash(saved) != backup['sha256']:
+            if saved.suffix.lower() in _GENERATED_SIDECARS:
+                manifest.setdefault('cleanup_notes', []).append({'path': str(saved), 'status': 'regenerate', 'reason': '可重新生成的资料备份不可用，继续重刮'})
+            else:
+                raise ValueError('备份在清理开始前已变化，尚未删除任何文件')
+        _progress(done=index)
+    _progress_start('clearing', '校验并清理旧播放文件', sum(kind == 'file' and str(output / relative) not in retained
+                                                       for relative, _, kind in plan['manifest']))
+    cleared = 0
     expected_stamps = {str(output / relative): stamp for relative, stamp, kind in plan['manifest'] if kind == 'file'}
     expected_stamps.update({source['path']: source['stamp'] for source in plan['sources']})
     inode_paths = {}
@@ -660,10 +753,25 @@ def _clear_copied_output(plan, output, storage, quarantine, manifest):
             continue
         path = output / relative
         expected = expected_stamps[str(path)]
+        if str(path) in retained:
+            continue
+        if path.suffix.lower() not in local.VIDEO_SUFFIXES:
+            _progress(current=str(path), current_bytes=0, current_total_bytes=0)
+            status, note = _clear_sidecar(path, relative, storage, quarantine, manifest, backups.get(relative))
+            if status == 'retained':
+                retained.add(str(path))
+            if note:
+                manifest.setdefault('cleanup_notes', []).append({'path': str(path), 'status': status, 'reason': note})
+                _update(cleanup_note_count=len(manifest['cleanup_notes']), cleanup_notes=manifest['cleanup_notes'][-100:])
+                _write_manifest(quarantine / 'manifest.json', manifest)
+            cleared += 1
+            _progress(done=cleared, current=str(path), retained_count=len(retained))
+            continue
         if not _under(path, output) or _unsafe_links(path) or _stamp(path) != expected:
             raise ValueError(f'待清理文件已变化或路径不安全，停止清理: {path}')
         if str(path) in retained:
             continue
+        _progress(current=str(path), current_bytes=0, current_total_bytes=0)
         if str(path) in discarded:
             # Only explicitly confirmed, snapshotted unrecoverable videos may
             # bypass independent-source evidence. Path/stamp checks still apply.
@@ -682,26 +790,21 @@ def _clear_copied_output(plan, output, storage, quarantine, manifest):
                 if not path.samefile(independent) or not _independent_hardlink(independent, path):
                     raise ValueError(f'视频与独立源硬链接身份不符，停止清理: {path}')
             elif proof['method'] == 'sha256':
-                if stable_digest(path) != stable_digest(independent):
+                if _progress_hash(path) != _progress_hash(independent):
                     raise ValueError(f'视频与独立源内容校验不符，停止清理: {path}')
             else:
                 raise ValueError(f'未知视频恢复证据，停止清理: {path}')
             # Recheck after any full-file hash and immediately before unlink.
             if _unsafe_links(independent) or _stamp(independent) != source_expected or _stamp(path) != expected:
                 raise ValueError('视频校验期间发生变化，停止清理')
-        else:
-            backup = backups.get(relative)
-            saved = storage / relative
-            if not backup or _unsafe_links(saved) or not saved.is_file() or stable_digest(saved) != backup['sha256']:
-                raise ValueError(f'非视频文件备份已变化，停止清理: {path}')
-            if stable_digest(path) != backup['sha256']:
-                raise ValueError(f'原文件在备份后发生变化，停止清理: {path}')
         if _unsafe_links(path) or _stamp(path) != expected:
             raise ValueError('文件在最终清理检查时变化，停止操作')
         # Never recurse or remove the root. Newly arrived files are untouched.
         path.unlink()
         _fsync_directory(path.parent)
         _append_operation(quarantine, {'operation': 'unlink_discard_confirmed' if str(path) in discarded else 'unlink_verified', 'path': relative})
+        cleared += 1
+        _progress(done=cleared, current=str(path))
         # Only this successful unlink's shared inode may legitimately acquire
         # a new ctime. Unrelated source/sidecar stamps remain fully strict.
         for raw in inode_paths.get(tuple(expected[:2]), []):
@@ -712,28 +815,84 @@ def _clear_copied_output(plan, output, storage, quarantine, manifest):
                 raise ValueError('清理旧链接期间共享文件发生变化，停止操作')
             expected_stamps[raw] = changed
     directories = [(output / relative, expected) for relative, expected, kind in plan['manifest'] if kind == 'dir']
+    _progress_start('cleanup_dirs', '整理空目录', sum(not any(Path(raw).is_relative_to(directory) for raw in retained)
+                                               for directory, _ in directories), unit='目录')
+    removed_dirs = 0
     for directory, expected in sorted(directories, key=lambda item: len(item[0].parts), reverse=True):
         if _unsafe_links(directory) or not _under(directory, output) or _stamp(directory)[:2] != expected[:2]:
             raise ValueError('清理空目录时发现不安全路径，停止操作')
         if any(Path(raw).is_relative_to(directory) for raw in retained):
             continue
-        directory.rmdir()
+        try:
+            directory.rmdir()
+        except OSError:
+            # Emby may create fresh metadata in reaction to video deletions.
+            # Never recurse into unexpected children or stop the whole batch.
+            retained.add(str(directory))
+        removed_dirs += 1
+        _progress(done=removed_dirs, current=str(directory), current_bytes=0, current_total_bytes=0)
     remaining, _, remaining_blockers = _tree(output)
-    expected_remaining = {str(Path(raw).relative_to(output)) for raw in retained}
-    expected_remaining.update(relative for relative, _, kind in plan['manifest'] if kind == 'dir'
-                              and any(Path(raw).is_relative_to(output / relative) for raw in retained))
-    if remaining_blockers or {item[0] for item in remaining} != expected_remaining:
-        raise ValueError('输出目录出现未预览的新文件，已保留原位，停止重建')
+    for relative, _, kind in remaining:
+        if kind == 'file':
+            retained.add(str(output / relative))
+    if remaining or remaining_blockers:
+        manifest.setdefault('cleanup_notes', []).append({'status': 'retained', 'reason': '清理期间出现或无法移除的文件留在原位，其余影片继续重建', 'count': len(retained)})
+        _update(cleanup_note_count=len(manifest['cleanup_notes']), cleanup_notes=manifest['cleanup_notes'][-100:])
+    plan['retained'] = sorted(retained)
+    manifest['retained'] = plan['retained']
     for source in plan['sources']:
         if _unsafe_links(Path(source['path'])) or _stamp(source['path']) != expected_stamps[source['path']]:
             raise ValueError('清理结束时独立下载源发生变化，停止重建')
     return {source['path']: expected_stamps[source['path']] for source in plan['sources']}
 
 
+def _clear_sidecar(path, relative, storage, quarantine, manifest, backup):
+    """Discard regenerable outputs; leave changed non-generated files in place."""
+    output = Path(manifest['output_dir'])
+    try:
+        if not _under(path, output) or _unsafe_links(path):
+            raise ValueError('路径不安全，文件保留')
+        if path.suffix.lower() in _GENERATED_SIDECARS:
+            if not path.exists():
+                return 'already_absent', ''
+            if not path.is_file():
+                raise ValueError('资料路径已变为目录，原位保留')
+            # NFO/artwork are disposable outputs, not source-video evidence.
+            # External metadata edits and timestamp changes must not halt jobs.
+            path.unlink()
+            _fsync_directory(path.parent)
+            _append_operation(quarantine, {'operation': 'unlink_regenerable_sidecar', 'path': relative})
+            return 'removed', ''
+        saved = storage / relative
+        if not backup or _unsafe_links(saved) or not saved.is_file() or _progress_hash(saved) != backup['sha256']:
+            raise ValueError('备份无法验证，原文件保留')
+        if not path.exists():
+            return 'already_absent', '其他程序已移除资料文件，原备份仍保留'
+        if not path.is_file():
+            raise ValueError('文件类型变化，原路径保留')
+        before = _stamp(path)
+        digest = _progress_hash(path)
+        if _stamp(path) != before:
+            raise ValueError('文件仍在写入，留在原位并继续其余影片')
+        updated = digest != backup['sha256']
+        if updated:
+            return 'retained', '不可再生文件内容发生变化，留在原位并继续处理其余文件'
+        if _unsafe_links(path) or _stamp(path) != before:
+            raise ValueError('最终检查时文件变化，保留当前文件')
+        path.unlink()
+        _fsync_directory(path.parent)
+        _append_operation(quarantine, {'operation': 'unlink_sidecar_verified', 'path': relative, 'updated_backup': updated})
+        return 'removed', ''
+    except (OSError, ValueError) as exc:
+        logger.warning(f'重建保留单个资料文件，继续执行: {path}: {exc}')
+        return 'retained', str(exc)
+
+
 def _run(plan, refresh_metadata, force=False):
     quarantine = None
     manifest = None
     try:
+        _progress_start('checking', '开始前复核源视频与播放目录', unit='项')
         policy = plan.get('missing_policy', 'block')
         checked = _collect(policy) if policy != 'block' else _collect()
         if checked['fingerprint'] != plan['fingerprint'] or checked['public']['blocked_count']:
@@ -778,10 +937,12 @@ def _run(plan, refresh_metadata, force=False):
                     'moved': [], 'results': []}
         manifest_path = quarantine / 'manifest.json'
         _write_manifest(manifest_path, manifest)
+        _progress_start('metadata', '保留影片资料到数据库', len(plan['metadata']), unit='条')
         _save_metadata(plan)
+        _progress(done=len(plan['metadata']))
         # Check exact top-level names as well as every original descendant. A
         # new external file appearing after preview must never be swept away.
-        _check_tree(plan, output)
+        _check_tree(plan, output, mutable_sidecars=mode == 'copy_sidecars')
         _check_sources(plan)
         if mode == 'copy_sidecars':
             _update(phase='backup')
@@ -795,7 +956,10 @@ def _run(plan, refresh_metadata, force=False):
         else:
             expected = {item[0]: item[1] for item in plan['manifest']}
             moved_inodes = set()
-            for child in sorted(output.iterdir()):
+            children = sorted(output.iterdir())
+            _progress_start('quarantine', '移出旧播放目录', len(children), unit='项')
+            for index, child in enumerate(children, 1):
+                _progress(current=str(child))
                 if str(child.relative_to(output)) not in expected or _unsafe_links(child):
                     raise ValueError('输出目录中出现未预览的文件，停止重建')
                 if child.is_file():
@@ -803,6 +967,7 @@ def _run(plan, refresh_metadata, force=False):
                 os.replace(child, storage / child.name)
                 manifest['moved'].append(child.name)
                 _append_operation(quarantine, {'operation': 'rename', 'name': child.name})
+                _progress(done=index)
             source_stamps = _check_sources(plan, owned_inodes=moved_inodes)
         retained = set(plan.get('retained', []))
         _map_cache_paths(output, storage, retained) if retained else _map_cache_paths(output, storage)
@@ -835,9 +1000,15 @@ def _run(plan, refresh_metadata, force=False):
                 if key in ('_local_cover', '_local_poster', '_local_thumb', '_local_stills'):
                     artwork.setdefault(key, _remap(value, output, storage))
         _update(total=len(groups))
+        _progress_start('rebuilding', '重新刮削影片', len(groups), unit='部')
         attempt_lock = threading.Lock()
         job_id = _STATE.get('job_id', '')
         def rebuild(code, items):
+            with _LOCK:
+                active = _STATE.setdefault('active_codes', [])
+                if code not in active:
+                    active.append(code)
+                _progress(current='、'.join(active))
             with attempt_lock:
                 scrapesources.record_attempt(items, code, status='running', job_id=job_id)
             try:
@@ -877,6 +1048,10 @@ def _run(plan, refresh_metadata, force=False):
                     _STATE['done'] += 1
                     _STATE['ok'] += int(row['ok'])
                     _STATE['results'] = manifest['results'][-200:]
+                    active = _STATE.get('active_codes', [])
+                    if row['code'] in active:
+                        active.remove(row['code'])
+                    _progress(done=_STATE['done'], current='、'.join(active))
                     _persist_state()
                 entry = next(queue, None)
                 if entry:
@@ -896,7 +1071,9 @@ def _run(plan, refresh_metadata, force=False):
         manifest['phase'] = 'completed' if not failed else 'partial'
         _write_manifest(manifest_path, manifest)
         recovery = '非视频备份在隔离目录，旧视频可按清单从下载源恢复' if mode == 'copy_sidecars' else '旧产物保留在隔离目录，可手动恢复'
-        _update(phase=manifest['phase'], error=f'{failed} 部重建失败，{recovery}' if failed else '')
+        _update(phase=manifest['phase'], cleanup_note_count=len(manifest.get('cleanup_notes', [])),
+                cleanup_notes=manifest.get('cleanup_notes', [])[-100:], retained_file_count=len(plan.get('retained', [])),
+                error=f'{failed} 部重建失败，{recovery}' if failed else '')
     except Exception as exc:
         logger.exception('全量重建未完成；下载源保留，请核对隔离目录备份和恢复清单')
         if manifest is not None and quarantine is not None:
@@ -908,6 +1085,6 @@ def _run(plan, refresh_metadata, force=False):
         _update(phase='failed', error=str(exc))
     finally:
         try:
-            _update(running=False)
+            _update(running=False, finished_at=time.time())
         finally:
             _maintenance().release()

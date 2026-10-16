@@ -565,6 +565,37 @@ def copy_mode(library, monkeypatch):
     return library
 
 
+def test_rebuild_reports_backup_verification_deletion_and_scrape_progress(copy_mode, monkeypatch):
+    case = copy_mode
+    events = []
+    original = scraperebuild._progress
+    def record(**values):
+        original(**values)
+        current = scraperebuild.state().get('progress')
+        if current:
+            events.append(dict(current))
+            if current['stage'] == 'clearing' and values.get('done'):
+                assert not Path(current['current']).exists()  # count only successful deletions
+    monkeypatch.setattr(scraperebuild, '_progress', record)
+    monkeypatch.setattr(scrape, 'scrape_group', lambda code, items, **kw:
+                        scrape.ScrapeResult(code=code, links=[items[0].path]))
+    value = preview()
+    scraperebuild.start(value['token'], str(case['output']))
+    result = wait()
+    assert result['phase'] == 'completed', result
+    stages = result['progress_steps']
+    for stage in ('metadata', 'backup', 'verify_backups', 'clearing', 'cleanup_dirs', 'rebuilding'):
+        assert stages[stage]['done'] == stages[stage]['total']
+        assert stages[stage]['started_at'] <= stages[stage]['updated_at']
+    assert stages['backup']['bytes_done'] == stages['backup']['bytes_total'] > 0
+    assert any(event['stage'] == 'backup' and event['current_bytes'] > 0 for event in events)
+    assert stages['rebuilding']['done'] == 1
+    assert result['elapsed_seconds'] >= 0 and result['progress']['elapsed_seconds'] >= 0
+    saved = json.loads(scraperebuild._STATE_FILE.read_text(encoding='utf-8'))
+    assert saved['progress']['done'] == 1
+    assert saved['finished_at'] is not None
+
+
 def test_different_device_selects_small_artifact_backup_outside_playback(library, monkeypatch):
     data = library['tmp'] / 'app-data'
     monkeypatch.setattr(scraperebuild, 'DATA_DIR', data)
@@ -637,10 +668,11 @@ def test_backup_failure_never_starts_removing_originals(copy_mode, monkeypatch):
 
 def test_changed_backup_is_detected_before_removing_any_file(copy_mode, monkeypatch):
     case = copy_mode
+    (case['video'].parent / 'important.txt').write_text('not regenerable')
     original = scraperebuild._backup_sidecars
     def corrupt(plan, storage):
         backups = original(plan, storage)
-        (storage / backups[-1]['path']).write_bytes(b'broken')
+        (storage / next(row['path'] for row in backups if row['path'].endswith('important.txt'))).write_bytes(b'broken')
         return backups
     monkeypatch.setattr(scraperebuild, '_backup_sidecars', corrupt)
     value = preview()
@@ -648,6 +680,76 @@ def test_changed_backup_is_detected_before_removing_any_file(copy_mode, monkeypa
     result = wait()
     assert result['phase'] == 'failed' and '备份' in result['error']
     assert case['video'].exists() and case['video'].with_suffix('.nfo').exists()
+
+
+@pytest.mark.parametrize('change', ['rewrite', 'remove', 'touch'])
+def test_emby_metadata_changes_after_video_cleanup_do_not_stop_batch(copy_mode, monkeypatch, change):
+    case = copy_mode
+    video, nfo = case['video'], case['video'].with_suffix('.nfo')
+    original_unlink = Path.unlink
+    def unlink(path, *args, **kwargs):
+        result = original_unlink(path, *args, **kwargs)
+        if path == video:
+            if change == 'rewrite': nfo.write_text('<movie><title>Emby updated</title></movie>')
+            elif change == 'remove': original_unlink(nfo)
+            else: os.utime(nfo, (time.time(), time.time()))
+        return result
+    monkeypatch.setattr(Path, 'unlink', unlink)
+    monkeypatch.setattr(scrape, 'scrape_group', lambda code, items, **kw:
+                        scrape.ScrapeResult(code=code, links=[items[0].path]))
+    value = preview()
+    scraperebuild.start(value['token'], str(case['output']))
+    result = wait()
+    assert result['phase'] == 'completed', result
+    assert result['done'] == result['ok'] == 1
+    assert case['source'].exists() and not nfo.exists()
+
+
+def test_sidecar_permission_failure_is_retained_and_other_films_continue(copy_mode, monkeypatch):
+    case = copy_mode
+    nfo = case['video'].with_suffix('.nfo')
+    original_unlink = Path.unlink
+    def unlink(path, *args, **kwargs):
+        if path == nfo: raise PermissionError('nfo busy')
+        return original_unlink(path, *args, **kwargs)
+    monkeypatch.setattr(Path, 'unlink', unlink)
+    monkeypatch.setattr(scrape, 'scrape_group', lambda code, items, **kw:
+                        scrape.ScrapeResult(code=code, links=[items[0].path]))
+    value = preview()
+    scraperebuild.start(value['token'], str(case['output']))
+    result = wait()
+    assert result['phase'] == 'completed', result
+    assert nfo.exists() and case['source'].exists()
+    assert result['cleanup_note_count'] > 0 and result['retained_file_count'] > 0
+
+
+def test_nfo_rewrite_after_confirmation_does_not_invalidate_plan(copy_mode, monkeypatch):
+    case = copy_mode
+    value = preview()
+    case['video'].with_suffix('.nfo').write_text('<movie><title>Externally replaced NFO</title></movie>')
+    monkeypatch.setattr(scrape, 'scrape_group', lambda code, items, **kw:
+                        scrape.ScrapeResult(code=code, links=[items[0].path]))
+    scraperebuild.start(value['token'], str(case['output']))
+    result = wait()
+    assert result['phase'] == 'completed', result
+    assert case['source'].exists()
+
+
+def test_disposable_backup_failure_does_not_prevent_regeneration(copy_mode, monkeypatch):
+    case = copy_mode
+    original = scraperebuild._backup_sidecars
+    def corrupt(plan, storage):
+        backups = original(plan, storage)
+        saved = storage / next(row['path'] for row in backups if row['path'].endswith('.nfo'))
+        saved.write_bytes(b'corrupted generated metadata backup')
+        return backups
+    monkeypatch.setattr(scraperebuild, '_backup_sidecars', corrupt)
+    monkeypatch.setattr(scrape, 'scrape_group', lambda code, items, **kw:
+                        scrape.ScrapeResult(code=code, links=[items[0].path]))
+    value = preview()
+    scraperebuild.start(value['token'], str(case['output']))
+    assert wait()['phase'] == 'completed'
+    assert case['source'].exists()
 
 
 def test_new_file_arriving_during_backup_is_never_removed(copy_mode, monkeypatch):
