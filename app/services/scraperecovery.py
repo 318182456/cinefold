@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 import time
 from threading import Thread
@@ -39,11 +40,59 @@ def naming_config(settings):
             ('medialink_scrape_dir', 'medialink_library_path', 'scrape_dir_template', 'scrape_file_template', 'scrape_category')}
 
 
+def history(rebuild):
+    """Read bounded manifest headers, including large legacy recovery files."""
+    settings = rebuild.get_settings()
+    output = rebuild._safe_path(settings.medialink_scrape_dir or settings.medialink_library_path, output=True)
+    _, parent = rebuild._quarantine_location(output, settings)
+    parents = {parent, rebuild._STATE_FILE.parent / 'rebuild-quarantine'}
+    ref = reference(rebuild)
+    if ref.get('quarantine_dir'):
+        parents.add(Path(ref['quarantine_dir']).parent)
+    rows = {}
+    keys = ('job_id', 'phase', 'checkpoint', 'created_at', 'output_dir', 'quarantine_mode', 'backup_bytes', 'source_count', 'done', 'ok')
+    decoder = json.JSONDecoder()
+    for folder in parents:
+        if not folder.is_dir() or rebuild._unsafe_links(folder):
+            continue
+        for directory in folder.glob(f'.{output.name}.cinefold-rebuild-*'):
+            path = directory / 'manifest.json'
+            if rebuild._unsafe_links(path) or not path.is_file():
+                continue
+            try:
+                with path.open('rb') as stream:
+                    header = stream.read(64 * 1024).decode('utf-8', errors='ignore')
+                row = {}
+                for key in keys:
+                    match = re.search(r'^  "' + key + r'":\s*', header, re.MULTILINE)
+                    if match:
+                        row[key] = decoder.raw_decode(header[match.end():])[0]
+                if not row.get('job_id') or row.get('output_dir') != str(output):
+                    continue
+                if row.get('quarantine_mode') not in ('copy_sidecars', 'rename'):
+                    continue
+                row['quarantine_dir'] = str(directory)
+                row['can_resume'] = row.get('phase') != 'completed'
+                row['can_retry_failed'] = bool(row['can_resume'] and (row.get('done') or 0) > (row.get('ok') or 0))
+                row['total'] = row.get('source_count')
+                if row['job_id'] == ref.get('job_id'):
+                    row.update({key: ref[key] for key in ('done', 'total', 'ok') if key in ref})
+                    row['can_retry_failed'] = bool(row['can_resume'] and (row.get('done') or 0) > (row.get('ok') or 0))
+                rows[row['job_id']] = row
+            except (OSError, ValueError, TypeError):
+                continue
+    return sorted(rows.values(), key=lambda row: row.get('created_at') or '', reverse=True)
+
+
 def start(job_id, mode='unfinished'):
     from app.services import scraperebuild as rebuild
     with rebuild._LOCK:
         rebuild.state()  # Recover an interrupted process state on first access.
         candidate = info(rebuild, rebuild._STATE['running'])
+        if rebuild._STATE['running']:
+            raise ValueError('已有预览或重建任务运行中，请等待完成')
+        if job_id != candidate.get('job_id'):
+            candidate = next((row for row in history(rebuild) if row['job_id'] == job_id), {})
         if mode not in ('unfinished', 'failed') or not job_id or job_id != candidate.get('job_id'):
             raise ValueError('恢复任务已变化，请刷新状态后重试')
         if not candidate.get('can_resume') or mode == 'failed' and not candidate.get('can_retry_failed'):
@@ -52,7 +101,7 @@ def start(job_id, mode='unfinished'):
         rebuild._maintenance().reserve()
         rebuild._STATE.update(running=True, phase='checking', error='', token='', plan=None,
                               job_id=job_id, quarantine_dir=candidate['quarantine_dir'],
-                              done=candidate['done'], total=candidate['total'], ok=candidate['ok'],
+                              done=candidate.get('done') or 0, total=candidate.get('total') or 0, ok=candidate.get('ok') or 0,
                               started_at=time.time(), finished_at=None, progress=None, progress_steps={}, active_codes=[])
     try:
         Thread(target=_run, args=(candidate, mode), daemon=True, name='rebuild-resume').start()

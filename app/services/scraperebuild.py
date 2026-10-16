@@ -535,7 +535,7 @@ def preview(missing_policy='block'):
     return state()
 
 
-def start(token: str, confirmation: str, *, refresh_metadata: bool = False, force: bool = False, confirm_discard: bool = False):
+def start(token: str, confirmation: str, *, refresh_metadata: bool = False, force: bool = False, confirm_discard: bool = False, new_task: bool = False):
     with _LOCK:
         if _STATE['running'] or not _PLAN or not hmac.compare_digest(token or '', _PLAN['token']):
             raise ValueError('预览已失效，请重新预览')
@@ -547,6 +547,10 @@ def start(token: str, confirmation: str, *, refresh_metadata: bool = False, forc
             raise ValueError('请输入完整输出目录确认重建')
         if time.time() - _PLAN['issued'] > _TOKEN_LIFETIME:
             raise ValueError('预览已过期，请重新预览')
+        if not new_task:
+            from app.services.scraperecovery import history
+            if any(row['can_resume'] for row in history(sys.modules[__name__])):
+                raise ValueError('存在未完成的历史任务，请选择继续原任务，或明确选择重新清理并重建')
         plan = copy.deepcopy(_PLAN)
         _require_idle()
         _maintenance().reserve()
@@ -623,6 +627,12 @@ def _map_cache_paths(output, storage, retained=()):
 
 
 def _write_manifest(path, manifest):
+    if path.name == 'manifest.json':
+        results = {row['code']: row for row in manifest.get('results', [])}
+        # Put small discovery fields first: legacy manifests can exceed 100 MB.
+        manifest = {'source_count': len(manifest.get('sources', [])), 'done': len(results),
+                    'ok': sum(bool(row['ok']) for row in results.values()),
+                    **{key: value for key, value in manifest.items() if key not in ('source_count', 'done', 'ok')}}
     temporary = path.with_suffix('.tmp')
     with temporary.open('w', encoding='utf-8') as stream:
         json.dump(manifest, stream, ensure_ascii=False, default=str, indent=2)

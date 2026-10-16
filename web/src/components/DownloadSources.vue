@@ -23,6 +23,9 @@ const rebuildRefreshMetadata = ref(false), releaseOpen = ref(false), releaseBusy
 const rebuildForce = ref(false)
 const rebuildMissingPolicy = ref('block'), rebuildConfirmDiscard = ref(false)
 const rebuildAutoCheck = ref(false)
+const rebuildChoice = ref(''), rebuildTasks = ref([]), rebuildTasksBusy = ref(false), rebuildTasksError = ref('')
+const rebuildSelectedJob = ref('')
+const selectedRecovery = computed(() => rebuildTasks.value.find(row => row.job_id === rebuildSelectedJob.value))
 let rebuildDiscardScope = null
 const releaseOutput = ref(''), releaseConfirmation = ref('')
 let rebuildTimer, rebuildRequest = 0, rebuildPolicyEdited = false
@@ -30,7 +33,9 @@ const rebuildLocked = computed(() => !rebuildKnown.value || rebuild.value.runnin
 const rebuildPlan = computed(() => rebuild.value.plan || null)
 const rebuildOutput = computed(() => rebuildPlan.value?.output_dir || rebuild.value.output_dir || '')
 const rebuildPreviewing = computed(() => rebuild.value.running && ['preview', 'previewing', 'planning'].includes(rebuild.value.phase))
-const rebuildDisabledReason = computed(() => rebuild.value.recovery?.can_resume && !READY_PHASES.includes(rebuild.value.phase)
+const rebuildDisabledReason = computed(() => rebuildChoice.value !== 'new'
+  ? '请先选择继续历史任务或重新清理并重建。'
+  : rebuild.value.recovery?.can_resume && !READY_PHASES.includes(rebuild.value.phase)
   ? '可直接继续原任务或仅重试失败项；下方确认按钮用于新的全量重建。'
   : rebuildRunReason({ state: rebuild.value, known: rebuildKnown.value,
   busy: rebuildBusy.value, statusError: rebuildStatusError.value, readyToken: rebuildReadyToken.value,
@@ -45,6 +50,7 @@ const REBUILD_PHASES = {
   planning: '准备重建范围', revalidating: '重新核对文件与源目录', quarantining: '隔离旧播放产物', rebuilding: '全量重新刮削',
   checking: '重新核对文件与源目录', quarantine: '隔离旧播放产物', partial: '部分影片重建失败',
   backup: '备份并校验旧资料', clearing: '清理已验证的旧播放文件',
+  backups_verified: '备份已验证，清理未完成', interrupted: '任务中断',
 }
 const protectedOutputs = computed(() => {
   const paths = (rebuild.value.protected_outputs || [])
@@ -100,6 +106,7 @@ async function pollRebuild() {
   }
 }
 async function previewRebuild() {
+  if (rebuildChoice.value !== 'new' || rebuildTasksBusy.value || rebuildTasksError.value) return
   if (rebuildBusy.value || rebuild.value.running || job.value.running || inventory.value.running) return
   rebuildBusy.value = true
   rebuildReadyToken.value = ''
@@ -114,7 +121,7 @@ async function previewRebuild() {
 async function runRebuild() {
   if (!rebuildCanRun.value) return
   const payload = { token: rebuildReadyToken.value, confirmation: rebuildConfirmation.value.trim(),
-    refresh_metadata: rebuildRefreshMetadata.value, force: rebuildForce.value, confirm_discard: rebuildConfirmDiscard.value }
+    refresh_metadata: rebuildRefreshMetadata.value, force: rebuildForce.value, confirm_discard: rebuildConfirmDiscard.value, new_task: true }
   rebuildBusy.value = true
   rebuildReadyToken.value = ''; rebuildConfirmation.value = ''
   clearTimeout(rebuildTimer); rebuildRequest++
@@ -126,9 +133,8 @@ async function runRebuild() {
   } catch (e) { rebuildKnown.value = false; toast.error(e.message); scheduleRebuildPoll(1000) }
   finally { rebuildBusy.value = false }
 }
-async function resumeRebuild(mode) {
+async function resumeRebuild(mode, recovery = rebuild.value.recovery) {
   if (rebuildLocked.value || job.value.running || inventory.value.running) return
-  const recovery = rebuild.value.recovery
   if (!recovery?.can_resume || mode === 'failed' && !recovery.can_retry_failed) return
   rebuildBusy.value = true; rebuildAutoCheck.value = false
   rebuildReadyToken.value = ''; clearTimeout(rebuildTimer); rebuildRequest++
@@ -139,7 +145,28 @@ async function resumeRebuild(mode) {
   } catch (e) { toast.error(e.message); await pollRebuild() }
   finally { rebuildBusy.value = false }
 }
-function openRebuild() { rebuildOpen.value = true; rebuildConfirmation.value = ''; rebuildConfirmDiscard.value = false; rebuildDiscardScope = null; rebuildPolicyEdited = false; rebuildKnown.value = false; rebuildAutoCheck.value = true; pollRebuild() }
+async function loadRebuildTasks() {
+  if (rebuildTasksBusy.value) return
+  rebuildTasksBusy.value = true; rebuildTasksError.value = ''
+  try {
+    const result = await http.get('/scrape/rebuild/tasks')
+    if (disposed) return
+    rebuildTasks.value = result.items || []
+    if (!rebuildTasks.value.some(row => row.job_id === rebuildSelectedJob.value && row.can_resume)) rebuildSelectedJob.value = ''
+  } catch (e) { rebuildTasksError.value = e.message }
+  finally { rebuildTasksBusy.value = false }
+}
+async function openRebuild() {
+  rebuildOpen.value = true; rebuildChoice.value = ''; rebuildSelectedJob.value = ''
+  rebuildConfirmation.value = ''; rebuildConfirmDiscard.value = false; rebuildDiscardScope = null
+  rebuildPolicyEdited = false; rebuildKnown.value = false; rebuildAutoCheck.value = false; rebuildReadyToken.value = ''
+  await Promise.all([pollRebuild(), loadRebuildTasks()])
+}
+function chooseNewRebuild() {
+  if (rebuildLocked.value || rebuildTasksBusy.value || rebuildTasksError.value) return
+  rebuildChoice.value = 'new'; rebuildAutoCheck.value = true; rebuildReadyToken.value = ''
+  rebuildConfirmation.value = ''; rebuildConfirmDiscard.value = false; rebuildDiscardScope = null
+}
 function changeMissingPolicy() { rebuildPolicyEdited = true; rebuildReadyToken.value = ''; rebuildConfirmDiscard.value = false; rebuildDiscardScope = null; rebuildAutoCheck.value = true }
 function changeDiscardConfirmation() {
   rebuildDiscardScope = rebuildConfirmDiscard.value ? discardScope(rebuildPlan.value) : null
@@ -151,10 +178,9 @@ function changeDiscardConfirmation() {
 watch([rebuildOpen, rebuildKnown, rebuildBusy, rebuildAutoCheck,
   () => rebuild.value.running, () => job.value.running, () => inventory.value.running], () => {
   if (!rebuildOpen.value) { rebuildAutoCheck.value = false; return }
-  if (!rebuildAutoCheck.value || !rebuildKnown.value || rebuildBusy.value || rebuild.value.running
+  if (rebuildChoice.value !== 'new' || !rebuildAutoCheck.value || !rebuildKnown.value || rebuildBusy.value || rebuild.value.running
       || job.value.running || inventory.value.running) return
   rebuildAutoCheck.value = false
-  if (rebuild.value.recovery?.can_resume && !rebuildPolicyEdited) return
   const plan = rebuildPlan.value
   if (READY_PHASES.includes(rebuild.value.phase) && !rebuild.value.error && rebuildReadyToken.value
       && plan?.missing_policy === rebuildMissingPolicy.value
@@ -382,11 +408,27 @@ onUnmounted(() => { disposed = true; request++; rebuildRequest++; clearTimeout(t
     </ModalDialog>
     <ModalDialog v-model:open="rebuildOpen" title="全部重新刮削" size="2xl" scrollable>
       <div class="space-y-4 text-sm">
-        <div v-if="rebuild.recovery?.can_resume" class="space-y-2 rounded-lg border border-brand/30 p-3 text-xs text-gray-300">
-          <p>有可继续的原任务：完成 {{ rebuild.recovery.done }} / {{ rebuild.recovery.total }} 部，成功 {{ rebuild.recovery.ok }} 部。</p>
-          <p>继续任务会核对原检查点，跳过已完成影片，不会重新清空已重建目录。下方范围检查用于开始新的全量任务。</p>
-          <div class="flex flex-wrap gap-2"><button class="btn-primary !text-xs" :disabled="rebuildLocked || job.running || inventory.running" @click="resumeRebuild('unfinished')">继续未完成任务</button><button v-if="rebuild.recovery.can_retry_failed" class="btn-ghost !text-xs" :disabled="rebuildLocked || job.running || inventory.running" @click="resumeRebuild('failed')">仅重试失败项</button></div>
+        <div class="space-y-3 rounded-lg border border-brand/30 p-3 text-xs text-gray-300">
+          <p class="font-medium text-gray-100">先选择本次操作</p>
+          <div class="flex flex-wrap gap-2">
+            <button class="btn-ghost !text-xs" :disabled="rebuildLocked || rebuildTasksBusy || !!rebuildTasksError" :aria-pressed="rebuildChoice === 'resume'" @click="rebuildChoice = 'resume'; rebuildAutoCheck = false">继续历史任务</button>
+            <button class="btn-ghost !text-xs" :disabled="rebuildLocked || rebuildTasksBusy || !!rebuildTasksError" :aria-pressed="rebuildChoice === 'new'" @click="chooseNewRebuild">重新清理并重建</button>
+            <button class="text-brand" :disabled="rebuildTasksBusy" @click="loadRebuildTasks">{{ rebuildTasksBusy ? '正在读取历史任务…' : '刷新历史任务' }}</button>
+          </div>
+          <p v-if="rebuildTasksError" role="alert" class="text-red-400">历史任务读取失败：{{ rebuildTasksError }}。请刷新后再选择。</p>
+          <p v-if="!rebuildChoice">打开窗口不会启动检查、清理或刮削。继续任务复用所选备份；重新清理会创建新的独立备份，原备份保留。</p>
+          <template v-if="rebuildChoice === 'resume'">
+            <label class="block space-y-2"><span>选择要恢复的任务</span><select v-model="rebuildSelectedJob" class="input" aria-label="选择要恢复的任务" :disabled="rebuildLocked || rebuildTasksBusy"><option value="">请选择任务，不会自动执行</option><option v-for="task in rebuildTasks.filter(row => row.can_resume)" :key="task.job_id" :value="task.job_id">{{ task.created_at || '创建时间未记录' }} · {{ formatSize(task.backup_bytes || 0) }} · {{ REBUILD_PHASES[task.phase] || task.phase }} · {{ task.job_id.slice(0, 8) }}</option></select></label>
+            <p v-if="!rebuildTasksBusy && !rebuildTasks.some(row => row.can_resume)">没有找到可继续的历史任务。</p>
+            <div v-if="selectedRecovery" class="space-y-2">
+              <p class="break-all font-mono">{{ selectedRecovery.quarantine_dir }}</p>
+              <p>原阶段：{{ REBUILD_PHASES[selectedRecovery.phase] || selectedRecovery.phase }}；下载源范围 {{ selectedRecovery.total ?? '旧版未记录，继续时读取完整清单' }}；已处理 {{ selectedRecovery.done ?? '旧版未记录' }}；成功 {{ selectedRecovery.ok ?? '旧版未记录' }}。</p>
+              <p>继续原任务会核对下载源与检查点，保留已完成影片，不创建新备份、不重新清空已重建目录。曾选择丢弃缺失源视频的任务会沿用该选择；旧版任务默认复用已有资料。</p>
+              <div class="flex flex-wrap gap-2"><button class="btn-primary !text-xs" :disabled="rebuildLocked || job.running || inventory.running" @click="resumeRebuild('unfinished', selectedRecovery)">继续所选任务</button><button v-if="selectedRecovery.can_retry_failed" class="btn-ghost !text-xs" :disabled="rebuildLocked || job.running || inventory.running" @click="resumeRebuild('failed', selectedRecovery)">仅重试所选任务失败项</button></div>
+            </div>
+          </template>
         </div>
+        <template v-if="rebuildChoice === 'new'">
         <p class="text-xs text-gray-300">无需选择影片。确认后自动重建全部可恢复的下载源，包含已刮削和失败的视频；当前列表的勾选、搜索、筛选和分页不会限制重建范围。</p>
         <div class="space-y-2 rounded-lg border border-amber-600/30 bg-amber-500/5 p-3 text-xs text-amber-200">
           <p>将清理播放输出目录，再从全部可恢复的下载源重新生成视频链接、NFO 和图片。旧图片、NFO 等文件会保留在播放目录之外；独立下载源保留。无法验证独立源的视频按下方选择保留或丢弃。</p>
@@ -429,6 +471,8 @@ onUnmounted(() => { disposed = true; request++; rebuildRequest++; clearTimeout(t
         <label class="block space-y-2 text-xs text-gray-400"><span>输入完整播放输出目录以确认</span><input v-model="rebuildConfirmation" class="input font-mono" :placeholder="rebuildOutput || '完整输出目录路径'" aria-label="确认全部重刮的输出目录" aria-describedby="rebuild-confirm-hint" autocomplete="off" spellcheck="false" /><span id="rebuild-confirm-hint" class="block text-gray-500">预览期间也可以输入或粘贴目录；只有预览成功、没有阻止项且输入目录完全一致时，才能执行。</span></label>
         <p v-if="rebuildDisabledReason" id="rebuild-run-reason" role="status" class="text-xs text-amber-300">{{ rebuildDisabledReason }}</p>
         <div class="flex flex-wrap justify-end gap-2"><button class="btn-ghost !text-xs" @click="rebuildOpen = false">关闭</button><button class="btn-primary !text-xs" :disabled="!rebuildCanRun" aria-describedby="rebuild-run-reason" @click="runRebuild">确认清空播放目录并全部重刮</button></div>
+        </template>
+        <template v-else><RebuildProgress :state="rebuild" :phase="rebuildPhase" /><p v-if="rebuild.error" class="break-all text-xs text-amber-300">{{ rebuild.error }}</p><div class="flex justify-end"><button class="btn-ghost !text-xs" @click="rebuildOpen = false">关闭</button></div></template>
       </div>
     </ModalDialog>
     <ModalDialog v-model:open="releaseOpen" title="解除删除联动保护" size="lg">

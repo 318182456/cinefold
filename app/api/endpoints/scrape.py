@@ -53,6 +53,7 @@ class RebuildRequest(BaseModel):
     refresh_metadata: bool = False
     force: bool = False
     confirm_discard: bool = False
+    new_task: bool = False
 
 
 class RebuildPreviewRequest(BaseModel):
@@ -83,12 +84,22 @@ def rebuild_state(current_user: str = Depends(get_current_user)):
     return ResponseEntity.ok(scraperebuild.state())
 
 
+@router.get('/rebuild/tasks')
+def rebuild_history(current_user: str = Depends(get_current_user)):
+    from app.services import scraperebuild, scraperecovery
+    try:
+        return ResponseEntity.ok({'items': scraperecovery.history(scraperebuild)})
+    except (ValueError, OSError) as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
 @router.post('/rebuild/run')
 def run_rebuild(body: RebuildRequest, current_user: str = Depends(get_current_user)):
     from app.services import scraperebuild
     try:
         return ResponseEntity.ok(scraperebuild.start(body.token, body.confirmation,
                                 refresh_metadata=body.refresh_metadata, **({'force': True} if body.force else {}),
+                                **({'new_task': True} if body.new_task else {}),
                                 **({'confirm_discard': True} if body.confirm_discard else {})))
     except (ValueError, OSError) as exc:
         raise HTTPException(409, str(exc)) from exc

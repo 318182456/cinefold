@@ -252,3 +252,80 @@ def test_resume_api_auth_and_modes(monkeypatch):
         assert client.post('/api/v1/scrape/rebuild/resume', json={'job_id':'job', 'mode':mode}).status_code == 200
     assert calls == [('job','unfinished'), ('job','failed')]
     assert client.post('/api/v1/scrape/rebuild/resume', json={'job_id':'job', 'mode':'all'}).status_code == 422
+
+
+def test_select_older_legacy_task_after_second_backup(copy_mode, monkeypatch):
+    case = copy_mode
+    original = scraperebuild._clear_copied_output
+    def stop_after_backup(*args):
+        raise OSError('interrupted before cleanup')
+    monkeypatch.setattr(scraperebuild, '_clear_copied_output', stop_after_backup)
+    value = preview()
+    scraperebuild.start(value['token'], str(case['output']))
+    first = wait()
+    directory = Path(first['quarantine_dir'])
+    path = directory / 'manifest.json'
+    manifest = json.loads(path.read_text(encoding='utf-8'))
+    manifest['version'] = 1
+    manifest['phase'] = 'backups_verified'
+    for key in ('checkpoint', 'options', 'naming_config', 'source_count', 'done', 'ok'):
+        manifest.pop(key, None)
+    # Oversized legacy codes need not be loaded merely to choose a task.
+    manifest['codes'] = ['x' * 100000]
+    path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding='utf-8')
+    second = directory.parent / f'.{case["output"].name}.cinefold-rebuild-second'
+    second.mkdir()
+    second_manifest = {**manifest, 'job_id': 'second-job', 'created_at': '2099-01-01', 'backup_bytes': 123}
+    (second / 'manifest.json').write_text(json.dumps(second_manifest, indent=2), encoding='utf-8')
+    reference = {'job_id': 'second-job', 'quarantine_dir': str(second), 'phase': 'interrupted', 'running': False,
+                 'done': 0, 'total': 1, 'ok': 0}
+    scraperecovery.reference_path(scraperebuild).write_text(json.dumps(reference), encoding='utf-8')
+    before = (second / 'manifest.json').read_bytes()
+    rows = scraperecovery.history(scraperebuild)
+    assert rows[0]['job_id'] == 'second-job'
+    assert {row['job_id'] for row in rows} == {first['job_id'], 'second-job'}
+    assert next(row for row in rows if row['job_id'] == first['job_id'])['total'] is None
+    monkeypatch.setattr(scraperebuild, '_clear_copied_output', original)
+    monkeypatch.setattr(scraperebuild, '_backup_sidecars', lambda *a: pytest.fail('reuse original backup'))
+    calls = []
+    monkeypatch.setattr(scrape, 'scrape_group', writer(case, calls))
+    scraperecovery.start(first['job_id'])
+    result = wait()
+    assert result['phase'] == 'completed', result
+    assert result['quarantine_dir'] == str(directory)
+    assert [row[0] for row in calls] == ['SONE-725']
+    assert (second / 'manifest.json').read_bytes() == before
+    assert scraperecovery.reference(scraperebuild)['job_id'] == first['job_id']
+
+
+def test_new_rebuild_requires_explicit_choice_with_unfinished_history(copy_mode, monkeypatch):
+    case = copy_mode
+    old, _ = partial(case, monkeypatch)
+    value = preview()
+    with pytest.raises(ValueError, match='历史任务'):
+        scraperebuild.start(value['token'], str(case['output']))
+    assert not scraperebuild.state()['running']
+    calls = []
+    monkeypatch.setattr(scrape, 'scrape_group', writer(case, calls))
+    scraperebuild.start(value['token'], str(case['output']), new_task=True)
+    result = wait()
+    assert result['phase'] == 'completed', result
+    assert result['job_id'] != old['job_id']
+    assert (Path(old['quarantine_dir']) / 'manifest.json').is_file()
+
+
+def test_history_api_authenticated_read_only(copy_mode, monkeypatch):
+    from fastapi.testclient import TestClient
+    from app.api import create_app
+    from app.api.endpoints import get_current_user
+    result, _ = partial(copy_mode, monkeypatch)
+    app = create_app()
+    client = TestClient(app)
+    assert client.get('/api/v1/scrape/rebuild/tasks').status_code == 401
+    app.dependency_overrides[get_current_user] = lambda: 'admin'
+    response = client.get('/api/v1/scrape/rebuild/tasks')
+    assert response.status_code == 200
+    row = response.json()['data']['items'][0]
+    assert row['job_id'] == result['job_id'] and row['done'] == 2 and row['ok'] == 1
+    assert row['can_retry_failed']
+    assert not scraperebuild.state()['running']
