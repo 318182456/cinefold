@@ -13,6 +13,7 @@ from pyquery import PyQuery
 
 from app.core.config import get_settings
 from app.modules.ladysite.base import ActorInfo, CodeInfo, SiteClient, join_list, parse_star
+from app.modules.ladysite.identity import normalize_code, same_code
 from app.utils import get_true_code
 
 RANK_TYPES = {
@@ -97,10 +98,7 @@ class Avdb:
         html = self.client.get(detail_url)
         if not html:
             return None
-        info = html_to_code(html, code)
-        if info and not info.code:
-            info.code = code
-        return info
+        return html_to_code(html, code)
 
     # ------------------------------------------------------------------
     def crawler_rank_original(self, rank_type: str = "daily", page: int = 1) -> list[str]:
@@ -150,11 +148,13 @@ def html_to_detail_url(html: str, code: str) -> str:
     """从搜索结果页找到与番号精确匹配的详情链接。"""
     try:
         doc = PyQuery(html)
-        target = get_true_code(code).upper()
+        target = normalize_code(code)
+        if not target:
+            return ""
 
         for item in doc(".movie-list .item").items():
             found = (item(".video-title strong").text() or "").strip().upper()
-            if get_true_code(found).upper() == target:
+            if same_code(found, target):
                 href = item("a").attr("href") or ""
                 return href
 
@@ -169,13 +169,13 @@ def html_to_code(html: str, code: str = "") -> CodeInfo | None:
     """解析详情页。"""
     try:
         doc = PyQuery(html)
-        info = CodeInfo(code=get_true_code(code))
+        info = CodeInfo()
 
         title_node = doc("h2.title.is-4")
         if title_node:
             found_code = (title_node("strong").eq(0).text() or "").strip()
             if found_code:
-                info.code = get_true_code(found_code)
+                info.code = normalize_code(found_code)
             info.title = (title_node("strong.current-title").text() or "").strip()
 
         if not info.title:
@@ -227,7 +227,7 @@ def html_to_code(html: str, code: str = "") -> CodeInfo | None:
         video = doc("#preview-video source").attr("src") or ""
         info.preview_url = convert_image_url(video)
 
-        return info if info.code else None
+        return info if info.code and (not code or same_code(info.code, code)) else None
     except Exception as exc:
         logger.debug(f"[javdb] 解析详情页失败: {exc}")
         return None

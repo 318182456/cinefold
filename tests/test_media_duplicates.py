@@ -1,6 +1,9 @@
 from datetime import datetime, timedelta
 import os
 import time
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 import pytest
 
@@ -185,3 +188,186 @@ def test_merge_marker_protects_before_record_cleanup_and_allows_new_registration
         row.create_time = stamp + timedelta(seconds=1)
         session.commit()
     assert medialink._lookup_links(link_path=str(old))[0].link_path == str(old)
+
+
+def test_global_scan_covers_all_registered_rows_and_groups_variants_parts(library, db):
+    root, _ = library
+    with db() as session:
+        for index in range(24):
+            code = f'ABP-{index + 100}'
+            for suffix in ('', '-U'):
+                path = root / f'{code}{suffix}.mp4'
+                path.write_bytes(b'video')
+                session.add(MediaLink(link_path=str(path), source_path=str(path), code=code + suffix))
+        for number in (1, 2):
+            path = root / f'MEYD-568-CD{number}.mp4'
+            path.write_bytes(b'part')
+            session.add(MediaLink(link_path=str(path), source_path=str(path), code='MEYD-568'))
+        session.commit()
+    (root / 'unregistered.mp4').write_bytes(b'video')
+    result = mediaduplicate.scan_registered()
+    assert result['registered'] == 50 and len(result['groups']) == 25
+    assert result['done'] == result['total'] == 50
+    assert not result['hashes'] and not result['registry_changed']
+    assert all(len(group['links']) == 2 for group in result['groups'])
+    group = next(x for x in result['groups'] if x['code'] == 'MEYD-568')
+    assert group['parts'] == [1, 2] and not group['merge_available']
+    assert {x['match_type'] for x in group['links']} == {'different_part'}
+    assert all('unregistered.mp4' not in x['link_path'] for g in result['groups'] for x in g['links'])
+
+
+def test_global_hash_only_same_size_physical_candidates_and_cross_code(library, db, monkeypatch):
+    root, _ = library
+    original, alias = root / 'MEYD-568.mp4', root / 'MEYD-568-C.mp4'
+    copy, unique = root / 'ABP-123.mp4', root / 'ABP-456.mp4'
+    original.write_bytes(b'abcd'); os.link(original, alias)
+    copy.write_bytes(b'abcd'); unique.write_bytes(b'unique size')
+    for path, code in [(original, 'MEYD-568'), (alias, 'MEYD-568-C'), (copy, 'ABP-123'), (unique, 'ABP-456')]:
+        register(db, path, code=code)
+    calls = []
+    digest = mediaduplicate.stable_digest
+    def counted(path, **kwargs):
+        calls.append(str(path))
+        return digest(path, **kwargs)
+    monkeypatch.setattr(mediaduplicate, 'stable_digest', counted)
+    progress = []
+    result = mediaduplicate.scan_registered(hashes=True, progress=lambda **p: progress.append(p))
+    assert result['physical_files'] == 3 and result['hash_candidates'] == 2
+    assert len(calls) == 2 and str(unique) not in calls
+    assert result['hash_bytes'] == 8 and result['hashed_files'] == 2
+    assert len(result['groups']) == 2
+    same_code = next(x for x in result['groups'] if x['kind'] == 'code')
+    assert same_code['hardlink_groups'] == 1 and same_code['merge_available']
+    cross = next(x for x in result['groups'] if x['kind'] == 'cross_code')
+    assert not cross['merge_available'] and len(cross['links']) == 3
+    assert {x['match_type'] for x in cross['links']} == {'hardlink', 'same_content'}
+    assert {'inventory', 'hash', 'finalizing'} <= {p.get('phase') for p in progress}
+    assert all(path.exists() for path in (original, alias, copy, unique))
+
+
+def test_global_fast_scan_never_claims_equal_size_files_have_same_content(library, db):
+    root, _ = library
+    paths = [root / 'MEYD-568.mp4', root / 'MEYD-568-U.mp4']
+    for path, data in zip(paths, (b'abcd', b'abce')):
+        path.write_bytes(data); register(db, path, code=path.stem)
+    quick = mediaduplicate.scan_registered()['groups'][0]
+    assert {x['match_type'] for x in quick['links']} == {'unverified'}
+    full = mediaduplicate.scan_registered(hashes=True)['groups'][0]
+    assert {x['match_type'] for x in full['links']} == {'different_content'}
+    assert full['same_content_groups'] == 0 and all(path.exists() for path in paths)
+
+
+def test_global_hash_failure_is_inherited_by_hardlink_alias(library, db, monkeypatch):
+    root, _ = library
+    first, alias, independent = root / 'MEYD-568.mp4', root / 'MEYD-568-U.mp4', root / 'ABP-123.mp4'
+    first.write_bytes(b'video'); os.link(first, alias); independent.write_bytes(b'video')
+    for path in (first, alias, independent):
+        register(db, path, code=path.stem)
+    failed_identity = first.stat().st_ino
+    def digest(path, **kwargs):
+        if Path(path).stat().st_ino == failed_identity:
+            raise OSError('读取代表项失败')
+        return 'independent-digest'
+    monkeypatch.setattr(mediaduplicate, 'stable_digest', digest)
+    result = mediaduplicate.scan_registered(hashes=True)
+    group = next(x for x in result['groups'] if x['code'] == 'MEYD-568')
+    assert {x['error'] for x in group['links']} == {'读取代表项失败'}
+    assert {x['match_type'] for x in group['links']} == {'unavailable'}
+    assert all(x['sha256'] is None for x in group['links'])
+    assert not group['hardlink_groups'] and not group['same_content_groups']
+    assert result['read_errors'] == 2 and not group['merge_available']
+
+
+def test_global_scan_detects_file_and_registry_changes_during_hash(library, db, monkeypatch):
+    root, _ = library
+    first, second, late = root / 'MEYD-568.mp4', root / 'MEYD-568-U.mp4', root / 'ABP-999.mp4'
+    for path in (first, second):
+        path.write_bytes(b'abcd'); register(db, path, code=path.stem)
+    mutated = False
+    def changed(path, **kwargs):
+        nonlocal mutated
+        if not mutated:
+            Path(path).write_bytes(b'replaced')
+            late.write_bytes(b'late registration'); register(db, late, code='ABP-999')
+            mutated = True
+        return 'same-digest'
+    monkeypatch.setattr(mediaduplicate, 'stable_digest', changed)
+    result = mediaduplicate.scan_registered(hashes=True)
+    assert result['registered'] == 2 and result['registry_changed'] and result['file_changes'] == 1
+    group = result['groups'][0]
+    assert group['same_content_groups'] == 0
+    assert any(x['match_type'] == 'changed' for x in group['links'])
+    assert not group['merge_available'] and first.exists() and second.exists()
+
+
+def test_global_scan_pages_are_independent_of_media_list_and_detect_stale_db(library, db, monkeypatch):
+    root, _ = library
+    for index in range(12):
+        for suffix in ('', '-U'):
+            code = f'ABP-{index + 100}'
+            path = root / f'{code}{suffix}.mp4'; path.write_bytes(b'video')
+            register(db, path, code=code + suffix)
+    result = mediaduplicate.scan_registered()
+    monkeypatch.setattr(mediaduplicate, '_SCAN_STATE', {'scan_id': 'snapshot', 'running': False, 'result': result})
+    page = mediaduplicate.scan_state(page=99, size=10)
+    assert page['group_total'] == 12 and page['page'] == 2 and len(page['groups']) == 2
+    assert page['summary']['registered'] == 24 and not page['summary']['registry_changed']
+    # 返回值不能反向修改共享后台结果。
+    page['groups'][0]['links'].clear()
+    assert len(mediaduplicate.scan_state(page=2)['groups'][0]['links']) == 2
+    with db() as session:
+        session.delete(session.get(MediaLink, result['groups'][0]['links'][0]['link_path']))
+        session.commit()
+    assert mediaduplicate.scan_state()['summary']['registry_changed']
+
+
+def test_global_background_scan_can_cancel_and_rejects_stale_cancel_id(monkeypatch):
+    entered = threading.Event()
+    def scan(*, cancelled, progress, **kwargs):
+        progress(total=4, done=1, phase='inventory')
+        entered.set()
+        assert cancelled.wait(2)
+        raise InterruptedError('cancelled')
+    monkeypatch.setattr(mediaduplicate, 'scan_registered', scan)
+    monkeypatch.setattr(mediaduplicate, '_SCAN_STATE', {'running': False, 'result': None})
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        monkeypatch.setattr(mediaduplicate, '_SCAN_POOL', pool)
+        job = mediaduplicate.start_scan(hashes=True)
+        assert entered.wait(1)
+        assert mediaduplicate.start_scan()['scan_id'] == job['scan_id']
+        with pytest.raises(ValueError, match='已变化'):
+            mediaduplicate.cancel_scan('stale scan')
+        mediaduplicate.cancel_scan(job['scan_id'])
+    state = mediaduplicate.scan_state()
+    assert not state['running'] and state['cancelled'] and state['phase'] == 'cancelled'
+    assert state['done'] == 1 and state['total'] == 4 and state['summary'] is None
+
+
+def test_shared_hash_cache_uses_inode_and_supports_mid_read_cancellation(tmp_path):
+    from app.services import filehash
+    source, alias = tmp_path / 'source.mp4', tmp_path / 'alias.mp4'
+    source.write_bytes(b'a' * (8 * 1024 * 1024)); os.link(source, alias)
+    cancel = threading.Event()
+    with pytest.raises(InterruptedError):
+        filehash.stable_digest(source, cancelled=cancel, progress=lambda _: cancel.set())
+    digest = filehash.stable_digest(source)
+    assert filehash.stable_digest(alias, progress=lambda _: pytest.fail('same inode must reuse stable hash')) == digest
+    source.write_bytes(b'b' * (8 * 1024 * 1024))
+    assert filehash.stable_digest(alias) != digest
+
+
+def test_global_duplicate_routes_preserve_background_contract(library, db, monkeypatch):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from app.api.endpoints import get_current_user
+    from app.api.endpoints import medialink as endpoint
+    app = FastAPI()
+    app.include_router(endpoint.router)
+    app.dependency_overrides[get_current_user] = lambda: 'tester'
+    monkeypatch.setattr(mediaduplicate, 'start_scan', lambda **kwargs: {'scan_id': 'job', **kwargs})
+    monkeypatch.setattr(mediaduplicate, 'scan_state', lambda **kwargs: {'group_total': 30, **kwargs})
+    client = TestClient(app)
+    assert client.post('/medialinks/duplicates/scan', json={'hashes': True}).json()['data'] == {'scan_id': 'job', 'hashes': True}
+    assert client.get('/medialinks/duplicates/scan?page=3&size=10').json()['data'] == {'group_total': 30, 'page': 3, 'size': 10}
+    monkeypatch.setattr(mediaduplicate, '_SCAN_STATE', {'scan_id': 'current', 'running': False})
+    assert client.post('/medialinks/duplicates/scan/cancel', json={'scan_id': 'stale'}).json()['code'] == 400

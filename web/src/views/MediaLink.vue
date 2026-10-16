@@ -1,11 +1,12 @@
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import {
   batchDeleteMediaLinks, batchDropMediaLinkRecords, deleteMediaLink,
   dropMediaLinkRecord, fetchSubtitle, generateReview, getMediaLinkStats,
   getReview, listMediaLinkOrphans, listMediaLinks, previewMediaLinkDelete,
   pruneMediaLinks, recoverMediaLinks, registerMediaLink,
   previewMediaDuplicates, mergeMediaDuplicates,
+  startGlobalMediaDuplicates, getGlobalMediaDuplicates, cancelGlobalMediaDuplicates,
 } from '@/api'
 import { useToast } from '@/composables/useToast'
 import LoadingBlock from '@/components/LoadingBlock.vue'
@@ -120,6 +121,72 @@ const previewing = ref(false)
 const deleting = ref(false)
 const merging = ref(false), mergeChecking = ref(false), mergeGroup = ref(null), mergePlan = ref(null)
 const mergeKeep = ref('')
+const globalDuplicateOpen = ref(false), globalDuplicateState = ref(null)
+const globalDuplicateHash = ref(false), globalDuplicateBusy = ref(false)
+const globalDuplicatePage = ref(1), globalDuplicateKeep = ref({})
+let globalDuplicateTimer = null, globalDuplicateEpoch = 0
+const globalDuplicatePages = computed(() => Math.max(1, Math.ceil((globalDuplicateState.value?.group_total || 0) / 10)))
+const duplicateMatchLabels = {
+  hardlink: '同 inode 硬链接', same_content: '内容完全相同', different_content: '内容不同',
+  different_part: '不同分段', unverified: '待内容校验', unavailable: '路径不可用', changed: '文件已变化',
+}
+const duplicatePhaseLabels = {
+  queued: '排队中', inventory: '检查登记文件', hash: '校验视频内容', finalizing: '核对快照',
+  cancelling: '正在取消', cancelled: '已取消', finished: '检索完成', failed: '检索失败', idle: '尚未检索',
+}
+function stopGlobalDuplicatePolling() {
+  clearTimeout(globalDuplicateTimer)
+  globalDuplicateTimer = null
+  globalDuplicateEpoch += 1
+}
+async function refreshGlobalDuplicates() {
+  stopGlobalDuplicatePolling()
+  const epoch = globalDuplicateEpoch
+  try {
+    const data = await getGlobalMediaDuplicates(globalDuplicatePage.value, 10)
+    if (!globalDuplicateOpen.value || epoch !== globalDuplicateEpoch) return
+    globalDuplicateState.value = data
+    globalDuplicatePage.value = data.page
+    if (data.running) globalDuplicateHash.value = data.hashes
+    if (data.running) globalDuplicateTimer = setTimeout(refreshGlobalDuplicates, 1500)
+  } catch (err) {
+    if (globalDuplicateOpen.value && epoch === globalDuplicateEpoch) toast.error(err.message)
+  }
+}
+function toggleGlobalDuplicates() {
+  globalDuplicateOpen.value = !globalDuplicateOpen.value
+  if (globalDuplicateOpen.value) refreshGlobalDuplicates()
+  else stopGlobalDuplicatePolling()
+}
+async function startGlobalDuplicates() {
+  globalDuplicateBusy.value = true
+  try {
+    await startGlobalMediaDuplicates(globalDuplicateHash.value)
+    globalDuplicateKeep.value = {}
+    globalDuplicatePage.value = 1
+    await refreshGlobalDuplicates()
+  } catch (err) { toast.error(err.message) }
+  finally { globalDuplicateBusy.value = false }
+}
+async function cancelGlobalDuplicates() {
+  globalDuplicateBusy.value = true
+  try {
+    await cancelGlobalMediaDuplicates(globalDuplicateState.value.scan_id)
+    await refreshGlobalDuplicates()
+  } catch (err) { toast.error(err.message) }
+  finally { globalDuplicateBusy.value = false }
+}
+function globalDuplicateTurnPage(direction) {
+  globalDuplicatePage.value = Math.min(globalDuplicatePages.value, Math.max(1, globalDuplicatePage.value + direction))
+  refreshGlobalDuplicates()
+}
+function openGlobalDuplicateMerge(group) {
+  const keep = globalDuplicateKeep.value[group.code]
+  if (!keep) return
+  openMerge(group)
+  mergeKeep.value = keep
+}
+onUnmounted(stopGlobalDuplicatePolling)
 function openMerge(group) {
   mergeGroup.value = group
   mergeKeep.value = group.links.find(l => l.link_exists && l.source_path !== l.link_path)?.link_path
@@ -142,6 +209,7 @@ async function confirmMerge() {
     toast.success(`已合并 ${data.removed.length} 个重复视频，下载源和种子保留`)
     mergeGroup.value = null
     await Promise.all([load(), reloadStats()])
+    if (globalDuplicateOpen.value) await refreshGlobalDuplicates()
   } catch (err) {
     toast.error(err.message)
     mergePlan.value = null
@@ -809,6 +877,9 @@ onMounted(() => {
       <button v-if="!isOrphan" class="btn-ghost px-3 py-1.5 text-xs" @click="prune">
         清理失效记录
       </button>
+      <button class="btn-ghost px-3 py-1.5 text-xs" :class="globalDuplicateOpen ? 'text-brand' : ''" @click="toggleGlobalDuplicates">
+        全局重复检索
+      </button>
       <button
         v-if="!isOrphan"
         class="btn-primary px-3 py-1.5 text-xs"
@@ -817,6 +888,67 @@ onMounted(() => {
         手工登记
       </button>
     </div>
+
+    <section v-if="globalDuplicateOpen" class="card space-y-4 border border-brand/20">
+      <div class="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h3 class="text-sm font-medium text-gray-200">全局重复影片</h3>
+          <p class="mt-1 text-xs text-gray-400">检索全部已登记媒体库关联，不受当前分页和筛选影响；未登记磁盘文件不在范围内。仅列候选，选择保留位置后进入合并预览。</p>
+        </div>
+        <button class="btn-ghost text-xs" @click="toggleGlobalDuplicates">收起</button>
+      </div>
+      <div class="flex flex-wrap items-center gap-3 text-xs">
+        <label class="flex items-center gap-2 text-gray-300">
+          <input v-model="globalDuplicateHash" type="checkbox" :disabled="globalDuplicateState?.running || globalDuplicateBusy" class="accent-brand" />
+          完整内容校验（仅同大小的独立文件，可能读取大量视频数据）
+        </label>
+        <button class="btn-primary text-xs" :disabled="globalDuplicateState?.running || globalDuplicateBusy" @click="startGlobalDuplicates">开始检索</button>
+        <button v-if="globalDuplicateState?.running" class="btn-ghost text-xs" :disabled="globalDuplicateBusy || globalDuplicateState.phase === 'cancelling'" @click="cancelGlobalDuplicates">取消检索</button>
+        <button class="btn-ghost text-xs" :disabled="globalDuplicateBusy" @click="refreshGlobalDuplicates">刷新结果</button>
+      </div>
+      <div v-if="globalDuplicateState" class="space-y-2 text-xs">
+        <p class="text-gray-300">
+          {{ duplicatePhaseLabels[globalDuplicateState.phase] || globalDuplicateState.phase }}
+          <span v-if="globalDuplicateState.total"> · 文件 {{ globalDuplicateState.done }} / {{ globalDuplicateState.total }}</span>
+          <span v-if="globalDuplicateState.hashes"> · 内容校验 {{ globalDuplicateState.hashed_files }} / {{ globalDuplicateState.hash_candidates }} · 本次读取 {{ formatSize(globalDuplicateState.hash_bytes) }}</span>
+        </p>
+        <p v-if="globalDuplicateState.cancelled" class="text-amber-400">检索已取消，本次未生成完整结果。</p>
+        <p v-if="globalDuplicateState.error" class="text-red-400">{{ globalDuplicateState.error }}</p>
+        <template v-if="globalDuplicateState.summary">
+          <p class="text-gray-400">已检查 {{ globalDuplicateState.summary.registered }} 条关联、{{ globalDuplicateState.summary.physical_files }} 个物理文件；{{ globalDuplicateState.group_total }} 组候选，{{ globalDuplicateState.summary.unavailable }} 个路径不可用，{{ globalDuplicateState.summary.read_errors }} 个读取或校验失败。{{ globalDuplicateState.summary.hashes ? '已按需校验完整内容。' : '快速检索尚未确认独立文件的内容是否相同。' }}</p>
+          <p v-if="globalDuplicateState.summary.registry_changed || globalDuplicateState.summary.file_changes" class="text-amber-400">关联或文件已变化，结果为旧快照，请重新检索；合并前仍会重新校验。</p>
+          <p v-if="!globalDuplicateState.group_total" class="text-gray-400">本次检索未发现重复候选。</p>
+        </template>
+      </div>
+      <article v-for="group in globalDuplicateState?.groups || []" :key="group.id" class="space-y-3 rounded-lg border border-white/10 p-3">
+        <div class="flex flex-wrap items-center gap-2 text-xs">
+          <strong class="text-brand">{{ group.code || `跨番号 · ${group.codes.join(' / ')}` }}</strong>
+          <span class="text-gray-400">{{ group.count }} 条关联 · {{ group.hardlink_groups }} 组同 inode · {{ group.same_content_groups }} 组相同内容</span>
+          <span v-if="group.parts.length > 1" class="text-amber-400">包含不同分段</span>
+        </div>
+        <div v-for="link in group.links" :key="link.link_path" class="space-y-1 border-t border-white/5 pt-2 text-xs">
+          <div class="flex flex-wrap items-center gap-2">
+            <span :class="['hardlink', 'same_content'].includes(link.match_type) ? 'text-brand' : 'text-amber-400'">{{ duplicateMatchLabels[link.match_type] }}</span>
+            <span class="text-gray-400">{{ link.part ? `CD${link.part}` : '单文件' }} · {{ link.version }} · {{ formatSize(link.size) }}</span>
+          </div>
+          <p class="break-all text-gray-300">{{ link.link_path }}</p>
+          <p v-if="link.error" class="break-all text-amber-400">{{ link.error }}</p>
+        </div>
+        <div v-if="group.merge_available" class="flex flex-wrap items-center gap-2">
+          <select v-model="globalDuplicateKeep[group.code]" class="input min-w-0 flex-1 text-xs">
+            <option :value="undefined" disabled>选择保留位置</option>
+            <option v-for="link in group.links.filter(l => l.link_exists && !l.error)" :key="link.link_path" :value="link.link_path">{{ link.link_path }}</option>
+          </select>
+          <button class="btn-primary text-xs" :disabled="!globalDuplicateKeep[group.code]" @click="openGlobalDuplicateMerge(group)">进入合并预览</button>
+        </div>
+        <p v-else class="text-xs text-gray-400">{{ group.kind === 'cross_code' ? '相同文件登记为不同番号，请先核对番号；现有合并仅处理同基础番号。' : '不同分段或可用文件不足，保留并人工核对。' }}</p>
+      </article>
+      <div v-if="globalDuplicateState?.group_total" class="flex items-center justify-end gap-3 text-xs text-gray-400">
+        <button class="btn-ghost text-xs" :disabled="globalDuplicatePage <= 1" @click="globalDuplicateTurnPage(-1)">上一页</button>
+        <span>{{ globalDuplicatePage }} / {{ globalDuplicatePages }} 页 · {{ globalDuplicateState.group_total }} 组</span>
+        <button class="btn-ghost text-xs" :disabled="globalDuplicatePage >= globalDuplicatePages" @click="globalDuplicateTurnPage(1)">下一页</button>
+      </div>
+    </section>
 
     <!-- 视图切换。孤儿一览的数据源与全部关联不同（要问下载器），
          做成两个视图而不是一个筛选项 -->

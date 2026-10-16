@@ -144,6 +144,12 @@ async function mediaDuplicateJob(action, payload) {
 }
 export const previewMediaDuplicates = (payload) => mediaDuplicateJob('preview', payload)
 export const mergeMediaDuplicates = (payload) => mediaDuplicateJob('merge', payload)
+export const startGlobalMediaDuplicates = (hashes = false) =>
+  http.post('/medialinks/duplicates/scan', { hashes })
+export const getGlobalMediaDuplicates = (page = 1, size = 10) =>
+  http.get('/medialinks/duplicates/scan', { params: { page, size } })
+export const cancelGlobalMediaDuplicates = (scanId) =>
+  http.post('/medialinks/duplicates/scan/cancel', { scan_id: scanId })
 export const deleteMediaLink = (payload) => http.post('/medialinks/delete', payload)
 // 只删库里的记录，不碰文件
 export const dropMediaLinkRecord = (linkPath) =>

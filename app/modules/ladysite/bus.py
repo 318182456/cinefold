@@ -10,6 +10,7 @@ from loguru import logger
 from pyquery import PyQuery
 
 from app.modules.ladysite.base import ActorInfo, CodeInfo, SiteClient, join_list
+from app.modules.ladysite.identity import normalize_code, same_code
 from app.utils import get_true_code
 
 HOST = "https://www.javbus.com"
@@ -78,10 +79,13 @@ class Bus:
     def html_to_code(self, html: str, code: str = "") -> CodeInfo | None:
         try:
             doc = PyQuery(html)
-            info = CodeInfo(code=get_true_code(code))
+            info = CodeInfo()
 
             title = (doc("h3").eq(0).text() or "").strip()
             # 标题以番号开头，去掉后是真正的片名
+            title_code = normalize_code(title)
+            if title_code:
+                info.code = title_code
             if title.upper().startswith(info.code.upper()):
                 title = title[len(info.code):].strip()
             info.title = title
@@ -94,7 +98,7 @@ class Bus:
                 label, value = label.strip(), value.strip()
 
                 if "識別碼" in label or "识别码" in label:
-                    info.code = get_true_code(value) or info.code
+                    info.code = normalize_code(value)
                 elif "發行日期" in label or "发行日期" in label:
                     info.release_date = value
                 elif "長度" in label or "长度" in label:
@@ -122,7 +126,7 @@ class Bus:
             ]
             info.still_photo = join_list(samples)
 
-            return info if info.code else None
+            return info if info.code and (not code or same_code(info.code, code)) else None
         except Exception as exc:
             logger.debug(f"[javbus] 解析详情页失败: {exc}")
             return None

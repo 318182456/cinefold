@@ -48,6 +48,35 @@ class MergeRequest(BaseModel):
     token: str = ''
 
 
+class DuplicateScanRequest(BaseModel):
+    hashes: bool = False
+
+
+class DuplicateCancelRequest(BaseModel):
+    scan_id: str
+
+
+@router.post('/duplicates/scan')
+def start_duplicate_scan(body: DuplicateScanRequest, current_user: str = Depends(get_current_user)):
+    from app.services.mediaduplicate import start_scan
+    return ResponseEntity.ok(start_scan(hashes=body.hashes))
+
+
+@router.get('/duplicates/scan')
+def get_duplicate_scan(page: int = 1, size: int = 10, current_user: str = Depends(get_current_user)):
+    from app.services.mediaduplicate import scan_state
+    return ResponseEntity.ok(scan_state(page=page, size=size))
+
+
+@router.post('/duplicates/scan/cancel')
+def cancel_duplicate_scan(body: DuplicateCancelRequest, current_user: str = Depends(get_current_user)):
+    from app.services.mediaduplicate import cancel_scan
+    try:
+        return ResponseEntity.ok(cancel_scan(body.scan_id))
+    except ValueError as exc:
+        return ResponseEntity.fail(str(exc), code=400)
+
+
 @router.post('/duplicates/preview')
 def preview_duplicates(body: MergeRequest, current_user: str = Depends(get_current_user)):
     from app.services.mediaduplicate import preview, start_job

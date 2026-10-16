@@ -17,6 +17,7 @@ from loguru import logger
 
 from app.core.config import get_settings
 from app.utils import clean_header_value
+from app.modules.ladysite.transport import FetchCancelled, current_budget, http_client
 
 # bypass 服务类型探测结果缓存：{base_url: 是否讲 FlareSolverr 协议}
 # 覆盖 FlareSolverr / Byparr / TRAWL，三家都是 POST /v1
@@ -193,12 +194,14 @@ class SiteClient:
     def _throttle(self) -> None:
         state = self._state()
         lock, _ = state[0], state[1]
-        with lock:
+        budget = current_budget()
+        with budget.acquire(lock) if budget else lock:
             elapsed = time.time() - state[1]
             wait = self.interval - elapsed
             if wait > 0:
                 # 加一点随机抖动，避免请求节奏过于规整
-                time.sleep(wait + random.uniform(0, 0.3))
+                delay = wait + random.uniform(0, 0.3)
+                budget.wait(delay) if budget else time.sleep(delay)
             state[1] = time.time()
 
     def get(self, path: str, params: dict | None = None, timeout: float = 15.0, bypass_first: bool | None = None, **kwargs) -> str:
@@ -212,6 +215,9 @@ class SiteClient:
         # 补斜杠而不是直接拼：少一个斜杠拼出来的是 example.comsubs/x，
         # 域名整个变了，却只会报一个看着与 URL 无关的 DNS/SSL 错误
         url = path if path.startswith("http") else absolute_url(path, self.host)
+
+        if current_budget() is not None:
+            return self._get_budgeted(url, params, timeout, bypass_first, **kwargs)
 
         # 直连必被拦的站点，配了 bypass 就不必先撞一次 403。
         # Cookie 必须一并带过去：mgstage 的 adc、dmm 的 age_check_done
@@ -261,6 +267,69 @@ class SiteClient:
             except Exception as exc:
                 logger.warning(f"请求 {url} 异常: {exc}")
                 return ""
+        return ""
+
+    def _get_budgeted(self, url, params, timeout, bypass_first, **kwargs):
+        """Use one deadline for direct requests, retry waits and browser fallback."""
+        budget = current_budget()
+        settings = get_settings()
+        headers = self.headers(kwargs.pop("headers", None))
+
+        def bypass():
+            budget.check()
+            return self._remember(fetch_via_bypass(
+                url, params, timeout, cookie=self.cookie,
+                **({'proxy_url': self.proxy} if self.proxy is not None else {}),
+            ), url)
+
+        try:
+            budget.check()
+            if (self.bypass_first if bypass_first is None else bypass_first) and settings.bypass_url:
+                return bypass()
+            for attempt in range(CONNECT_RETRIES + 1):
+                self._throttle()
+                retry_after = None
+                try:
+                    with http_client(
+                        timeout=timeout, follow_redirects=True,
+                        proxy=self.proxy if self.proxy is not None else settings.proxy or None,
+                        verify=False, trust_env=False,
+                    ) as client:
+                        response = client.get(url, headers=headers, params=params)
+                    response.raise_for_status()
+                    return self._remember(response.text, str(response.url))
+                except FetchCancelled:
+                    return ""
+                except httpx.HTTPStatusError as exc:
+                    status = exc.response.status_code
+                    if settings.bypass_url and (status == 403 or status >= 500):
+                        return bypass()
+                    if status != 429 and status < 500:
+                        return ""
+                    retry_after = exc.response.headers.get("Retry-After")
+                except (httpx.TransportError, ssl.SSLError):
+                    pass
+                if attempt >= CONNECT_RETRIES:
+                    return ""
+                delay = 0.5 * (2 ** attempt) + random.uniform(0, 0.2)
+                if retry_after:
+                    try:
+                        delay = max(delay, min(5.0, max(0.0, float(retry_after))))
+                    except ValueError:
+                        from email.utils import parsedate_to_datetime
+                        try:
+                            delay = max(delay, min(5.0, max(0.0, parsedate_to_datetime(retry_after).timestamp() - time.time())))
+                        except (ValueError, TypeError, OverflowError):
+                            pass
+                # Leave room for useful I/O rather than consuming the entire
+                # remaining window waiting to start an already doomed retry.
+                if budget.remaining() <= delay + 0.05:
+                    return ""
+                budget.wait(delay)
+        except FetchCancelled:
+            pass
+        except Exception as exc:
+            logger.warning(f"请求 {url} 异常: {exc}")
         return ""
 
 
@@ -318,48 +387,62 @@ def fetch_via_bypass(
     client_timeout = solver_timeout / 1000 + 30
 
     try:
-        with _BYPASS_LOCK, httpx.Client(
-            timeout=client_timeout, verify=False, trust_env=False
-        ) as client:
-            if base.endswith("/v1") or _is_flaresolverr(base):
-                endpoint = base if base.endswith("/v1") else f"{base}/v1"
-                body: dict = {"cmd": "request.get", "url": url, "maxTimeout": solver_timeout}
-                selected_proxy = settings.proxy if proxy_url is None else proxy_url
-                if selected_proxy:
-                    from urllib.parse import urlsplit, unquote
-                    proxy = urlsplit(selected_proxy)
-                    address = f'{proxy.scheme}://{proxy.netloc.rsplit("@", 1)[-1]}'
-                    body['proxy'] = {'url': address}
-                    if proxy.username:
-                        body['proxy'].update(username=unquote(proxy.username), password=unquote(proxy.password or ''))
-                # Byparr 的 LinkRequest 没有 cookies 字段，多给不会报错（被忽略），
-                # 代价只是它过不了 mgstage 那种靠 Cookie 的年龄门。
-                pairs = _cookie_pairs(clean_header_value(cookie))
-                if pairs:
-                    body["cookies"] = pairs
-                response = client.post(
-                    endpoint,
-                    json=body,
-                )
-                response.raise_for_status()
-                payload = response.json()
-                solution = payload.get("solution") or {}
-                html = solution.get("response") or ""
-                # 三家都填 status="ok"，但 Byparr 的老版本会漏掉这个字段。
-                # 只要 HTML 到手就认，别为一个缺字段丢掉已经抓回来的内容。
-                if payload.get("status") not in ("ok", None) and not html:
-                    message = payload.get("message") or payload.get("msg") or ""
-                    logger.warning(f"bypass 返回失败: {str(message)[:120]}")
-                    return ""
-                return FetchedPage(html, solution.get('url') or url)
-
-            # cloudflare-bypass-for-scraping 风格
-            response = client.get(f"{base}/html", params={"url": url})
-            response.raise_for_status()
-            return FetchedPage(response.text, url)
+        budget = current_budget()
+        with budget.acquire(_BYPASS_LOCK) if budget else _BYPASS_LOCK:
+            if budget:
+                solver_timeout = min(solver_timeout, max(1, int(budget.remaining() * 1000)))
+                client_timeout = min(client_timeout, budget.remaining())
+            with http_client(
+                timeout=client_timeout, verify=False, trust_env=False
+            ) as client:
+                return _fetch_bypass_response(client, base, url, cookie, proxy_url, solver_timeout, settings)
     except Exception as exc:
-        logger.warning(f"bypass 服务请求失败: {exc}")
+        if not isinstance(exc, FetchCancelled):
+            logger.warning(f"bypass 服务请求失败: {exc}")
         return ""
+
+
+def _fetch_bypass_response(client, base, url, cookie, proxy_url, solver_timeout, settings):
+    if base.endswith("/v1") or _is_flaresolverr(base):
+        endpoint = base if base.endswith("/v1") else f"{base}/v1"
+        budget = current_budget()
+        if budget:
+            budget.check()
+            solver_timeout = min(solver_timeout, max(1, int(budget.remaining() * 1000)))
+        body: dict = {"cmd": "request.get", "url": url, "maxTimeout": solver_timeout}
+        selected_proxy = settings.proxy if proxy_url is None else proxy_url
+        if selected_proxy:
+            from urllib.parse import urlsplit, unquote
+            proxy = urlsplit(selected_proxy)
+            address = f'{proxy.scheme}://{proxy.netloc.rsplit("@", 1)[-1]}'
+            body['proxy'] = {'url': address}
+            if proxy.username:
+                body['proxy'].update(username=unquote(proxy.username), password=unquote(proxy.password or ''))
+        # Byparr 的 LinkRequest 没有 cookies 字段，多给不会报错（被忽略），
+        # 代价只是它过不了 mgstage 那种靠 Cookie 的年龄门。
+        pairs = _cookie_pairs(clean_header_value(cookie))
+        if pairs:
+            body["cookies"] = pairs
+        response = client.post(
+            endpoint,
+            json=body,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        solution = payload.get("solution") or {}
+        html = solution.get("response") or ""
+        # 三家都填 status="ok"，但 Byparr 的老版本会漏掉这个字段。
+        # 只要 HTML 到手就认，别为一个缺字段丢掉已经抓回来的内容。
+        if payload.get("status") not in ("ok", None) and not html:
+            message = payload.get("message") or payload.get("msg") or ""
+            logger.warning(f"bypass 返回失败: {str(message)[:120]}")
+            return ""
+        return FetchedPage(html, solution.get('url') or url)
+
+    # cloudflare-bypass-for-scraping 风格
+    response = client.get(f"{base}/html", params={"url": url})
+    response.raise_for_status()
+    return FetchedPage(response.text, url)
 
 
 def _is_flaresolverr(base: str) -> bool:
@@ -376,12 +459,14 @@ def _is_flaresolverr(base: str) -> bool:
     is_flare = False
     try:
         # bypass 服务通常在内网，不能走系统代理
-        with httpx.Client(timeout=8, verify=False, trust_env=False) as client:
+        with http_client(timeout=8, verify=False, trust_env=False) as client:
             endpoint = base if base.endswith("/v1") else f"{base}/v1"
             response = client.post(endpoint, json={"cmd": "request.get", "url": ""})
             # 404/405 说明没有这个端点，其余（含参数校验失败的 4xx、
             # 解不开挑战的 500）都证明端点确实在
             is_flare = response.status_code not in (404, 405)
+    except FetchCancelled:
+        raise
     except Exception:
         pass
 

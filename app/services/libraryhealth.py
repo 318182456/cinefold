@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import copy
-import hashlib
 import re
 import threading
 from collections import defaultdict
@@ -13,11 +12,11 @@ from sqlalchemy import select
 
 from app.database.models import Code, MediaLink
 from app.database.session import session_scope
+from app.services.filehash import stable_digest
 
 _lock = threading.Lock()
 _state: dict = {"running": False, "done": 0, "total": 0, "result": None, "error": ""}
 # 大文件哈希只按 stat 身份缓存；任何内容/大小/时间变化都重新读取。
-_hashes: dict[tuple, str] = {}
 _PART = re.compile(r"(?:[-_. ](?:cd|part|disc|disk|vol)[-_. ]?\d+|[ ]?\(\d+\)|[-_. ][abde])$", re.I)
 _SAMPLE = re.compile(r"(?:\bsample\b|\btrailer\b|广告|预告)", re.I)
 
@@ -47,17 +46,7 @@ def _run(hashes: bool) -> None:
 
 
 def _digest(path: Path, stat) -> str:
-    key = (str(path), stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
-    if key not in _hashes:
-        digest = hashlib.sha256()
-        with path.open("rb") as stream:
-            for block in iter(lambda: stream.read(4 * 1024 * 1024), b""):
-                digest.update(block)
-        after = path.stat()
-        if (after.st_size, after.st_mtime_ns, after.st_ctime_ns) != (stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns):
-            raise ValueError("文件正在变化，稍后重新检查")
-        _hashes[key] = digest.hexdigest()
-    return _hashes[key]
+    return stable_digest(path, expected=stat)
 
 
 def scan(*, hashes: bool = False) -> dict:

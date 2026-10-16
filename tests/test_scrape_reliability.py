@@ -3,6 +3,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
+from pathlib import Path
 
 import pytest
 from PIL import Image
@@ -108,12 +109,96 @@ def test_busy_pool_deadline_is_bounded_and_reports_unqueried_sources(monkeypatch
     assert all(s['status'] == 'not_started' for s in result.sources)
 
 
+def test_parallel_movies_cannot_starve_each_others_source_requests(monkeypatch):
+    from app.modules import ladysite
+    from app.core import config
+    first_started, second_started = threading.Event(), threading.Event()
+    monkeypatch.setattr(config, 'get_settings', lambda: Settings(scrape_merge_grace=0))
+    monkeypatch.setattr(ladysite, '_sites_for_code', lambda code: tuple(f'source{i}' for i in range(6)))
+    def fetch(site, code):
+        if code == 'SONE-725':
+            first_started.set()
+            second_started.wait(1)
+        else:
+            second_started.set()
+        return {'code': code, 'title': 'Title'}
+    monkeypatch.setattr(ladysite, '_fetch_detail', fetch)
+    with ThreadPoolExecutor(max_workers=6) as sources, ThreadPoolExecutor(max_workers=2) as films:
+        monkeypatch.setattr(merge, '_POOL', sources)
+        monkeypatch.setattr(merge, '_SLOTS', threading.BoundedSemaphore(6))
+        try:
+            first = films.submit(merge.fetch_merged, 'SONE-725', 0.4)
+            assert first_started.wait(1)
+            second = films.submit(merge.fetch_merged, 'SONE-726', 0.4)
+            assert first.result(timeout=2)['title'] == 'Title'
+            assert second.result(timeout=2)['title'] == 'Title'
+        finally:
+            second_started.set()
+
+
 @pytest.mark.parametrize('code,lookup', [('ZSD-074-U', 'ZSD-074'), ('JUL-915-C', 'JUL-915'), ('483DAM-001', '483DAM-001')])
 def test_failed_examples_lookup_base_number_without_changing_numeric_prefix(monkeypatch, code, lookup):
     calls = []
     monkeypatch.setattr(merge, '_fetch_one', lambda value, timeout: calls.append(value) or {})
     merge.fetch_merged(code)
     assert calls == [lookup]
+
+
+def test_cover_only_hit_does_not_end_window_before_title(monkeypatch):
+    from app.modules import ladysite
+    from app.core import config
+    monkeypatch.setattr(config, 'get_settings', lambda: Settings(scrape_merge_grace=0))
+    monkeypatch.setattr(ladysite, '_sites_for_code', lambda code: ('cover', 'title'))
+    def fetch(site, code):
+        if site == 'cover':
+            return {'code': code, 'banner': 'https://images.example/cover.jpg'}
+        time.sleep(0.03)
+        return {'code': code, 'title': 'Actual movie title'}
+    monkeypatch.setattr(ladysite, '_fetch_detail', fetch)
+    assert merge.fetch_merged('SONE-725', timeout=0.5)['title'] == 'Actual movie title'
+
+
+def test_metadata_rejects_number_only_titles_and_deduplicates_lists():
+    assert merge.clean_detail({'title': 'MXGS-783-C', 'cn_title': 'MXGS-783'}, 'MXGS-783-C') == {}
+    result = merge.clean_detail({'title': 'A real title', 'casts': ['甲', '甲', '乙'],
+                                 'genres': '标签,标签,其他'}, 'MXGS-783')
+    assert result == {'title': 'A real title', 'casts': '甲,乙', 'genres': '标签,其他'}
+
+
+def test_merge_cancel_releases_real_async_network_worker(monkeypatch):
+    import asyncio
+    import httpx
+    from app.modules import ladysite
+    from app.modules.ladysite.transport import http_client
+    from app.core import config
+    running, closed = threading.Event(), threading.Event()
+    async def respond(request):
+        running.set()
+        try:
+            await asyncio.sleep(10)
+            return httpx.Response(200, text='late')
+        finally:
+            closed.set()
+    transport = httpx.MockTransport(respond)
+    monkeypatch.setattr(config, 'get_settings', lambda: Settings(scrape_merge_grace=0))
+    monkeypatch.setattr(ladysite, '_sites_for_code', lambda code: ('slow', 'fast'))
+    def fetch(site, code):
+        if site == 'fast':
+            assert running.wait(1)
+            return {'code': code, 'title': 'Ready'}
+        with http_client(transport=transport, timeout=10) as client:
+            client.get('https://source.example/detail')
+        return {}
+    monkeypatch.setattr(ladysite, '_fetch_detail', fetch)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        slots = threading.BoundedSemaphore(2)
+        monkeypatch.setattr(merge, '_POOL', pool)
+        monkeypatch.setattr(merge, '_SLOTS', slots)
+        result = merge.fetch_merged('SONE-725', timeout=1)
+        assert result['title'] == 'Ready'
+        assert closed.wait(1), 'HTTP coroutine should be cancelled when the merge ends'
+        assert slots.acquire(timeout=1) and slots.acquire(timeout=1)
+        slots.release(); slots.release()
 
 
 def test_capacity_timeout_is_not_reported_as_missing_metadata(scrape_case, monkeypatch):
@@ -187,6 +272,54 @@ def test_nfo_failure_never_registers_or_completes(scrape_case, db, monkeypatch):
         assert not session.scalars(select(MediaLink)).all()
         assert session.get(Code, 'SONE-725').status == CodeStatus.DOWNLOADED
     assert video.exists()
+
+
+def test_different_movies_prepare_concurrently_but_commit_serially(scrape_case, monkeypatch):
+    video, _ = scrape_case
+    other = video.with_name('SONE-726.mp4'); other.write_bytes(b'other-video')
+    from app.services import mediaduplicate
+    monkeypatch.setattr(mediaduplicate, 'check_existing', lambda code, items, provided=None: ({}, []))
+    barrier = threading.Barrier(2)
+    def load(code, *args, **kwargs):
+        barrier.wait(timeout=2)
+        return {'title': 'Title ' + code}
+    monkeypatch.setattr(scrape, 'load_group_meta', load)
+    monkeypatch.setattr(scrape, '_register', lambda *args: True)
+    original = scrape.nfo.write
+    guard = threading.Lock()
+    counts = {'current': 0, 'peak': 0}
+    def write(*args, **kwargs):
+        with guard:
+            counts['current'] += 1
+            counts['peak'] = max(counts['peak'], counts['current'])
+        try:
+            time.sleep(0.02)
+            return original(*args, **kwargs)
+        finally:
+            with guard:
+                counts['current'] -= 1
+    monkeypatch.setattr(scrape.nfo, 'write', write)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(scrape.scrape_file, path) for path in (video, other)]
+        assert all(f.result(timeout=3).ok for f in futures)
+    assert counts['peak'] == 1
+    assert not scrape._CODE_LOCKS
+
+
+def test_commit_rechecks_duplicates_created_during_network_wait(scrape_case, monkeypatch):
+    video, settings = scrape_case
+    from app.services import mediaduplicate
+    prepared = threading.Event()
+    def check(code, items, provided=None):
+        return ({}, ['New conflicting library file']) if prepared.is_set() else ({}, [])
+    monkeypatch.setattr(mediaduplicate, 'check_existing', check)
+    def load(*args, **kwargs):
+        prepared.set()
+        return {'title': 'Title'}
+    monkeypatch.setattr(scrape, 'load_group_meta', load)
+    result = scrape.scrape_file(video)
+    assert not result.ok and 'New conflicting' in result.error
+    assert not Path(settings.medialink_scrape_dir).exists()
 
 
 def test_registration_failure_rolls_back_and_retry_succeeds(scrape_case, db, monkeypatch):

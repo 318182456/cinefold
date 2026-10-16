@@ -137,12 +137,17 @@ def clean_detail(detail: dict, code: str = "") -> dict:
     for key in ('casts', 'genres', 'series', 'publisher', 'producer'):
         if key in result:
             values = [v.strip() for v in result[key].split(',')]
-            result[key] = ','.join(v for v in values if v and not re.fullmatch(r'[-—\s]+|\d+|暫無出演者資訊|暂无出演者信息|N/?A|Unknown', v, re.I))
+            result[key] = ','.join(dict.fromkeys(v for v in values if v and not re.fullmatch(r'[-—\s]+|\d+|暫無出演者資訊|暂无出演者信息|N/?A|Unknown', v, re.I)))
             if not result[key]:
                 result.pop(key)
     for key in ("title", "cn_title"):
         if key in result and str(result[key]).casefold().strip(" .!…。\r\n") in _BAD_TITLES:
             result.pop(key)
+        if code and key in result:
+            # 本地占位 NFO 常把番号直接填入 title，不能当作已取得片名。
+            compact = lambda value: re.sub(r'[\s_-]+', '', value).casefold()
+            if compact(result[key]) in {compact(code), compact(base_code(code) or code)}:
+                result.pop(key)
     return result
 
 
@@ -285,12 +290,16 @@ def _fetch_one(code: str, timeout: float) -> dict:
 
     logger.info(f"[{code}] 多源刮削，检索 {len(sites)} 个源：{', '.join(sites)}")
     started = time.perf_counter()
+    from app.modules.ladysite.transport import FetchBudget
+    deadline = started + max(0, timeout)
+    budget = FetchBudget(deadline)
 
     fetch_detail = ladysite._fetch_detail
     def fetch(site: str) -> SourceResult:
         begin = time.perf_counter()
         try:
-            detail = fetch_detail(site, code)
+            with budget.activate():
+                detail = fetch_detail(site, code)
             if detail and not detail.get('code'):
                 return SourceResult(site, None, time.perf_counter() - begin, '来源未提供可验证番号')
             return SourceResult(site, detail, time.perf_counter() - begin)
@@ -299,7 +308,8 @@ def _fetch_one(code: str, timeout: float) -> dict:
         finally:
             _SLOTS.release()
 
-    workers = min(len(sites), ladysite.MAX_PARALLEL_SITES, _WORKERS)
+    # 批量同时准备两部影片，为另一部保留容量，避免先到的慢源占满全池。
+    workers = min(len(sites), ladysite.MAX_PARALLEL_SITES, max(1, _WORKERS // 2))
     schedule = list(range(len(sites)))
     # 中文补充源不应因为前六个站都卡住而永远没有启动机会。
     # 仅调整请求启动顺序，字段选择仍按用户配置的全局顺序。
@@ -307,7 +317,6 @@ def _fetch_one(code: str, timeout: float) -> dict:
         index = sites.index("airav")
         schedule.remove(index)
         schedule.insert(workers - 1, index)
-    deadline = started + max(0, timeout)
     grace = max(0, min(30, getattr(get_settings(), "scrape_merge_grace", 3)))
     merge_deadline = deadline
     pending, completed, reports = {}, {}, {}
@@ -329,33 +338,42 @@ def _fetch_one(code: str, timeout: float) -> dict:
             pending[future] = index
             next_index += 1
 
-    submit_available()
-    while pending or next_index < len(sites):
-        remaining = merge_deadline - time.perf_counter()
-        if remaining <= 0:
-            break
-        if not pending:
-            # 上一轮超时的网络请求可能仍占着全部线程。等待容量恢复，
-            # 不能把“尚未发出请求”当成所有站点都没有资料。
-            time.sleep(min(0.05, remaining))
-            submit_available()
-            continue
-        ready, _ = wait(pending, timeout=remaining, return_when=FIRST_COMPLETED)
-        if not ready:
-            break
-        for future in ready:
-            index = pending.pop(future)
-            result = future.result()
-            cleaned = clean_detail(result.detail or {}, code)
-            if cleaned:
-                completed[index] = SourceResult(result.site, {'code': code, **cleaned}, result.elapsed)
-                merge_deadline = min(merge_deadline, time.perf_counter() + grace)
-                status = "hit"
-            else:
-                status = "error" if result.error else "empty"
-            reports[index] = {"site": result.site, "status": status, "elapsed": round(result.elapsed, 3)}
-            logger.info(f"[{code}] {result.site}: {status}，{result.elapsed:.2f}s")
+    try:
         submit_available()
+        while pending or next_index < len(sites):
+            remaining = merge_deadline - time.perf_counter()
+            if remaining <= 0:
+                break
+            if not pending:
+                # 上一轮超时的网络请求可能仍占着全部线程。等待容量恢复，
+                # 不能把“尚未发出请求”当成所有站点都没有资料。
+                time.sleep(min(0.05, remaining))
+                submit_available()
+                continue
+            ready, _ = wait(pending, timeout=remaining, return_when=FIRST_COMPLETED)
+            if not ready:
+                break
+            for future in ready:
+                index = pending.pop(future)
+                result = future.result()
+                cleaned = clean_detail(result.detail or {}, code)
+                if cleaned:
+                    completed[index] = SourceResult(result.site, {'code': code, **cleaned}, result.elapsed)
+                    # 封面/评分先返回不代表拿到了片名，不能提前终止主要来源。
+                    if cleaned.get('title') or cleaned.get('cn_title'):
+                        merge_deadline = min(merge_deadline, time.perf_counter() + grace)
+                    status = "hit"
+                else:
+                    status = "error" if result.error else "empty"
+                reports[index] = {"site": result.site, "status": status, "elapsed": round(result.elapsed, 3)}
+                if result.error:
+                    reports[index]['error'] = result.error
+                logger.info(f"[{code}] {result.site}: {status}，{result.elapsed:.2f}s")
+            submit_available()
+
+    finally:
+        # 取消异步HTTP及过盾排队，避免上一轮继续占满来源线程。
+        budget.cancel()
 
     reason = "merge_window" if merge_deadline < deadline else "timeout"
     for future, index in pending.items():

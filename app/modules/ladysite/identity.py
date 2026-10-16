@@ -3,22 +3,39 @@ from __future__ import annotations
 
 import json
 import re
+import unicodedata
 from urllib.parse import unquote, urlparse
 
 from pyquery import PyQuery
 
-from app.utils import find_serial_number, find_serial_numbers, get_true_code
+from app.utils import CODE_PATTERN, find_serial_numbers, get_true_code
+
+
+def normalize_code(value: str) -> str:
+    """只规范页面番号的字符和空白，不将不同序号补零成同一作品。"""
+    text = unicodedata.normalize('NFKC', value or '')
+    text = re.sub(r'\s+', ' ', text).strip()
+    text = re.sub(r'\s*([-_])\s*', r'\1', text)
+    return get_true_code(text)
+
+
+def _page_codes(text: str) -> list[str]:
+    text = unicodedata.normalize('NFKC', text or '')
+    direct = normalize_code(text)
+    # 文件名提取器会解释 DMM 的五位补零；页面身份不能套用该推断。
+    return [direct] if direct else [normalize_code(m[1]) for m in CODE_PATTERN.finditer(text)]
 
 
 def same_code(actual: str, expected: str) -> bool:
     from app.modules.scrape.merge import base_code
-    left, right = find_serial_number(actual) or get_true_code(actual), get_true_code(expected)
+    left, right = normalize_code(actual), normalize_code(expected)
     return bool(left and right and (base_code(left) or left) == (base_code(right) or right))
 
 
 def validate_page(html: str, final_url: str, expected: str) -> bool:
     """优先采用详情页编号/结构化编号，其次才是有编号的详情地址。"""
-    if not html:
+    expected = normalize_code(expected)
+    if not html or not expected:
         return False
     url = unquote(final_url or '')
     cid = re.search(r'(?:cid=|[?&]id=)([a-z0-9_]+)', url, re.I)
@@ -45,9 +62,9 @@ def validate_page(html: str, final_url: str, expected: str) -> bool:
         for node in doc('.info p, .movie-panel-info .panel-block, table tr').items():
             text = node.text()
             if re.search(r'識別碼|识别码|品番|商品番号|識別番号', text):
-                codes = find_serial_numbers(text)
-                if codes:
-                    return any(same_code(c, expected) for c in codes)
+                # 明确的主番号字段即使为空/损坏，也不能退回推荐列表或 URL。
+                value = re.sub(r'^.*?(?:識別碼|识别码|品番|商品番号|識別番号)\s*[:：]?\s*', '', text, count=1)
+                return same_code(value, expected)
     if isinstance(payload, dict):
         data = payload.get('data', payload)
         if isinstance(data, dict):
@@ -58,7 +75,7 @@ def validate_page(html: str, final_url: str, expected: str) -> bool:
     if doc is not None:
         for selector in ('h2.title strong:first-child', 'h3', 'h1', 'title'):
             text = doc(selector).eq(0).text()
-            codes = find_serial_numbers(text)
+            codes = _page_codes(text)
             if codes:
                 return any(same_code(c, expected) for c in codes)
 

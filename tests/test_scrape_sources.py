@@ -1,5 +1,6 @@
 import os
 import time
+import threading
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -39,7 +40,7 @@ def env(tmp_path, monkeypatch):
         def __init__(self, *, target, args, **kwargs): self.target, self.args = target, args
         def start(self): tasks.append(self)
         def run(self): self.target(*self.args)
-    monkeypatch.setattr(sources.threading, 'Thread', DeferredThread)
+    monkeypatch.setattr(sources, 'Thread', DeferredThread)
     yield root, settings, factory, writes, tasks
     engine.dispose()
 
@@ -166,6 +167,31 @@ def test_failed_group_does_not_block_remaining_files_and_records_survive(env, mo
     with db() as session:
         assert session.get(ScrapeAttempt, sources.key(first)).status == 'failed'
         assert session.get(ScrapeAttempt, sources.key(second)).status == 'succeeded'
+
+
+def test_manual_batch_runs_two_movies_at_a_time(env, monkeypatch):
+    root, _, _, _, tasks = env
+    paths = [video(root, f'SONE-{number}.mp4') for number in (725, 726, 727)]
+    guard, barrier = threading.Lock(), threading.Barrier(2)
+    counts = {'running': 0, 'peak': 0, 'started': 0}
+    def run(code, items, **options):
+        with guard:
+            counts['running'] += 1
+            counts['started'] += 1
+            ordinal = counts['started']
+            counts['peak'] = max(counts['peak'], counts['running'])
+        try:
+            if ordinal <= 2:
+                barrier.wait(timeout=2)
+            return scrape.ScrapeResult(code=code, links=[items[0].path])
+        finally:
+            with guard:
+                counts['running'] -= 1
+    monkeypatch.setattr(scrape, 'scrape_group', run)
+    sources.start([{'path': str(path)} for path in paths])
+    tasks[0].run()
+    result = sources.state()
+    assert counts['peak'] == 2 and result['done'] == result['ok'] == 3
 
 
 def test_cancel_skips_queued_work_and_keeps_source_files(env, monkeypatch):

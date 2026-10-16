@@ -6,6 +6,8 @@ import os
 import threading
 import uuid
 from collections import defaultdict
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from threading import Thread
 from datetime import datetime
 from pathlib import Path
 
@@ -254,7 +256,7 @@ def start(entries: list[dict], *, overwrite: bool = False, refresh_metadata: boo
         for code, items in groups.items():
             record_attempt(items, code, status='queued', job_id=job_id)
         try:
-            threading.Thread(target=_run, args=(groups, job_id, overwrite, refresh_metadata, fetch_meta), daemon=True, name='manual-scrape').start()
+            Thread(target=_run, args=(groups, job_id, overwrite, refresh_metadata, fetch_meta), daemon=True, name='manual-scrape').start()
         except Exception:
             _STATE.update(running=False, error='启动刮削任务失败')
             raise
@@ -269,36 +271,63 @@ def cancel() -> dict:
 
 
 def _run(groups, job_id, overwrite, refresh_metadata, fetch_meta):
-    try:
-        for code, items in groups.items():
-            with _LOCK:
-                stop = _STATE['cancel_requested']
-                if not stop:
-                    _STATE['current'] = code
-            if stop:
-                record_attempt(items, code, status='cancelled', job_id=job_id)
-                continue
+    """两组影片并行准备网络资料；scrape 内部仍串行提交文件。"""
+    queue = iter(groups.items())
+
+    def process(code, items):
+        with _LOCK:
+            if _STATE['cancel_requested']:
+                return None
             record_attempt(items, code, status='running', job_id=job_id)
-            try:
-                for info in items:
-                    validate_file(str(info.path))
+        try:
+            for info in items:
+                validate_file(str(info.path))
+            with _LOCK, session_scope() as session:
                 existing = {}
-                with session_scope() as session:
-                    for row in session.scalars(select(MediaLink).where(MediaLink.source_path.in_([str(i.path) for i in items])).order_by(MediaLink.link_path)):
-                        existing.setdefault(row.source_path, Path(row.link_path))
-                result = scrape.scrape_group(code, items, fetch_meta=fetch_meta, overwrite=overwrite,
-                    refresh_metadata=refresh_metadata, existing_targets=existing)
-            except Exception as exc:
-                logger.exception(f"[{code}] 手动刮削任务失败")
-                result = scrape.ScrapeResult(code=code, error=str(exc))
-            record_attempt(items, code, status='succeeded' if result.ok else 'failed', job_id=job_id, error=result.error)
-            row = {'code': result.code, 'ok': result.ok, 'paths': [str(i.path) for i in items],
-                   'links': [str(p) for p in result.links], 'error': result.error, 'warnings': result.warnings,
-                   'sources': result.sources, 'nfo_written': result.nfo_written, 'images_written': result.images_written}
-            with _LOCK:
-                _STATE['results'].append(row)
-                _STATE['done'] += 1
-                _STATE['ok'] += int(result.ok)
+                for row in session.scalars(select(MediaLink).where(
+                        MediaLink.source_path.in_([str(i.path) for i in items])).order_by(MediaLink.link_path)):
+                    existing.setdefault(row.source_path, Path(row.link_path))
+            return scrape.scrape_group(code, items, fetch_meta=fetch_meta, overwrite=overwrite,
+                refresh_metadata=refresh_metadata, existing_targets=existing)
+        except Exception as exc:
+            logger.exception(f"[{code}] 手动刮削任务失败")
+            return scrape.ScrapeResult(code=code, error=str(exc))
+
+    try:
+        with ThreadPoolExecutor(max_workers=2, thread_name_prefix='scrape-film') as pool:
+            pending = {}
+
+            def schedule():
+                with _LOCK:
+                    while not _STATE['cancel_requested'] and len(pending) < 2:
+                        entry = next(queue, None)
+                        if entry is None:
+                            break
+                        code, items = entry
+                        pending[pool.submit(process, code, items)] = entry
+                    _STATE['current'] = '、'.join(code for code, _ in pending.values())
+
+            schedule()
+            while pending:
+                ready, _ = wait(pending, return_when=FIRST_COMPLETED)
+                for future in ready:
+                    code, items = pending.pop(future)
+                    result = future.result()
+                    if result is None:
+                        record_attempt(items, code, status='cancelled', job_id=job_id)
+                        continue
+                    record_attempt(items, code, status='succeeded' if result.ok else 'failed', job_id=job_id, error=result.error)
+                    row = {'code': result.code, 'ok': result.ok, 'paths': [str(i.path) for i in items],
+                           'links': [str(p) for p in result.links], 'error': result.error, 'warnings': result.warnings,
+                           'sources': result.sources, 'nfo_written': result.nfo_written, 'images_written': result.images_written}
+                    with _LOCK:
+                        _STATE['results'].append(row)
+                        _STATE['done'] += 1
+                        _STATE['ok'] += int(result.ok)
+                schedule()
+            # 取消时不再提交后续影片，保留源视频和持久化取消状态。
+            for code, items in queue:
+                record_attempt(items, code, status='cancelled', job_id=job_id)
     except Exception:
         logger.exception("[手动刮削] 任务异常中断")
         with _LOCK:

@@ -17,6 +17,7 @@ from pyquery import PyQuery
 
 from app.modules.ladysite.base import ActorInfo, CodeInfo, SiteClient
 from app.modules.ladysite.bus import Bus
+from app.modules.ladysite.identity import normalize_code, same_code
 from app.utils import get_true_code
 
 AVMOO_HOST = "https://avmoo.website"
@@ -42,7 +43,7 @@ class _MoovBase(Bus):
 
     def crawler_original(self, code: str) -> CodeInfo | None:
         """先搜索拿到 /movie/<hash>，再抓详情。"""
-        normalized = get_true_code(code)
+        normalized = normalize_code(code)
         if not normalized:
             return None
 
@@ -57,7 +58,7 @@ class _MoovBase(Bus):
         info = self.html_to_code(html, normalized)
         # 站点搜索是模糊匹配，详情页里的番号才是权威值。对不上说明搜到了
         # 别的片，宁可放弃交给下一个源，也不能把错数据写进库
-        if info and info.code and info.code != normalized:
+        if info and not same_code(info.code, normalized):
             logger.debug(f"[{normalized}] {self.name} 搜到的是 {info.code}，丢弃")
             return None
         return info
@@ -108,14 +109,16 @@ def html_to_detail_url(html: str, code: str, site: str = "avmoo") -> str:
         logger.debug(f"[{code}] {site} 解析搜索页失败: {exc}")
         return ""
 
-    target = get_true_code(code)
+    target = normalize_code(code)
+    if not target:
+        return ""
     for item in doc(".item").items():
         link = item("a").attr("href") or ""
         if not link:
             continue
         # 番号在 photo-info 的 <date> 里，与发行日期同标签，靠归一化区分
         for node in item("date").items():
-            if get_true_code((node.text() or "").strip()) == target:
+            if same_code(node.text() or "", target):
                 return link
     return ""
 

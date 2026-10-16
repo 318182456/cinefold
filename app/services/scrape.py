@@ -23,6 +23,7 @@ from __future__ import annotations
 import os
 import re
 import threading
+from contextlib import contextmanager
 from functools import wraps
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -43,12 +44,39 @@ from app.utils.mediafile import MediaFileInfo
 # 的连接数敏感，开大反而被限速
 IMAGE_WORKERS = 5
 _SCRAPE_LOCK = threading.RLock()
+_CODE_LOCKS: dict[str, list] = {}
+_CODE_LOCKS_GUARD = threading.Lock()
+
+
+@contextmanager
+def _code_lock(code: str):
+    """同影片串行，不让不同影片的联网等待占住全局写锁。"""
+    key = merge.base_code(code) or code
+    with _CODE_LOCKS_GUARD:
+        entry = _CODE_LOCKS.setdefault(key, [threading.RLock(), 0])
+        entry[1] += 1
+    try:
+        with entry[0]:
+            yield
+    finally:
+        with _CODE_LOCKS_GUARD:
+            entry[1] -= 1
+            if not entry[1]:
+                _CODE_LOCKS.pop(key)
+
+
+def _by_code(fn):
+    @wraps(fn)
+    def run(code, *args, **kwargs):
+        with _code_lock(code):
+            return fn(code, *args, **kwargs)
+    return run
 
 
 def _serialized(fn):
     @wraps(fn)
     def run(*args, **kwargs):
-        # 定时扫描、下载完成与手动入口共用，防止同时写同一份 NFO。
+        # 只保护产物提交；抓资料、下图、字幕与通知不占用全局锁。
         with _SCRAPE_LOCK:
             return fn(*args, **kwargs)
     return run
@@ -203,7 +231,7 @@ def _save_meta(code: str, detail: dict, overwrite: bool = False) -> None:
             return
         for key, value in merge.clean_detail(detail, code).items():
             existing = getattr(row, key, None)
-            if overwrite or existing in (None, "") or key in ("title", "cn_title") and not merge.clean_detail({key: existing}).get(key):
+            if overwrite or existing in (None, "") or key in ("title", "cn_title") and not merge.clean_detail({key: existing}, code).get(key):
                 setattr(row, key, value)
                 if overwrite and existing != value:
                     if key == "banner":
@@ -497,7 +525,7 @@ def scrape_file(
     )
 
 
-@_serialized
+@_by_code
 def scrape_group(
     code: str,
     items: list[MediaFileInfo],
@@ -571,6 +599,53 @@ def scrape_group(
     if stills_missing:
         result.warnings.append(f'剧照下载不完整：{len(image_set.stills)}/{len(still_urls)}')
 
+    result, registered_new = _commit_group(
+        code, playable, meta, settings, overwrite, target_dir, existing_targets,
+        image_set, stills_missing, result,
+    )
+    if result.links:
+        # 慢的字幕/AI请求放在提交锁之外；同一番号仍由 _code_lock 保护。
+        from app.services import medialink
+        for action in (medialink._fetch_subtitle_quietly, medialink._generate_review_quietly):
+            try:
+                action(code)
+            except Exception:
+                logger.exception(f"[{code}] 入库后的附加处理失败")
+                result.warnings.append("入库完成，字幕或看点处理失败，可稍后补全")
+    if result.ok and (result.nfo_written or registered_new) and getattr(settings, "scrape_notify", False):
+        try:
+            from html import escape
+            from app.modules.notify import get_notifiers
+            notifiers = get_notifiers()
+            sent = 0
+            text = f"刮削入库完成：{escape(code)}\n{escape(str(meta.get('cn_title') or meta.get('title') or ''))}\n{len(result.links)} 个影片文件"
+            for notifier in notifiers:
+                try:
+                    sent += bool(notifier.send_text_message(text))
+                except Exception:
+                    continue
+            if sent < len(notifiers):
+                result.warnings.append("入库完成，部分通知渠道发送失败")
+        except Exception:
+            result.warnings.append("入库完成，但通知发送失败")
+
+    logger.info(
+        f"[{code}] 刮削{'未完成' if result.error else '完成'}: {len(result.links)} 个产物, "
+        f"NFO {result.nfo_written}, 图片 {result.images_written}"
+        + (f", 跳过 {len(result.skipped)}" if result.skipped else "")
+    )
+    return result
+
+
+@_serialized
+def _commit_group(code, playable, meta, settings, overwrite, target_dir,
+                  existing_targets, image_set, stills_missing, result):
+    """重新核对重复项后提交文件，避免并发抓取期间的库内变化。"""
+    from app.services.mediaduplicate import check_existing
+    existing_targets, duplicates = check_existing(code, playable, existing_targets)
+    if duplicates:
+        result.error = '；'.join(duplicates)
+        return result, False
     total = len([i for i in playable if i.part > 0])
     linked_items = []
     failures = []
@@ -655,29 +730,7 @@ def scrape_group(
             update_result(linked_items, code)
         except Exception:
             logger.warning(f"[{code}] 源视频清单未能更新，后续扫描会重新核对")
-    if result.ok and (result.nfo_written or registered_new) and getattr(settings, "scrape_notify", False):
-        try:
-            from html import escape
-            from app.modules.notify import get_notifiers
-            notifiers = get_notifiers()
-            sent = 0
-            text = f"刮削入库完成：{escape(code)}\n{escape(str(meta.get('cn_title') or meta.get('title') or ''))}\n{len(result.links)} 个影片文件"
-            for notifier in notifiers:
-                try:
-                    sent += bool(notifier.send_text_message(text))
-                except Exception:
-                    continue
-            if sent < len(notifiers):
-                result.warnings.append("入库完成，部分通知渠道发送失败")
-        except Exception:
-            result.warnings.append("入库完成，但通知发送失败")
-
-    logger.info(
-        f"[{code}] 刮削{'未完成' if result.error else '完成'}: {len(result.links)} 个产物, "
-        f"NFO {result.nfo_written}, 图片 {result.images_written}"
-        + (f", 跳过 {len(result.skipped)}" if result.skipped else "")
-    )
-    return result
+    return result, registered_new
 
 
 def build_nfo_data(
@@ -768,9 +821,6 @@ def _register(code: str, items: list[MediaFileInfo], result: ScrapeResult) -> bo
 
     logger.info(f"[{code}] 已登记 {len(linked)} 条硬链接关联")
 
-    # 字幕和看点是附加处理，失败不回滚已登记的产物。
-    medialink._fetch_subtitle_quietly(code)
-    medialink._generate_review_quietly(code)
     return registered_new
 
 
