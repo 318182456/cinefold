@@ -59,6 +59,8 @@ class Carib:
 
         html = self.client.get(f"/moviepages/{path_code}/index.html")
         if not html:
+            html = self.client.get(f"/moviepages/{path_code.replace('-', '_')}/index.html")
+        if not html:
             return None
         return html_to_code(html, normalized, host=self.client.host)
 

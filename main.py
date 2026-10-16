@@ -4,6 +4,7 @@
 后面再改 sys.path 也换不掉已经进内存的模块。所以这里先 activate 再启动。
 """
 if __name__ == "__main__":
+    import os
     import time
 
     _boot = time.perf_counter()
@@ -29,8 +30,8 @@ if __name__ == "__main__":
     uvicorn.run(
         # 传对象而不是 "app.api:app"，上面已经导入过了，用字符串会再走一遍导入解析
         app=_app,
-        host="0.0.0.0",
-        port=56168,
+        host=os.environ.get('WEB_HOST', '0.0.0.0'),
+        port=int(os.environ.get('WEB_PORT', '56168')),
         reload=False,
         log_level="error",
     )

@@ -70,20 +70,26 @@ def fetch_for_code(code: str, force: bool = False, manual: bool = False) -> int:
 
     from app.modules import subtitle as subtitle_module
 
-    item = subtitle_module.search(code)
-    if item is None:
-        return 0
-
     written = 0
     done: list[Path] = []
-    for video in targets:
-        if _write_beside(video, item):
-            written += 1
-            done.append(video)
+    from app.utils import mediafile
+    infos = [mediafile.parse(p) for p in targets]
+    mediafile.resolve_sibling_parts(infos)
+    by_part: dict[int, list[Path]] = {}
+    for info in infos:
+        by_part.setdefault(info.part, []).append(info.path)
+    for part, videos in by_part.items():
+        item = subtitle_module.search(code, part=part) if part else subtitle_module.search(code)
+        if item is None:
+            continue
+        for video in videos:
+            if _write_beside(video, item):
+                written += 1
+                done.append(video)
 
     if written:
         _mark_subtitled(done)
-        logger.info(f"[字幕] {code} 已写入 {written} 处（来源 {item.site}）")
+        logger.info(f"[字幕] {code} 已按分段写入 {written} 处")
     return written
 
 

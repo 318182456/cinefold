@@ -37,7 +37,7 @@ _PART_PATTERNS = (
     # CD1 / cd-1 / CD 1
     re.compile(r"[-_\s.]cd[-_\s]?(\d{1,2})\s*$", re.IGNORECASE),
     # part1 / pt2 / p3（p 单独一个字母风险高，要求后面紧跟数字且在结尾）
-    re.compile(r"[-_\s.](?:part|pt)[-_\s]?(\d{1,2})\s*$", re.IGNORECASE),
+    re.compile(r"[-_\s.](?:part|pt|r)[-_\s]?(\d{1,2})\s*$", re.IGNORECASE),
     # 中文：第1集 / 上 下 —— 上下另作处理，这里只认数字
     re.compile(r"[-_\s.]?第\s*(\d{1,2})\s*[集片段部]\s*$"),
 )
@@ -49,9 +49,8 @@ _PART_PATTERNS = (
 # 这样 300MIUM-123 不会被劈成 300MIUM + 第 123 集（前缀 300MIUM 没有
 # 数字段，不合格），日期型 032416_267 也不会（前缀纯数字，不合格）。
 #
-# 序号上限 4：分集超过 4 的极少，而放宽会把 -10 -12 这类年份/画质残留
-# 也吞进来
-_PART_NUMERIC = re.compile(r"^(?P<head>.+?)[-_\s.](?P<num>[1-4])\s*$")
+# 支持两位数分段；完整年份和 1080 等画质值不在此范围。
+_PART_NUMERIC = re.compile(r"^(?P<head>.+?)[-_\s.](?P<num>[1-9]\d?)\s*$")
 
 # 字母式分集：-A / -B / -C ... 单独处理，因为要排掉版本后缀。
 #
@@ -106,7 +105,7 @@ _SUBBED_TOKENS = re.compile(
     r"(?:^|[-_\s.\[])(?:chinese\s*sub(?:title)?s?|中文字幕|中字|简中|繁中|zh|chs|cht)(?:$|[-_\s.\]])",
     re.IGNORECASE,
 )
-_SUBBED_SUFFIX = re.compile(r"-(?:C|CH|UCH)$", re.IGNORECASE)
+_SUBBED_SUFFIX = re.compile(r"-(?:C|CH|UC|UCH)$", re.IGNORECASE)
 
 # 预告片/样品。这些不是正片，绝不能当影片刮削 —— 它们和正片同目录同前缀，
 # 不排掉就会在媒体库里多出一堆几十秒的"影片"
@@ -365,8 +364,9 @@ def group_parts(paths: list[Path | str]) -> dict[str, list[MediaFileInfo]]:
     返回的 key 是番号，取不出番号的文件归到空串那组（调用方决定怎么处理）。
     """
     groups: dict[str, list[MediaFileInfo]] = {}
-    for raw in paths:
-        info = parse(raw)
+    infos = [parse(raw) for raw in paths]
+    resolve_sibling_parts(infos)
+    for info in infos:
         groups.setdefault(info.code, []).append(info)
 
     for items in groups.values():
@@ -377,6 +377,20 @@ def group_parts(paths: list[Path | str]) -> dict[str, list[MediaFileInfo]]:
         ))
         _resolve_collisions(items)
     return groups
+
+
+def resolve_sibling_parts(infos: list[MediaFileInfo]) -> None:
+    """只有同目录存在同番号 A、B 两段时，将 C 解释为第三段。"""
+    siblings: dict[tuple[Path, str], set[int]] = {}
+    for info in infos:
+        siblings.setdefault((info.path.parent, info.code), set()).add(info.part)
+    for info in infos:
+        if info.part or not info.code.endswith('-C'):
+            continue
+        base = info.code[:-2]
+        if {1, 2}.issubset(siblings.get((info.path.parent, base), set())):
+            info.code, info.part, info.part_raw = base, 3, 'C'
+            info.subbed = bool(_SUBBED_TOKENS.search(str(info.path)))
 
 
 def _resolve_collisions(items: list[MediaFileInfo]) -> None:

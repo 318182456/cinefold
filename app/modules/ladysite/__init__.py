@@ -37,7 +37,7 @@ ACTOR_SITES = frozenset({"javbus", "javdb", "avmoo", "avsox"})
 # 线程去撞必然 404 的地址不划算。它们由番号规则决定何时参与（见
 # _sites_for_code），规则本身配在数据源页面上、存在 datasource.code_rule。
 SPECIAL_SITES: tuple[str, ...] = (
-    "fc2", "fc2hub", "carib", "mgstage", "avsox", "madou", "madouqu", "theporndb",
+    "fc2", "fc2hub", "carib", "mgstage", "avsox", "madou", "madouqu", "theporndb", "avwiki",
 )
 
 
@@ -65,12 +65,18 @@ _SITE_CLASSES: dict[str, tuple[str, str]] = {
     "madouqu": ("madou", "Madouqu"),
     "xchina": ("xchina", "Xchina"),
     "hbox": ("hbox", "Hbox"),
+    "avwiki": ("avwiki", "AvWiki"),
 }
 
 
 def _get_site(name: str):
     entry = _SITE_CLASSES.get(name)
     if entry is None:
+        from app.modules.ladysite.sources import get_source
+        source = get_source(name)
+        if source and source.get('enabled') and source.get('parser') in ('http_json', 'http_html'):
+            from app.modules.ladysite.custom import CustomSource
+            return CustomSource(source)
         return None
 
     module_name, class_name = entry
@@ -108,6 +114,11 @@ def _ordered_sites(items: list[dict] | None = None) -> tuple[str, ...]:
         if items is None:
             items = enabled_parser_sources()
         ordered = [item["key"] for item in items]
+        custom = [item['key'] for item in items if item.get('parser') in ('http_json', 'http_html')]
+        if main in ('', 'all'):
+            sites = (*sites, *custom)
+        elif main in custom:
+            sites = (main,)
     except Exception as exc:
         logger.debug(f"读取数据源开关失败，按全部启用处理: {exc}")
         return fallback
@@ -281,6 +292,13 @@ def _fetch_detail(site_name: str, code: str) -> dict:
 
     elapsed = time.perf_counter() - started
     if info and info.title:
+        from app.modules.ladysite.identity import validate_page, same_code
+        client = getattr(site, 'client', None)
+        verified = getattr(info, 'identity_verified', False) or validate_page(
+            getattr(client, 'last_page', ''), getattr(client, 'last_url', ''), code)
+        if not same_code(info.code, code) or not verified:
+            logger.warning(f'[{code}] ← {site_name} 身份校验失败，丢弃全部字段')
+            return {}
         logger.info(f"[{code}] ← {site_name} 返回详情（{elapsed:.1f}s）：{info.title[:40]}")
         return info.to_dict()
 

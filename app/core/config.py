@@ -340,6 +340,7 @@ class Settings:
     scrape_scan_limit: int = 10
     scrape_notify: bool = True
     scrape_require_images: bool = False
+    scrape_poster_crop: str = 'auto'
     scrape_source_priority: dict = field(default_factory=dict)
     scrape_field_priority: dict = field(default_factory=dict)
     scrape_field_exclude: dict = field(default_factory=dict)
@@ -658,6 +659,7 @@ def load_settings() -> Settings:
         scrape_scan_limit=_env_int("SCRAPE_SCAN_LIMIT", 10),
         scrape_notify=_env_bool("SCRAPE_NOTIFY", True),
         scrape_require_images=_env_bool("SCRAPE_REQUIRE_IMAGES", False),
+        scrape_poster_crop=_env("SCRAPE_POSTER_CROP", 'auto'),
         scrape_source_priority=_env_json("SCRAPE_SOURCE_PRIORITY", {}),
         scrape_field_priority=_env_json("SCRAPE_FIELD_PRIORITY", {}),
         scrape_field_exclude=_env_json("SCRAPE_FIELD_EXCLUDE", {}),

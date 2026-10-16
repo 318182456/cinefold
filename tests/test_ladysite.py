@@ -1672,8 +1672,8 @@ class TestCodeRouting:
         from app.modules.ladysite import _sites_for_code
 
         sites = _sites_for_code("MDBK-001")
-        assert "madou" in sites
-        assert "javbus" not in sites
+        assert "madou" not in sites
+        assert "javbus" in sites
 
     def test_theporndb_skipped_without_token(self):
         """没配 Token 时接口必然 401，不该占一个并发位。

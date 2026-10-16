@@ -119,7 +119,7 @@ def repair_filename_codes() -> int:
             changed = False
             old_code = row.detected_code
             # DMM 的填充数字与视频编码后缀是明确的发行命名，其他非空番号不重猜。
-            cid = bool(_DMM_FILENAME.search(row.name))
+            cid = bool(_DMM_FILENAME.search(row.name) or re.search(r'(?i)MKBD[-_]S\d|H(?:4610|0930)[-_]|HEYDOUGA[-_]|[A-Z]{2,7}00\d{3}|\d[-_]U[-_]C', row.name))
             date_version = bool(re.fullmatch(r'\d{6}_\d{2,4}', old_code)) and info.code.startswith(old_code + '-')
             if (not row.detected_code or row.detected_code in wrong or cid or date_version or info.ignored) and row.detected_code != info.code:
                 row.detected_code, row.part = info.code, info.part
@@ -188,6 +188,11 @@ def _run(paths):
                 resolved, available = str(root), True
                 def onerror(exc):
                     errors.append(f'目录读取失败: {exc.filename}')
+                from app.services.scrape import inspect_source
+                from app.services.subtitle import _DirProbe
+                from app.services.sourceidentity import SourceIdentityResolver
+                subtitle_probe = _DirProbe()
+                identity_resolver = SourceIdentityResolver()
                 for folder, dirs, files in os.walk(root, followlinks=False, onerror=onerror):
                     dirs[:] = [d for d in dirs if d not in {'@eaDir', '#recycle', '.unwanted'} and not Path(folder, d).is_symlink()]
                     for name in files:
@@ -201,7 +206,7 @@ def _run(paths):
                             stat = path.stat()
                             if not path.is_file():
                                 continue
-                            info = mediafile.parse(path)
+                            info = inspect_source(path, subtitle_probe, identity_resolver)
                             target_links = links.get(source_key, [])
                             code = overrides.get(source_key) or info.code
                             status = 'pending'

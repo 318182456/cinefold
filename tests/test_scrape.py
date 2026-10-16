@@ -314,7 +314,7 @@ class Test图片落盘:
         )
         directory = tmp_path / scrape_images.EXTRAFANART_DIR
         assert sorted(p.name for p in directory.iterdir()) == [
-            "1.jpg", "2.jpg", "3.jpg",
+            "ABS-001-1.jpg", "ABS-001-2.jpg", "ABS-001-3.jpg",
         ]
 
     def test_剧照数量上限(self, tmp_path):
@@ -331,13 +331,14 @@ class Test图片落盘:
         video = tmp_path / "ABS-001.mp4"
         video.write_bytes(b"x")
         poster = tmp_path / "ABS-001-poster.jpg"
-        poster.write_bytes("用户自己换的图".encode("utf-8"))
+        original = _encode(400, 600)
+        poster.write_bytes(original)
         scrape_images.write_images(
             video,
             scrape_images.build_image_set(_encode(800, 538), [], ""),
             overwrite=False,
         )
-        assert poster.read_bytes() == "用户自己换的图".encode("utf-8")
+        assert poster.read_bytes() == original
 
 
 # ----------------------------------------------------------------------
@@ -501,9 +502,9 @@ class Test试算产物清单:
             ("poster", "ABS-001-poster.jpg"),
             ("fanart", "ABS-001-fanart.jpg"),
             ("thumb", "ABS-001-thumb.jpg"),
-            ("still", "extrafanart/1.jpg"),
-            ("still", "extrafanart/2.jpg"),
-            ("still", "extrafanart/3.jpg"),
+            ("still", "extrafanart/ABS-001-1.jpg"),
+            ("still", "extrafanart/ABS-001-2.jpg"),
+            ("still", "extrafanart/ABS-001-3.jpg"),
         ]
 
     def test_不下剧照时不列剧照(self, tmp_path):
@@ -648,11 +649,11 @@ class Test图源白名单:
         assert not _is_allowed("https://evil.com/x.jpg")
 
 
-class Test版本后缀回退:
+class Test版本后缀基础番号查询:
     """START-025-C 这类带版本后缀的番号，各资源站上都没有。
 
     后缀是本地用来区分中文字幕版/无码版的，站上只有一条 START-025 ——
-    拿带后缀的去查，每个站都返回「无此番号」，整部片一个字段都抓不到。
+    查询时直接使用基础番号，版本标记仅保留在本地产物中。
     """
 
     @pytest.mark.parametrize(
@@ -674,8 +675,8 @@ class Test版本后缀回退:
     def test_剥出基础番号(self, code, expect):
         assert merge.base_code(code) == expect
 
-    def test_抓到就不回退(self, monkeypatch):
-        """第一次就命中时不该再多抓一轮 —— 每轮是十几次跨境请求。"""
+    def test_版本号直接查基础番号(self, monkeypatch):
+        """字幕版本直接查基础番号，整轮只发起一次多源检索。"""
         calls = []
 
         def fake(code, timeout):
@@ -684,9 +685,9 @@ class Test版本后缀回退:
 
         monkeypatch.setattr(merge, "_fetch_one", fake)
         assert merge.fetch_merged("START-025-C")["title"] == "有结果"
-        assert calls == ["START-025-C"]
+        assert calls == ["START-025"]
 
-    def test_抓空才回退基础番号(self, monkeypatch):
+    def test_基础番号不被版本号查询耗尽超时(self, monkeypatch):
         calls = []
 
         def fake(code, timeout):
@@ -696,7 +697,7 @@ class Test版本后缀回退:
         monkeypatch.setattr(merge, "_fetch_one", fake)
         got = merge.fetch_merged("START-025-C")
         assert got["title"] == "基础番号的结果"
-        assert calls == ["START-025-C", "START-025"]
+        assert calls == ["START-025"]
 
     def test_无后缀时不做第二轮(self, monkeypatch):
         calls = []

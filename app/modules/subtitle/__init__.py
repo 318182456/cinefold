@@ -54,7 +54,7 @@ def _build(key: str):
     return site
 
 
-def search(code: str) -> SubtitleItem | None:
+def search(code: str, part: int = 0) -> SubtitleItem | None:
     """按番号找一条简体中文字幕。找不到返回 None。
 
     站点顺序即优先级，命中即返回 —— 字幕不像封面，多抓几个版本没有意义，
@@ -65,11 +65,14 @@ def search(code: str) -> SubtitleItem | None:
         return None
 
     for key in SUBTITLE_SITES:
+        # 尚未提供逐段字幕的网络源不能把整片字幕复制给每一段。
+        if part and key != 'subtitlelocal':
+            continue
         site = _build(key)
         if site is None:
             continue
         try:
-            item = site.search(code)
+            item = site.search(code, part=part) if part else site.search(code)
         except Exception as exc:
             # 单站不通不该影响后面的站
             logger.warning(f"[字幕] {key} 抓取 {code} 失败: {exc}")

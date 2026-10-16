@@ -31,7 +31,10 @@ T = TypeVar("T")
 # 否则会被通用分支切成 FC2-13472 这种错番号。
 CODE_PATTERN = re.compile(
     r"(?<![A-Za-z0-9])"
-    r"((?:FC2[-_ ]?PPV[-_ ]?\d{6,8})"
+    r"((?:HEYDOUGA[-_ ]\d{4}[-_ ](?:PPV[-_ ]?)?\d{2,6})"
+    r"|(?:(?:H4610|H0930|C0930)[-_ ][A-Za-z]{1,8}\d{2,6})"
+    r"|(?:MKBD[-_ ]S\d{2,5})"
+    r"|(?:FC2[-_ ]?PPV[-_ ]?\d{6,8})"
     r"|(?:FC2[-_ ]?\d{6,8})"
     # 日期型（032416_267，无码站的 MMDDYY_序号）。放在字母那几支之前，
     # 否则 Carib-032416_267 会先被前缀那支匹配成 CARIB-032416。
@@ -91,6 +94,10 @@ def normalize_serial_text(text: str) -> str:
             return f'{core}-CD{int(match[4]) + 1}'
         return core
     text = _DMM_FILENAME.sub(dmm, strip_site_domains(text))
+    # DMM 发行文件使用五位补零序号；只规整明确的 00xxx，不动正常 001/035。
+    text = re.sub(r'(?<![A-Za-z0-9])([A-Za-z]{2,7})[-_]?(00\d{3})(?!\d)',
+                  lambda m: f'{m[1]}-{int(m[2]):03d}', text)
+    text = re.sub(r'(?<=\d)[-_]U[-_]C(?:H)?(?![A-Za-z0-9])', '-UC', text, flags=re.IGNORECASE)
     text = _FILE_CODE_LETTER.sub(r'\1', text)
     text = re.sub(r'(?<=\d)[-_]?uncensored(?:[-_](C|CH))?(?![A-Za-z0-9])',
                   lambda m: '-UCH' if m[1] else '-U', text, flags=re.IGNORECASE)
@@ -163,7 +170,7 @@ def find_serial_numbers(text: str, limit: int = 0) -> list[str]:
 
 
 # 干净番号的样子，用于判断输入是否已经标准化
-_CLEAN_CODE = re.compile(r"[0-9]{0,4}[A-Z]+-\d{2,5}")
+_CLEAN_CODE = re.compile(r"(?:[0-9]{0,4}[A-Z][A-Z0-9]*-\d{2,5}|MKBD-S\d{2,5}|HEYDOUGA-\d{4}-\d{2,6}|(?:H4610|H0930|C0930)-[A-Z]+\d{2,6})")
 # 从"番号 + 后缀噪声"里框出番号那一段。右边界不能是字母数字，
 # 否则 ABP9841080P 这种连写会被劈成 ABP-984
 _CODE_HEAD = re.compile(r"^([0-9]{0,4}[A-Z]{2,6})-?(\d{2,5})(?![A-Za-z0-9])")
@@ -236,6 +243,10 @@ def get_true_code(code: str) -> str:
         return f"{date_match.group(1)}_{date_match.group(2)}"
 
     normalized = code.strip().upper().replace("_", "-").replace(" ", "-")
+    special = re.match(r'^(HEYDOUGA-\d{4}-(?:PPV-?)?\d{2,6}|(?:H4610|H0930|C0930)-[A-Z]+\d{2,6}|MKBD-S\d{2,5})(?![A-Z0-9])', normalized)
+    if special:
+        core = special[1].replace('-PPV-', '-').replace('-PPV', '-')
+        return _with_suffix(core, normalized[special.end():])
     # 番号必须同时含字母与数字
     if not (re.search(r"[A-Z]", normalized) and re.search(r"\d", normalized)):
         return ""

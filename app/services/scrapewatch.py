@@ -25,7 +25,7 @@ _OBSERVED: dict[str, tuple[int, int, float]] = {}
 _RETRY: dict[str, float] = {}
 
 
-def _complete(source: Path, code: str, links: list[str]) -> bool:
+def _complete(source: Path, code: str, links: list[str], require_images: bool = True) -> bool:
     for raw in links:
         target = Path(raw)
         try:
@@ -33,7 +33,7 @@ def _complete(source: Path, code: str, links: list[str]) -> bool:
                 continue
             if not local.read(target.with_suffix(".nfo"), code).get("title"):
                 continue
-            if all(target.with_name(f"{target.stem}-{kind}.jpg").is_file() for kind in ("poster", "fanart", "thumb")):
+            if not require_images or all(scrape.scrape_images.valid_file(target.with_name(f"{target.stem}-{kind}.jpg")) for kind in ("poster", "fanart", "thumb")):
                 return True
         except OSError:
             continue
@@ -80,7 +80,9 @@ def _scan(settings) -> int:
         for source, link in session.execute(select(MediaLink.source_path, MediaLink.link_path)):
             registered.setdefault(source, []).append(link)
         downloading = set(session.scalars(select(Code.code).where(Code.status == CodeStatus.DOWNLOADING)))
-        overrides = {a.source_key: a.code for a in session.scalars(select(ScrapeAttempt)) if a.code}
+        attempts = list(session.scalars(select(ScrapeAttempt)))
+        overrides = {a.source_key: a.code for a in attempts if a.code}
+        failed = {a.source_key for a in attempts if a.status == 'failed'}
 
     now = time.monotonic()
     wall = time.time()
@@ -119,8 +121,10 @@ def _scan(settings) -> int:
     # 先分组再跳过已入库分集，保持分集编号与冲突消解稳定。
     from app.services.scrapesources import group_entries, key, record_attempt
     entries = []
+    from app.services.sourceidentity import SourceIdentityResolver
+    identity_resolver = SourceIdentityResolver()
     for path in candidates:
-        code = overrides.get(key(path)) or mediafile.parse(path).code
+        code = overrides.get(key(path)) or scrape.inspect_source(path, identity_resolver=identity_resolver).code
         if code:
             entries.append({'path': str(path), 'code': code})
     groups = group_entries(entries)
@@ -130,7 +134,7 @@ def _scan(settings) -> int:
             continue
         if all(_RETRY.get(str(i.path), 0) > now for i in items):
             continue
-        if all(i.trailer or _complete(i.path, code, registered.get(str(i.path), [])) for i in items):
+        if all(i.trailer or key(i.path) not in failed and _complete(i.path, code, registered.get(str(i.path), []), settings.scrape_require_images) for i in items):
             continue
         if processed >= max(1, min(100, settings.scrape_scan_limit)):
             break

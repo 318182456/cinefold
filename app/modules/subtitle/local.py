@@ -63,9 +63,9 @@ class LocalSubtitle:
         # 番号 → 文件路径。第一次 search 时建，之后整轮复用 ——
         # 目录里可能有几千个文件，每部片都遍历一遍太浪费。
         # 不做失效：实例只在单轮补漏里活着，缓存活得越久读到的目录越旧
-        self._index: dict[str, Path] | None = None
+        self._index: dict[tuple[str, int], Path] | None = None
 
-    def search(self, code: str) -> SubtitleItem | None:
+    def search(self, code: str, part: int = 0) -> SubtitleItem | None:
         code = get_true_code(code)
         if not code:
             return None
@@ -74,11 +74,11 @@ class LocalSubtitle:
         if not index:
             return None
 
-        path = index.get(code)
+        path = index.get((code, part))
         if path is None:
             # 精确没中，再试剥掉版本后缀的形态：媒体库里是 SSNI-497-C，
             # 素材库里可能只放了 SSNI-497 的字幕，那是同一部片
-            path = index.get(_strip_version(code))
+            path = index.get((_strip_version(code), part))
         if path is None:
             return None
 
@@ -94,12 +94,12 @@ class LocalSubtitle:
             suffix=path.suffix.lower(),
         )
 
-    def _ensure_index(self) -> dict[str, Path]:
+    def _ensure_index(self) -> dict[tuple[str, int], Path]:
         if self._index is None:
             self._index = self._build_index()
         return self._index
 
-    def _build_index(self) -> dict[str, Path]:
+    def _build_index(self) -> dict[tuple[str, int], Path]:
         """扫目录，建「番号 → 文件」索引。
 
         递归子目录 —— 素材库常按厂牌或下载日期分文件夹，强求平铺不现实。
@@ -119,10 +119,11 @@ class LocalSubtitle:
             logger.warning(f"[字幕] 本地字幕库目录读不了: {exc}")
             return {}
 
-        index: dict[str, Path] = {}
+        from app.utils import mediafile
+        index: dict[tuple[str, int], Path] = {}
         count = 0
         try:
-            for path in directory.rglob("*"):
+            for path in sorted(directory.rglob("*")):
                 if path.suffix.lower() not in SUBTITLE_SUFFIXES:
                     continue
                 try:
@@ -132,9 +133,12 @@ class LocalSubtitle:
                     continue
 
                 count += 1
-                code = self._code_of(path)
-                if code and code not in index:
-                    index[code] = path
+                stem = re.sub(r'(?:[._-](?:zh[-_]?(?:cn|tw)|chs|cht))+$', '', path.stem, flags=re.I)
+                info = mediafile.parse(path.with_name(stem + path.suffix))
+                code = info.code or self._code_of(path)
+                identity = (_strip_version(code), info.part)
+                if code and identity not in index:
+                    index[identity] = path
         except OSError as exc:
             # 扫到一半失败（权限、网络盘掉线）时用已经建好的部分，
             # 有多少算多少，比整个源当不可用强

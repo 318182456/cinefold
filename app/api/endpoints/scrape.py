@@ -306,10 +306,16 @@ def _preview_sync(body: ScrapeRequest) -> dict:
             if p.is_file() and is_adoptable_video(p)
         ]
 
-    groups = mediafile.group_parts(videos)
+    groups = scrape_service.group_sources(videos)
     pending = groups.pop("", [])
 
-    if manual and pending:
+    if manual and target.is_file():
+        # 单文件与 scrape_file 保持一致：明确指定的番号覆盖文件名识别结果。
+        infos = [info for items in groups.values() for info in items] + pending
+        for info in infos:
+            info.code, info.western = manual, False
+        groups, pending = {manual: infos}, []
+    elif manual and pending:
         # 与 scrape_dir 同一规则：只认领认不出的，已认出的不动
         for info in pending:
             info.code = manual
@@ -443,11 +449,13 @@ def _preview_images(meta: dict, settings) -> dict:
     from app.utils import imagecache
 
     code = meta.get("code") or ""
+    from app.modules.scrape.images import should_crop
+    crop = should_crop(code, meta, getattr(settings, 'scrape_poster_crop', 'auto'))
 
     def resolve(url: str, kind: str, poster: bool = False) -> str:
         if not url:
             return ""
-        suffix = "&poster=1" if poster else ""
+        suffix = "&poster=1" if poster and crop else ""
         # 缓存命中就走本地，不必再跨境
         hit = imagecache.find_cached(url, code, kind)
         if hit is not None:
@@ -461,14 +469,17 @@ def _preview_images(meta: dict, settings) -> dict:
     relative = (meta.get("local_banner") or "").split(",")[0].strip()
     if meta.get("_local_cover") and meta.get("_local_video"):
         local = f"/api/v1/scrape/local-cover?path={quote(meta['_local_video'], safe='')}&code={quote(code)}"
-        poster, fanart = f"{local}&poster=1", local
+        poster, fanart = f"{local}&poster=1" if crop else local, local
     elif relative:
         local = f"/api/v1/image-local?path={quote(relative)}"
-        poster, fanart = f"{local}&poster=1", local
+        poster, fanart = f"{local}&poster=1" if crop else local, local
     else:
         source = meta.get("banner") or meta.get("poster") or ""
         poster = resolve(source, "banner", poster=True)
         fanart = resolve(source, "banner")
+
+    if meta.get('poster') and meta.get('poster') != meta.get('banner'):
+        poster = resolve(meta['poster'], 'poster', poster=True)
 
     stills = [
         resolve(u.strip(), "still")

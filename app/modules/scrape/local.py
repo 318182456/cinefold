@@ -13,6 +13,27 @@ MAX_SIDECAR_BYTES = 2 * 1024 * 1024
 VIDEO_SUFFIXES = {".mp4", ".mkv", ".avi", ".wmv", ".mov", ".m4v", ".ts", ".iso"}
 
 
+def identify(video: Path) -> str:
+    """文件名缺号时，从明确对应的本地侧车恢复身份，不联网。"""
+    candidates = [video.with_suffix('.nfo'), video.with_suffix('.json')]
+    try:
+        if sum(1 for p in video.parent.iterdir() if p.suffix.lower() in VIDEO_SUFFIXES) == 1:
+            candidates += [video.parent / 'movie.nfo', video.parent / 'movie.json']
+        for path in candidates:
+            if not path.is_file() or path.stat().st_size > MAX_SIDECAR_BYTES:
+                continue
+            raw = path.read_bytes()
+            data = json.loads(raw.decode('utf-8-sig')) if path.suffix == '.json' else _xml(raw)
+            if isinstance(data, dict):
+                for field in ('code', 'number', 'num'):
+                    value = get_true_code(str(data.get(field) or ''))
+                    if value and mediafile.find_serial_number(value) == value:
+                        return value
+    except (OSError, ValueError, LookupError, ET.ParseError):
+        pass
+    return ''
+
+
 def _same_code(left: str, right: str) -> bool:
     left = get_true_code(left) or left.upper().strip()
     right = get_true_code(right) or right.upper().strip()

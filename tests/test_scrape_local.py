@@ -38,12 +38,15 @@ def sidecar(tmp_path, *, code="ABS-001", title="本地标题"):
 
 def test_nfo_reads_local_artwork_and_preserves_language(tmp_path):
     video = sidecar(tmp_path)
+    from PIL import Image
+    image_path = tmp_path / 'fanart.jpg'
+    Image.new('RGB', (100, 100)).save(image_path)
     detail = local.read_group("ABS-001", [video])
     assert detail["title"] == "Original"
     assert detail["cn_title"] == "本地标题"
     assert detail["casts"] == "演员甲"
     assert detail["_local_cover"] == str((tmp_path / "fanart.jpg").resolve())
-    assert scrape._cover_bytes(detail, "ABS-001") == b"cover"
+    assert scrape._cover_bytes(detail, "ABS-001") == image_path.read_bytes()
 
 
 def test_wrong_number_cannot_contaminate_local_metadata(tmp_path):
@@ -190,3 +193,51 @@ def test_skipped_part_does_not_shift_source_registration(tmp_path, monkeypatch):
     monkeypatch.setattr(scrape, "_register", lambda code, items, result: recorded.extend(i.path for i in items))
     result = scrape.scrape_group("ABS-001", [parse(first), parse(second)])
     assert len(result.links) == 1 and recorded == [second]
+
+
+def test_single_file_preview_honors_explicit_number_and_keeps_subtitle_flag(db, tmp_path, monkeypatch):
+    from app.api.endpoints import scrape as api
+    from app.core.config import Settings
+    settings = Settings(medialink_scrape_dir=str(tmp_path / 'library'), scrape_still_limit=0)
+    monkeypatch.setattr(api, 'get_settings', lambda: settings)
+    monkeypatch.setattr(scrape, 'get_settings', lambda: settings)
+    folder = tmp_path / 'movies'; folder.mkdir()
+    video = folder / 'MXGS-783-C.mp4'; video.write_bytes(b'video')
+    with db() as session:
+        session.add(Code(code='MXGS-783', title='基础标题', casts='演员甲'))
+        session.commit()
+    result = api._preview_sync(api.ScrapeRequest(path=str(video), code='MXGS-783', fetch_meta=False))
+    item = result['data']['items'][0]
+    assert item['code'] == 'MXGS-783' and item['subbed']
+    assert item['has_meta'] and '基础标题' in item['nfo']
+    assert '<num>MXGS-783</num>' in item['nfo']
+
+
+def test_subtitle_version_preview_inherits_base_title_without_changing_output_number(db, tmp_path, monkeypatch):
+    from app.api.endpoints import scrape as api
+    from app.core.config import Settings
+    settings = Settings(medialink_scrape_dir=str(tmp_path / 'library'), scrape_still_limit=0)
+    monkeypatch.setattr(api, 'get_settings', lambda: settings)
+    monkeypatch.setattr(scrape, 'get_settings', lambda: settings)
+    folder = tmp_path / 'movies'; folder.mkdir()
+    video = folder / 'MXGS-783-C.mp4'; video.write_bytes(b'video')
+    with db() as session:
+        session.add(Code(code='MXGS-783', title='基础标题', casts='演员甲', banner='https://cover.test/image.jpg'))
+        session.commit()
+    result = api._preview_sync(api.ScrapeRequest(path=str(video), fetch_meta=False))
+    item = result['data']['items'][0]
+    assert item['code'] == 'MXGS-783-C' and item['has_meta']
+    assert '<num>MXGS-783-C</num>' in item['nfo'] and '基础标题' in item['nfo']
+    assert item['images']['poster']
+
+
+def test_directory_preview_manual_number_does_not_replace_recognized_movies(db, tmp_path, monkeypatch):
+    from app.api.endpoints import scrape as api
+    from app.core.config import Settings
+    settings = Settings(medialink_scrape_dir=str(tmp_path / 'library'))
+    monkeypatch.setattr(api, 'get_settings', lambda: settings)
+    monkeypatch.setattr(scrape, 'get_settings', lambda: settings)
+    (tmp_path / 'MXGS-783-C.mp4').write_bytes(b'video')
+    (tmp_path / 'unknown.mp4').write_bytes(b'video')
+    result = api._preview_sync(api.ScrapeRequest(path=str(tmp_path), code='SONE-725', fetch_meta=False))
+    assert {item['code'] for item in result['data']['items']} == {'MXGS-783-C', 'SONE-725'}

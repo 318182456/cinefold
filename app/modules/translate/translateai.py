@@ -256,7 +256,6 @@ class TranslateAI:
                             {"role": "system", "content": PROMPT},
                             {"role": "user", "content": text},
                         ],
-                        "temperature": 0.2,
                     },
                 )
                 response.raise_for_status()
@@ -267,6 +266,9 @@ class TranslateAI:
                 return ""
 
             choice = choices[0] or {}
+            if choice.get('finish_reason') in ('length', 'max_tokens'):
+                logger.warning('AI 翻译结果被截断，保留原文等待补翻译')
+                return ''
             message = choice.get("message") or {}
 
             # 有的网关把拒绝放在结构化字段里，内容那栏是空的

@@ -391,7 +391,8 @@ const GROUPS = [
         fields: [
           { k: 'scrape_still_limit', label: '剧照张数', t: 'number', ph: '5',
             hint: '落进影片旁的 extrafanart 目录。每张都要跨境下载，0 表示不下' },
-          { k: 'scrape_require_images', label: '严格校验图片', t: 'bool', hint: 'poster、thumb、fanart 任一缺失时不标记入库完成，自动扫描会重试' },
+          { k: 'scrape_require_images', label: '严格校验图片', t: 'bool', hint: '主图或已请求的剧照下载、写入失败时不标记完成' },
+          { k: 'scrape_poster_crop', label: '海报裁切', t: 'select', options: ['auto', 'always', 'never'], hint: 'auto 仅普通有码自动裁切；always 总是裁切宽图；never 保留完整图片' },
         ],
       },
     ],

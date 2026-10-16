@@ -35,6 +35,13 @@ def ordered(code: str, available, preferences: dict) -> list[str]:
 def validate(config: dict) -> str:
     from app.modules.ladysite import DETAIL_SITES, SPECIAL_SITES
     supported = set(DETAIL_SITES + SPECIAL_SITES)
+    from app.modules.ladysite.sources import enabled_parser_sources
+    try:
+        supported.update(s['key'] for s in enabled_parser_sources())
+    except Exception:
+        pass
+    if 'scrape_poster_crop' in config and config['scrape_poster_crop'] not in ('auto', 'always', 'never'):
+        return '海报裁切模式必须为 auto、always 或 never'
     if "scrape_watermark" in config:
         from app.modules.scrape.watermark import validate as validate_watermark
         error = validate_watermark(config["scrape_watermark"])

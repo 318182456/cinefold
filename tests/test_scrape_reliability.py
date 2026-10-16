@@ -38,9 +38,9 @@ def test_slow_source_does_not_extend_wait_and_airav_starts(monkeypatch):
     monkeypatch.setattr(ladysite, '_sites_for_code', lambda code: ('javbus', 'javdb', 'jav321', 'avbase', 'avmoo', 'dmm', 'airav'))
     def fetch(site, code):
         if site == 'airav':
-            return {'title': '快速结果'}
+            return {'code': code, 'title': '快速结果'}
         stop.wait(3)
-        return {'publisher': site}
+        return {'code': code, 'publisher': site}
     monkeypatch.setattr(ladysite, '_fetch_detail', fetch)
     with ThreadPoolExecutor(max_workers=6) as pool:
         monkeypatch.setattr(merge, '_POOL', pool)
@@ -207,3 +207,60 @@ def test_watermark_preview_is_read_only():
     got = watermark_preview(WatermarkPreviewRequest(config={'enabled': True}), 'admin')
     assert got['data']['image'].startswith('data:image/jpeg;base64,')
     assert got['data']['labels'] == ['sub', 'censored', '4K']
+
+
+def test_subtitle_version_reuses_cached_base_without_remote_fetch(db, monkeypatch):
+    from app import services
+    monkeypatch.setattr(services, '_ensure_codes', lambda codes: ensure_codes(db, codes))
+    with db() as session:
+        session.add(Code(code='MXGS-783', title='基础资料', casts='演员甲', genres='标签',
+                         duration='150', release_date='2015-07-16', banner='https://cover.test/base.jpg'))
+        session.commit()
+    monkeypatch.setattr(merge, 'fetch_merged', lambda *a, **kw: pytest.fail('已有完整基础资料，不能联网查 -C'))
+    got = scrape._load_meta('MXGS-783-C')
+    assert got['title'] == '基础资料' and got['code'] == 'MXGS-783-C'
+    with db() as session:
+        assert session.get(Code, 'MXGS-783-C').title == '基础资料'
+        assert session.get(Code, 'MXGS-783').title == '基础资料'
+
+
+def ensure_codes(factory, codes):
+    with factory() as session:
+        for code in codes:
+            if session.get(Code, code) is None:
+                session.add(Code(code=code))
+        session.commit()
+
+
+def test_version_specific_edits_win_over_base_metadata(db):
+    with db() as session:
+        session.add(Code(code='MXGS-783', title='原标题', casts='演员甲', banner='https://cover.test/base.jpg'))
+        session.add(Code(code='MXGS-783-C', cn_title='人工标题', banner='https://cover.test/custom.jpg'))
+        session.commit()
+    got = scrape._read_meta('MXGS-783-C')
+    assert got['title'] == '原标题' and got['cn_title'] == '人工标题'
+    assert got['banner'] == 'https://cover.test/custom.jpg' and got['casts'] == '演员甲'
+
+
+def test_subtitle_query_uses_full_timeout_for_base_and_preserves_empty_reports(monkeypatch):
+    calls = []
+    report = merge.MetadataResult([{'site': 'missav', 'status': 'timeout'}])
+    def fetch(code, timeout):
+        calls.append((code, timeout))
+        return report
+    monkeypatch.setattr(merge, '_fetch_one', fetch)
+    got = merge.fetch_merged('MXGS-783-C', timeout=25)
+    assert calls == [('MXGS-783', 25)]
+    assert not got and got.sources[0]['site'] == 'missav'
+
+
+def test_cached_base_remains_usable_when_remote_supplement_times_out(db, monkeypatch):
+    from app import services
+    monkeypatch.setattr(services, '_ensure_codes', lambda codes: ensure_codes(db, codes))
+    with db() as session:
+        session.add(Code(code='MXGS-783', title='已有基础资料', banner='https://cover.test/base.jpg'))
+        session.commit()
+    monkeypatch.setattr(merge, 'fetch_merged', lambda *a, **kw: merge.MetadataResult([{'site': 'missav', 'status': 'timeout'}]))
+    got = scrape._load_meta('MXGS-783-C')
+    assert got['title'] == '已有基础资料' and got['code'] == 'MXGS-783-C'
+    assert got['_sources'][0]['status'] == 'timeout'

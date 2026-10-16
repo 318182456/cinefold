@@ -24,6 +24,7 @@ fanart 用完整原图，不裁 —— 详情页大图本来就是横版。
 from __future__ import annotations
 
 import os
+import tempfile
 from dataclasses import dataclass, field
 from io import BytesIO
 from pathlib import Path
@@ -68,15 +69,43 @@ class ImageSet:
 
 def _load(data: bytes):
     """把字节读成 PIL Image。读不出返回 None。"""
-    if not data or len(data) < MIN_IMAGE_BYTES or Image is None:
+    if not data or Image is None:
         return None
+    image = None
     try:
         image = Image.open(BytesIO(data))
         image.load()
+        if min(image.size) < 16:
+            image.close()
+            return None
         return image
     except Exception as exc:
+        if image is not None:
+            image.close()
         logger.debug(f"[刮削] 图片解码失败: {exc}")
         return None
+
+
+def jpeg_bytes(data: bytes) -> bytes:
+    """校验完整图片并统一编码，错误页和损坏数据不落盘。"""
+    image = _load(data)
+    if image is None:
+        return b''
+    try:
+        result = BytesIO()
+        image.convert('RGB').save(result, format='JPEG', quality=92, optimize=True)
+        return result.getvalue()
+    finally:
+        image.close()
+
+
+def should_crop(code: str, meta: dict, mode: str = 'auto') -> bool:
+    from app.modules.scrape.preferences import category
+    if mode == 'never':
+        return False
+    if mode == 'always':
+        return True
+    return category(code) == 'censored' and 'VR' not in str(meta.get('genres', '')).upper()
 
 
 def crop_poster(data: bytes, portrait_side: str = "") -> bytes:
@@ -132,15 +161,24 @@ def _write_atomic(path: Path, data: bytes) -> bool:
     """原子写入。Emby 可能正在扫这个目录，不能让它读到半张图。"""
     if not data:
         return False
+    tmp = None
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-        tmp.write_bytes(data)
+        fd, name = tempfile.mkstemp(dir=path.parent, prefix=f'.{path.name}.', suffix='.tmp')
+        tmp = Path(name)
+        with os.fdopen(fd, 'wb') as handle:
+            handle.write(data)
         tmp.replace(path)
         return True
     except OSError as exc:
         logger.warning(f"[刮削] 写图片失败: {path} ({exc})")
         return False
+    finally:
+        if tmp is not None:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                logger.debug(f'[刮削] 图片临时文件暂无法清理: {tmp.name}')
 
 
 def planned_names(video_path: Path, still_count: int = 0) -> list[tuple[str, str]]:
@@ -158,7 +196,7 @@ def planned_names(video_path: Path, still_count: int = 0) -> list[tuple[str, str
         ("thumb", f"{stem}-thumb.jpg"),
     ]
     for index in range(1, min(still_count, MAX_STILLS) + 1):
-        names.append(("still", f"{EXTRAFANART_DIR}/{index}.jpg"))
+        names.append(("still", f"{EXTRAFANART_DIR}/{stem}-{index}.jpg"))
     return names
 
 
@@ -194,23 +232,25 @@ def write_images(
     ]
 
     for kind, name, data in targets:
-        if not data:
-            continue
         path = directory / name
-        if path.exists() and not overwrite:
+        if path.exists() and not overwrite and valid_file(path):
             written[kind] = name
             continue
-        if _write_atomic(path, data):
+        encoded = jpeg_bytes(data)
+        if encoded and _write_atomic(path, encoded):
             written[kind] = name
 
     if images.stills:
-        still_dir = directory / EXTRAFANART_DIR
-        for index, data in enumerate(images.stills[:MAX_STILLS], start=1):
-            path = still_dir / f"{index}.jpg"
-            if path.exists() and not overwrite:
+        complete = True
+        for (_, name), data in zip([x for x in planned_names(video_path, len(images.stills)) if x[0] == 'still'], images.stills):
+            path = directory / name
+            if path.exists() and not overwrite and valid_file(path):
                 continue
-            _write_atomic(path, data)
-        written["stills"] = EXTRAFANART_DIR
+            encoded = jpeg_bytes(data)
+            if not encoded or not _write_atomic(path, encoded):
+                complete = False
+        if complete:
+            written["stills"] = EXTRAFANART_DIR
 
     return written
 
@@ -219,6 +259,8 @@ def build_image_set(
     cover: bytes,
     stills: list[bytes] | None = None,
     portrait_side: str = "",
+    crop: bool = True,
+    poster: bytes = b'',
 ) -> ImageSet:
     """从下载好的封面与剧照组装 ImageSet。
 
@@ -226,8 +268,15 @@ def build_image_set(
     横版那张既是背景也是海报的来源。
     """
     return ImageSet(
-        poster=crop_poster(cover, portrait_side) if cover else b"",
-        fanart=cover,
-        stills=[s for s in (stills or []) if s and len(s) >= MIN_IMAGE_BYTES],
+        poster=jpeg_bytes(crop_poster(poster or cover, portrait_side) if crop else poster or cover),
+        fanart=jpeg_bytes(cover),
+        stills=[encoded for s in (stills or []) if (encoded := jpeg_bytes(s))],
         portrait_side=portrait_side,
     )
+
+
+def valid_file(path: Path) -> bool:
+    try:
+        return bool(jpeg_bytes(path.read_bytes()))
+    except OSError:
+        return False

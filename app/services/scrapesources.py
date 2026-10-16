@@ -116,8 +116,9 @@ def record_attempt(items, code: str, *, status: str, job_id: str = '', error: st
 
 def group_entries(entries: list[dict]):
     groups = defaultdict(list)
+    infos = []
     for entry in entries:
-        info = mediafile.parse(Path(entry['path']))
+        info = scrape.inspect_source(Path(entry['path']))
         if info.ignored:
             raise ValueError('广告视频已跳过，不参与刮削')
         if entry.get('code'):
@@ -125,10 +126,13 @@ def group_entries(entries: list[dict]):
             if not manual:
                 raise ValueError(f"无效的指定番号: {entry['code']}")
             info.code, info.western = manual, False
-            info.subbed |= manual.endswith(('-C', '-CH', '-UCH'))
+            info.subbed |= manual.endswith(('-C', '-CH', '-UC', '-UCH'))
             info.uncensored |= manual.endswith(('-U', '-UC', '-UCH'))
         if not info.code:
             raise ValueError(f"请先为视频指定番号: {info.path.name}")
+        infos.append(info)
+    mediafile.resolve_sibling_parts(infos)
+    for info in infos:
         groups[info.code].append(info)
     for items in groups.values():
         items.sort(key=lambda i: (i.part, i.path.name, str(i.path)))
@@ -210,6 +214,8 @@ def start(entries: list[dict], *, overwrite: bool = False, refresh_metadata: boo
     if refresh_metadata and not fetch_meta:
         raise ValueError("重新获取元数据时需要开启联网")
     normalized, seen = [], set()
+    from app.services.sourceidentity import SourceIdentityResolver
+    resolver = SourceIdentityResolver()
     with session_scope() as session:
         attempts = {a.source_key: a.code for a in session.scalars(select(ScrapeAttempt))}
         downloading = set(session.scalars(select(Code.code).where(Code.status == CodeStatus.DOWNLOADING)))
@@ -219,7 +225,7 @@ def start(entries: list[dict], *, overwrite: bool = False, refresh_metadata: boo
         if identity in seen:
             continue
         seen.add(identity)
-        info = mediafile.parse(path)
+        info = scrape.inspect_source(path, identity_resolver=resolver)
         code = entry.get('code', '').strip() or attempts.get(identity) or info.code
         code = get_true_code(code) if code else ''
         if not code:

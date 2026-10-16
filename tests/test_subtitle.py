@@ -805,6 +805,27 @@ def test_local_source_is_tried_first():
     assert SUBTITLE_SITES.index("subtitlelocal") < SUBTITLE_SITES.index("subtitlecat")
 
 
+def test_local_multipart_subtitles_never_reuse_other_part(tmp_path, monkeypatch, enabled):
+    from app.modules.subtitle.local import LocalSubtitle
+    from app.modules import subtitle as module
+    subs = tmp_path / 'subtitles'; subs.mkdir()
+    videos = tmp_path / 'videos'; videos.mkdir()
+    for part in (1, 2):
+        content = _LOCAL_ZH.replace('我们说过', f'第{part}段我们说过')
+        (subs / f'SDDE-561-CD{part}.zh-CN.srt').write_text(content, encoding='utf-8')
+        video = videos / f'SDDE-561-CD{part}.mp4'; video.write_bytes(b'video')
+        with session_scope() as session:
+            session.add(MediaLink(code='SDDE-561', link_path=str(video), source_path=str(video)))
+    site = LocalSubtitle(str(subs))
+    assert site.search('SDDE-561') is None
+    assert site.search('SDDE-561', part=3) is None
+    monkeypatch.setattr(module, '_build', lambda key: site if key == 'subtitlelocal' else pytest.fail('分段不得查整片字幕源'))
+    assert service.fetch_for_code('SDDE-561') == 2
+    for part in (1, 2):
+        text = (videos / f'SDDE-561-CD{part}.zh-CN.srt').read_text(encoding='utf-8')
+        assert f'第{part}段' in text and f'第{3-part}段' not in text
+
+
 def test_local_hit_writes_beside_video(enabled, library, subs_dir):
     """端到端：本地库命中后，字幕要落到影片旁边。"""
     settings = get_settings()

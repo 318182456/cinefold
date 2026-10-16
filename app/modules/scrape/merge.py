@@ -134,6 +134,12 @@ def clean_detail(detail: dict, code: str = "") -> dict:
             result[key] = ",".join(str(x).strip() for x in value if isinstance(x, str) and x.strip())
         else:
             result.pop(key)
+    for key in ('casts', 'genres', 'series', 'publisher', 'producer'):
+        if key in result:
+            values = [v.strip() for v in result[key].split(',')]
+            result[key] = ','.join(v for v in values if v and not re.fullmatch(r'[-—\s]+|\d+|暫無出演者資訊|暂无出演者信息|N/?A|Unknown', v, re.I))
+            if not result[key]:
+                result.pop(key)
     for key in ("title", "cn_title"):
         if key in result and str(result[key]).casefold().strip(" .!…。\r\n") in _BAD_TITLES:
             result.pop(key)
@@ -251,9 +257,7 @@ def fetch_merged(code: str, timeout: float | None = None) -> dict:
     首次命中后保留可配置的补全窗口，总等待不超过 timeout。
     超时仅停止等待，底层请求靠自身的网络超时结束。
 
-    带版本后缀的番号（START-025-C）在各站都查不到，抓空后自动退回
-    基础番号再试一次 —— 中文字幕版与原版的元数据本来就是同一份，
-    差别只在本地的文件名与条目。
+    本地字幕/无码版本直接按基础番号查询，避免把总超时耗在不存在的版本号上。
     """
     if not code:
         return {}
@@ -261,18 +265,10 @@ def fetch_merged(code: str, timeout: float | None = None) -> dict:
     from app.core.config import get_settings
     if timeout is None:
         timeout = max(1, min(300, getattr(get_settings(), "scrape_metadata_timeout", 25)))
-    started = time.perf_counter()
-
-    merged = _fetch_one(code, timeout)
-    if merged:
-        return merged
-
-    fallback = base_code(code)
-    remaining = timeout - (time.perf_counter() - started)
-    if fallback and remaining > 0:
-        logger.info(f"[{code}] 各源都没有，退回基础番号 {fallback} 再试")
-        return _fetch_one(fallback, remaining)
-    return merged
+    lookup = base_code(code) or code
+    if lookup != code:
+        logger.info(f"[{code}] 使用基础番号 {lookup} 获取元数据，保留本地版本标记")
+    return _fetch_one(lookup, timeout)
 
 
 def _fetch_one(code: str, timeout: float) -> dict:
@@ -295,6 +291,8 @@ def _fetch_one(code: str, timeout: float) -> dict:
         begin = time.perf_counter()
         try:
             detail = fetch_detail(site, code)
+            if detail and not detail.get('code'):
+                return SourceResult(site, None, time.perf_counter() - begin, '来源未提供可验证番号')
             return SourceResult(site, detail, time.perf_counter() - begin)
         except Exception as exc:
             return SourceResult(site, None, time.perf_counter() - begin, str(exc))
@@ -344,7 +342,7 @@ def _fetch_one(code: str, timeout: float) -> dict:
             result = future.result()
             cleaned = clean_detail(result.detail or {}, code)
             if cleaned:
-                completed[index] = SourceResult(result.site, cleaned, result.elapsed)
+                completed[index] = SourceResult(result.site, {'code': code, **cleaned}, result.elapsed)
                 merge_deadline = min(merge_deadline, time.perf_counter() + grace)
                 status = "hit"
             else:
@@ -368,6 +366,9 @@ def _fetch_one(code: str, timeout: float) -> dict:
     if not hit:
         return MetadataResult([reports[index] for index in sorted(reports)])
     merged = merge_details(results, code)
+    merged['_image_candidates'] = {'still_photo': list(dict.fromkeys(
+        r.detail['still_photo'] for r in results if r.detail.get('still_photo')
+    ))}
     merged["_sources"] = [reports[index] for index in sorted(reports)]
     return merged
 
@@ -401,8 +402,7 @@ def pick_best_image(candidates: list[tuple[str, bytes]]) -> tuple[str, bytes]:
             except Exception:
                 score = -1
         if score < 0:
-            # 尺寸读不出，退回体积。除以 1000 让它不至于压过真实面积分数
-            score = len(data) // 1000
+            continue
         if score > best_score:
             best_name, best_data, best_score = name, data, score
 

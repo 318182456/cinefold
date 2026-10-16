@@ -18,6 +18,7 @@ const draft = ref({})
 // 显式清除 Cookie。不能靠「输入框留空」表达 —— 框里从不回显已有值，
 // 留空是常态，那样每次只改间隔都会把 cookie 误清
 const clearCookie = ref(false)
+const clearProxy = ref(false)
 const creating = ref(false)
 const newSource = ref({})
 const removingKey = ref('')
@@ -74,12 +75,15 @@ async function load() {
 function openCreate() {
   newSource.value = {
     key: '', name: '', host: '', interval: 0, priority: 100, bypass_first: false,
+    parser: '', options_text: '{}', proxy: '',
   }
   creating.value = true
 }
 
 async function create() {
   const payload = { ...newSource.value }
+  try { payload.options = JSON.parse(payload.options_text || '{}') } catch { toast.error('解析规则需要合法 JSON'); return }
+  delete payload.options_text
   payload.interval = Number(payload.interval) || 0
   payload.priority = Number(payload.priority) || 100
 
@@ -263,6 +267,7 @@ const editingItem = computed(
 function open(item) {
   editing.value = item.key
   clearCookie.value = false
+  clearProxy.value = false
   draft.value = {
     host: item.host,
     interval: item.interval,
@@ -270,12 +275,19 @@ function open(item) {
     cookie: '',
     bypass_first: item.bypass_first,
     code_rule: item.code_rule || '',
+    parser: item.parser || '', options_text: JSON.stringify(item.options || {}, null, 2), proxy: '',
   }
 }
 
 async function save() {
   const key = editing.value
   const payload = { ...draft.value }
+  if (!editingItem.value?.builtin) {
+    try { payload.options = JSON.parse(payload.options_text || '{}') } catch { toast.error('解析规则需要合法 JSON'); return }
+  } else { delete payload.parser }
+  delete payload.options_text
+  if (clearProxy.value) payload.proxy = null
+  else if (!payload.proxy) delete payload.proxy
   // Cookie 框打开时不回显已有值（避免泄露到页面上），所以「留空」只能
   // 表示「不修改」—— 否则每次只改间隔都会把 cookie 误清掉。
   // 想真的清除得走 clearCookie 这个显式开关
@@ -540,6 +552,14 @@ onMounted(load)
     >
       <div class="card w-full max-w-md space-y-3">
         <p class="text-sm font-medium text-gray-200">{{ editing }} 设置</p>
+        <template v-if="!editingItem?.builtin">
+          <label class="label">解析方式</label>
+          <select v-model="draft.parser" class="input"><option value="">仅检查连通性</option><option value="http_json">JSON 接口</option><option value="http_html">网页 CSS 规则</option></select>
+          <textarea v-if="draft.parser" v-model="draft.options_text" class="input font-mono text-xs" rows="7" aria-label="自定义解析规则" />
+        </template>
+        <label class="label">独立代理（留空不修改）</label>
+        <input v-model="draft.proxy" class="input" type="password" autocomplete="new-password" placeholder="http://proxy:port" />
+        <label v-if="editingItem?.has_proxy" class="flex items-center gap-2 text-xs text-gray-400"><input v-model="clearProxy" type="checkbox" />清除独立代理，使用全局代理</label>
 
         <div>
           <label class="label">地址</label>
@@ -632,8 +652,15 @@ onMounted(load)
       <div class="card w-full max-w-md space-y-3">
         <p class="text-sm font-medium text-gray-200">添加数据源</p>
         <p class="text-[11px] text-gray-600">
-          自定义源没有解析器，只能做连通性测试，不参与抓取
+          可接入 JSON 接口或按 CSS 规则抓取网页，返回番号必须与目标一致。
         </p>
+        <label class="label">解析方式</label>
+        <select v-model="newSource.parser" class="input"><option value="">仅检查连通性</option><option value="http_json">JSON 接口</option><option value="http_html">网页 CSS 规则</option></select>
+        <template v-if="newSource.parser">
+          <label class="label">解析规则（JSON）</label>
+          <p class="text-xs text-gray-500">detail_url 包含 {code}；fields 填 JSON 字段路径，selectors 填 CSS 选择器。必须配置 code 和 title。</p>
+          <textarea v-model="newSource.options_text" class="input font-mono text-xs" rows="7" aria-label="新增源解析规则" />
+        </template>
 
         <div class="grid gap-3 sm:grid-cols-2">
           <div>

@@ -279,6 +279,8 @@ def sanitize_segment(text: str, max_length: int = MAX_SEGMENT) -> str:
     value = _TRAILING_DOTS.sub("", value)
     if len(value) > max_length:
         value = _TRAILING_DOTS.sub("", value[:max_length])
+    # 留出 .nfo / -poster.jpg / 剧照后缀的字节预算，不能按字符数假定 UTF-8 长度。
+    value = value.encode('utf-8')[:220].decode('utf-8', errors='ignore').rstrip('. ')
     if value.upper() in _RESERVED:
         # 保留名加个下划线就能用，比整段丢掉好
         value = f"{value}_"

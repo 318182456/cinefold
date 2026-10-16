@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import os
+import re
 import threading
 from functools import wraps
 from concurrent.futures import ThreadPoolExecutor
@@ -34,7 +35,7 @@ from app.core.config import get_settings
 from app.database.models import Code
 from app.database.session import session_scope
 from app.modules.scrape import images as scrape_images
-from app.modules.scrape import merge, naming, nfo
+from app.modules.scrape import merge, naming, nfo, preferences
 from app.utils import get_true_code, mediafile
 from app.utils.mediafile import MediaFileInfo
 
@@ -90,6 +91,10 @@ def _load_meta(code: str, fetch: bool = True, refresh: bool = False) -> dict:
     from app import services
 
     current = _read_meta(code)
+    if current and merge.base_code(code):
+        # 将复用的基础资料补到本地版本条目，列表和详情也能立即看到。
+        services._ensure_codes([code])
+        _save_meta(code, current)
     if not fetch or not refresh and not _needs_metadata(current):
         return current
 
@@ -108,6 +113,8 @@ def _load_meta(code: str, fetch: bool = True, refresh: bool = False) -> dict:
     sources = detail.get("_sources", []) or getattr(detail, "sources", [])
     if sources:
         meta["_sources"] = sources
+    if detail.get('_image_candidates'):
+        meta['_image_candidates'] = detail['_image_candidates']
     if refresh and not detail:
         meta["_refresh_failed"] = True
     return meta
@@ -116,12 +123,16 @@ def _load_meta(code: str, fetch: bool = True, refresh: bool = False) -> dict:
 def _read_meta(code: str) -> dict:
     with session_scope() as session:
         row = session.get(Code, code)
-        if row is None:
-            return {}
-        detail = merge.clean_detail(row.to_dict(), code)
+        base = merge.base_code(code)
+        original = session.get(Code, base) if base else None
+        inherited = merge.clean_detail(original.to_dict(), code) if original else {}
+        own = merge.clean_detail(row.to_dict(), code) if row else {}
+        detail = {**inherited, **own}
         if not detail:
             return {}
-        return {**detail, "code": row.code, "local_banner": row.local_banner or "", "portrait_side": row.portrait_side or ""}
+        return {**detail, "code": code,
+                "local_banner": (row.local_banner if row else '') or (original.local_banner if original else '') or '',
+                "portrait_side": (row.portrait_side if row else '') or (original.portrait_side if original else '') or ''}
 
 
 def _needs_metadata(meta: dict) -> bool:
@@ -220,8 +231,12 @@ def _context(meta: dict, info: MediaFileInfo, resolution: str = "") -> naming.Na
         source_path=str(info.path),
         # 标记只来自文件名与番号后缀，不做内容推断（issue #513）
         subtitle="中文字幕" if info.subbed else "",
-        mosaic="无码" if info.uncensored else "有码",
-        resolution=resolution,
+        mosaic="无码" if info.uncensored or preferences.category(info.code) in ('uncensored', 'fc2') else "有码",
+        resolution=resolution or next((label for pattern, label in (
+            (r'(?<![a-z0-9])(?:8k|4320p)(?![a-z0-9])', '8K'),
+            (r'(?<![a-z0-9])(?:4k|2160p)(?![a-z0-9])', '4K'),
+            (r'(?<!\d)1080p(?!\d)', '1080P'), (r'(?<!\d)720p(?!\d)', '720P'),
+        ) if re.search(pattern, str(info.path), re.I)), ''),
         part=info.part,
     )
 
@@ -297,7 +312,9 @@ def _download(urls: list[str], code: str) -> list[bytes]:
             ) as client:
                 response = client.get(url)
                 response.raise_for_status()
-                return response.content
+                if 'now_printing' in str(response.url).lower():
+                    return b''
+                return scrape_images.jpeg_bytes(response.content)
         except Exception as exc:
             logger.debug(f"[{code}] 图片下载失败 {url}: {exc}")
             return b""
@@ -321,7 +338,9 @@ def _cover_bytes(meta: dict, code: str, refresh: bool = False) -> bytes:
 
     if meta.get("_local_cover"):
         try:
-            return Path(meta["_local_cover"]).read_bytes()
+            data = Path(meta["_local_cover"]).read_bytes()
+            if scrape_images.jpeg_bytes(data):
+                return data
         except OSError:
             pass
 
@@ -330,7 +349,9 @@ def _cover_bytes(meta: dict, code: str, refresh: bool = False) -> bytes:
         path = imagecache.resolve_relative(relative)
         if path is not None and path.is_file():
             try:
-                return path.read_bytes()
+                data = path.read_bytes()
+                if scrape_images.jpeg_bytes(data):
+                    return data
             except OSError:
                 pass
 
@@ -360,8 +381,80 @@ def _cover_bytes(meta: dict, code: str, refresh: bool = False) -> bytes:
         for slot, data in zip(missing, fetched):
             candidates[slot] = (candidates[slot][0], data)
 
-    _, best = merge.pick_best_image(candidates)
+    # 横版背景优先保留 banner；不能被面积更大的竖版 poster 替代。
+    banner = [(name, data) for name, data in candidates if name.startswith('banner')]
+    _, best = merge.pick_best_image(banner)
+    if not best:
+        _, best = merge.pick_best_image(candidates)
     return best
+
+
+def _poster_bytes(meta: dict, code: str, refresh: bool = False) -> bytes:
+    """保留独立竖版海报，背景始终使用完整封面。"""
+    url = meta.get('poster') or ''
+    if not url or url == meta.get('banner'):
+        return b''
+    from app.utils import imagecache
+    cached = None if refresh else imagecache.find_cached(url, code, 'poster')
+    try:
+        candidates = [cached.read_bytes()] if cached else _download([url], code)
+    except OSError:
+        candidates = _download([url], code)
+    for data in candidates:
+        image = scrape_images._load(data)
+        if image is not None:
+            try:
+                if cached is None:
+                    imagecache.store(data, url, code, 'poster')
+                return data
+            finally:
+                image.close()
+    return b''
+
+
+def inspect_source(path: Path | str, subtitle_probe=None, identity_resolver=None) -> MediaFileInfo:
+    """统一入库解析，并读取可验证的本地编号及 A/B/C 兄弟分段。"""
+    from app.modules.scrape import local
+    info = mediafile.parse(path)
+    if not info.code and not info.ignored and not info.trailer:
+        info.code = local.identify(info.path)
+        if info.code:
+            info.western = False
+    if not info.code and not info.ignored and identity_resolver is not None:
+        info.code = identity_resolver.resolve(info.path)
+        if info.code:
+            info.western = False
+    if info.code.endswith('-C') and not info.part:
+        siblings = []
+        for letter in ('A', 'B'):
+            name = re.sub(r'(?<=\d)[-_]?C(?=$|[-_.])', '-' + letter, info.path.stem, count=1, flags=re.I)
+            sibling = info.path.with_name(name + info.path.suffix)
+            try:
+                if sibling != info.path and sibling.is_file():
+                    siblings.append(mediafile.parse(sibling))
+            except OSError:
+                pass
+        mediafile.resolve_sibling_parts([info, *siblings])
+    if not info.subbed:
+        from app.services.subtitle import _has_sidecar
+        info.subbed = subtitle_probe.has_sidecar(info.path) if subtitle_probe else _has_sidecar(info.path)
+    return info
+
+
+def group_sources(paths) -> dict[str, list[MediaFileInfo]]:
+    from app.services.subtitle import _DirProbe
+    from app.services.sourceidentity import SourceIdentityResolver
+    groups = {}
+    probe = _DirProbe()
+    resolver = SourceIdentityResolver()
+    infos = [inspect_source(p, probe, resolver) for p in paths]
+    mediafile.resolve_sibling_parts(infos)
+    for info in infos:
+        groups.setdefault(info.code, []).append(info)
+    for items in groups.values():
+        items.sort(key=lambda i: (i.part, i.path.name))
+        mediafile._resolve_collisions(items)
+    return groups
 
 
 def scrape_file(
@@ -377,7 +470,8 @@ def scrape_file(
     分集标记仍然从文件名读：人工指定的是「哪部片」，不是「哪一集」。
     ABS-001-CD2.mp4 指定番号 SSIS-999 时，产物应是 SSIS-999-CD2。
     """
-    info = mediafile.parse(path)
+    from app.services.sourceidentity import SourceIdentityResolver
+    info = inspect_source(path, identity_resolver=None if code else SourceIdentityResolver())
 
     manual = get_true_code(code) if code else ""
     if code and not manual:
@@ -452,8 +546,21 @@ def scrape_group(
     ][: max(0, settings.scrape_still_limit)]
     stills = _download(still_urls, code) if still_urls else []
     image_set = scrape_images.build_image_set(
-        cover, stills, meta.get("portrait_side") or ""
+        cover, stills, meta.get("portrait_side") or "",
+        crop=scrape_images.should_crop(code, meta, getattr(settings, 'scrape_poster_crop', 'auto')),
+        poster=_poster_bytes(meta, code, refresh_metadata),
     )
+    # 一个来源的剧照不可用时，使用本轮校验过身份的其他来源补全。
+    for urls in meta.get('_image_candidates', {}).get('still_photo', []):
+        if len(image_set.stills) >= len(still_urls):
+            break
+        alternatives = [u.strip() for u in urls.split(',') if u.strip()][:max(0, settings.scrape_still_limit)]
+        candidate = scrape_images.build_image_set(cover, _download(alternatives, code), crop=False)
+        if len(candidate.stills) > len(image_set.stills):
+            image_set.stills = candidate.stills
+    stills_missing = len(image_set.stills) < len(still_urls)
+    if stills_missing:
+        result.warnings.append(f'剧照下载不完整：{len(image_set.stills)}/{len(still_urls)}')
 
     total = len([i for i in playable if i.part > 0])
     linked_items = []
@@ -462,11 +569,14 @@ def scrape_group(
         info_total = total
         target = (existing_targets or {}).get(str(info.path)) or _target_path(meta, info, target_dir)
 
-        ok, note = _make_link(info.path, target)
-        if not ok:
-            result.skipped.append(note)
-            failures.append(note)
-            logger.warning(f"[{code}] {note}")
+        # 先检查冲突，不能先覆盖另一份视频的图片/NFO。
+        try:
+            conflict = target.exists() and not target.samefile(info.path)
+        except OSError as exc:
+            failures.append(f'无法检查目标文件: {exc}')
+            continue
+        if conflict:
+            failures.append(f'目标已存在且不是同一文件: {target}')
             continue
         from app.modules.scrape import watermark
         marked_images = watermark.apply(image_set, info, getattr(settings, "scrape_watermark", {}))
@@ -475,12 +585,18 @@ def scrape_group(
         )
         if written:
             result.images_written += 1
-        missing_images = [kind for kind in ("poster", "fanart", "thumb") if not target.with_name(f"{target.stem}-{kind}.jpg").is_file()]
+        missing_images = [kind for kind in ("poster", "fanart", "thumb") if not scrape_images.valid_file(target.with_name(f"{target.stem}-{kind}.jpg"))]
+        if image_set.stills and 'stills' not in written:
+            missing_images.append('stills')
         if missing_images:
             note = f"图片产物缺失（{', '.join(missing_images)}）: {target.name}"
             result.warnings.append(note)
             if getattr(settings, "scrape_require_images", False):
                 failures.append(note)
+        if getattr(settings, 'scrape_require_images', False) and (missing_images or stills_missing):
+            if stills_missing:
+                failures.append(f'剧照下载不完整: {target.name}')
+            continue
 
         data = build_nfo_data(
             code, meta, info,
@@ -499,6 +615,12 @@ def scrape_group(
                 failures.append(note)
                 result.skipped.append(note)
                 continue
+        # 元数据齐备后最后公开视频，让 Emby 首次扫描即可读到 NFO。
+        ok, note = _make_link(info.path, target)
+        if not ok:
+            result.skipped.append(note)
+            failures.append(note)
+            continue
         result.links.append(target)
         linked_items.append(info)
 
@@ -671,7 +793,7 @@ def scrape_dir(
     if not videos:
         return []
 
-    groups = mediafile.group_parts(videos)
+    groups = group_sources(videos)
     unknown = groups.pop("", [])
 
     if manual and unknown:

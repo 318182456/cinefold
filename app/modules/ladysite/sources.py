@@ -31,11 +31,11 @@ _DATE_CODE_RE = re.compile(r"^\d{6}[-_]\d{2,4}$")
 #
 # 番号前缀分组。前缀比对是"整段匹配"（MD 不会命中 MDBK，见 _matches_token），
 # 所以每个厂牌前缀都要列全，不能靠 MD 顺带覆盖 MDBK
-_DOMESTIC = "MD,MDX,MDBK,MDSJ,MDCM,MSD,MKY,MTVQ,TM,TMW,PME,JD,JDBC,91CM,91BCM,RS,XSJ,LY"
+_DOMESTIC = "MD,MDX,MDSJ,MDCM,MSD,MKY,MTVQ,TM,TMW,PME,JD,JDBC,91CM,91BCM,RS,XSJ,LY"
 _UNCENSORED = ("HEYZO,CARIB,1PONDO,10MUSUME,PACO,PACOPACOMAMA,MURAMURA,"
-               "GACHINCO,TOKYOHOT,KIN8,XXXAV,C0930,H0930,H4610")
+               "GACHINCO,TOKYOHOT,KIN8,XXXAV,C0930,H0930,H4610,HEYDOUGA,MKBD")
 _AMATEUR = ("SIRO,GANA,LUXU,MIUM,ARA,KNB,SCUTE,MAAN,CHN,ABW,"
-            "300MIUM,200GANA,259LUXU,261ARA,336KNB,390JAC")
+            "300MIUM,200GANA,259LUXU,261ARA,336KNB,390JAC,MFC,MFCN")
 
 # 日系有码源共用的排除规则：FC2 个人投稿、日期型与厂牌无码、国产片，
 # 这几类在这些站上基本查不到，问了也是白跑一次请求 + 占一个并发位。
@@ -98,6 +98,9 @@ SOURCES: tuple[dict, ...] = (
     # 素人系官方站，这类番号在二手站上信息往往缺失或错乱
     {"key": "mgstage", "name": "MGStage", "host": "https://www.mgstage.com",
      "parser": "mgstage", "bypass_first": True, "interval": 2.0,
+     "code_rule": f"only:{_AMATEUR}"},
+    {"key": "avwiki", "name": "AV-Wiki（素人资料）", "host": "https://av-wiki.net",
+     "parser": "avwiki", "bypass_first": True, "interval": 2.0,
      "code_rule": f"only:{_AMATEUR}"},
     # 收录面广（有码、FC2、国产都有），只排掉日期型无码
     {"key": "missav", "name": "MissAV", "host": "https://missav123.com",
@@ -187,7 +190,10 @@ def _default_priority(key: str) -> int:
 # 直接替换成新默认；用户自己写的规则不会恰好等于这些串。
 # 以后修订某个源的默认规则时，把旧串登记到这里，存量库才能跟上 ——
 # 否则默认值的演进永远到不了已部署的实例（backfill 只补 NULL 行）
-_SUPERSEDED_RULES: dict[str, tuple[str, ...]] = {}
+_SUPERSEDED_RULES: dict[str, tuple[str, ...]] = {
+    item['key']: (item['code_rule'].replace('MDX,MDSJ', 'MDX,MDBK,MDSJ').replace(',HEYDOUGA,MKBD', '').replace(',MFC,MFCN', ''),)
+    for item in SOURCES if 'MDX,MDSJ' in item.get('code_rule', '')
+}
 
 
 # ----------------------------------------------------------------------
@@ -422,7 +428,9 @@ def get_source(key: str) -> dict | None:
                 "cookie": row.cookie or "",
                 "bypass_first": row.bypass_first,
                 "code_rule": row.code_rule or "",
-                "parser": SOURCE_MAP.get(key, {}).get("parser", ""),
+                "parser": row.parser or SOURCE_MAP.get(key, {}).get("parser", ""),
+                "options": row.options or {},
+                "proxy": row.proxy,
             }
 
     item = SOURCE_MAP.get(key)
@@ -461,7 +469,7 @@ def _check_direct(url: str, timeout: float, key: str = "") -> tuple[str, str]:
         with httpx.Client(
             timeout=timeout,
             follow_redirects=True,
-            proxy=settings.proxy or None,
+            proxy=client_obj.proxy if client_obj is not None and client_obj.proxy is not None else settings.proxy or None,
             verify=False,
         ) as client:
             response = client.get(url, headers=headers)
@@ -484,7 +492,7 @@ def _check_direct(url: str, timeout: float, key: str = "") -> tuple[str, str]:
     return "ok", ""
 
 
-def _check_via_bypass(url: str) -> tuple[str, str]:
+def _check_via_bypass(url: str, proxy_url: str | None = None) -> tuple[str, str]:
     """走过盾服务测一个地址，返回 (status, message)。
 
     抓取链路对 bypass_first 的站就是这么取页面的，测试必须走同一条路，
@@ -493,7 +501,7 @@ def _check_via_bypass(url: str) -> tuple[str, str]:
     from app.modules.ladysite.base import fetch_via_bypass
 
     try:
-        html = fetch_via_bypass(url, quick=True)
+        html = fetch_via_bypass(url, quick=True, **({'proxy_url': proxy_url} if proxy_url else {}))
     except Exception as exc:
         return "fail", f"绕过服务异常：{type(exc).__name__}: {exc}"[:200]
 
@@ -532,7 +540,7 @@ def check_source(key: str, timeout: float = 12.0) -> dict:
     url = f"{host}{CHECK_PATH.get(key, '')}"
 
     if source.get("bypass_first") and has_bypass:
-        status, message = _check_via_bypass(url)
+        status, message = _check_via_bypass(url, source.get('proxy')) if source.get('proxy') else _check_via_bypass(url)
     else:
         status, message = _check_direct(url, timeout, key)
         # 直连被拦，抓取链路此时会改走过盾服务，测试也照做
@@ -540,7 +548,7 @@ def check_source(key: str, timeout: float = 12.0) -> dict:
             if not has_bypass:
                 message = f"{message}。需配置反爬绕过服务"
             else:
-                bypass_status, bypass_message = _check_via_bypass(url)
+                bypass_status, bypass_message = _check_via_bypass(url, source.get('proxy')) if source.get('proxy') else _check_via_bypass(url)
                 status = bypass_status
                 message = (
                     bypass_message if bypass_status == "ok"
@@ -572,7 +580,7 @@ def enabled_parser_sources() -> list[dict]:
         ).all()
         out = []
         for row in rows:
-            parser = SOURCE_MAP.get(row.key, {}).get("parser", "")
+            parser = row.parser or SOURCE_MAP.get(row.key, {}).get("parser", "")
             if not parser:
                 continue
             out.append({

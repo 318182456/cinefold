@@ -123,6 +123,13 @@ class SiteClient:
         self.interval = interval
         # 已知常年过盾的站点置 True，省掉一次必然 403 的直连
         self.bypass_first = bypass_first
+        self.last_page = ''
+        self.last_url = ''
+        self.proxy = None
+
+    def _remember(self, html: str, url: str) -> str:
+        self.last_page, self.last_url = html, str(getattr(html, 'url', url))
+        return html
 
     @classmethod
     def from_source(cls, key: str) -> "SiteClient | None":
@@ -138,12 +145,14 @@ class SiteClient:
         if not source.get("host"):
             return None
 
-        return cls(
+        client = cls(
             source["host"],
             cookie=source.get("cookie", ""),
             interval=source.get("interval") or MIN_INTERVAL_SECONDS,
             bypass_first=source.get("bypass_first", False),
         )
+        client.proxy = source.get('proxy') or None
+        return client
 
     @classmethod
     def reset_throttle(cls, key: str = "") -> None:
@@ -208,7 +217,7 @@ class SiteClient:
         # Cookie 必须一并带过去：mgstage 的 adc、dmm 的 age_check_done
         # 都是年龄门，丢了的话过盾拿回来的永远是确认页
         if (self.bypass_first if bypass_first is None else bypass_first) and settings.bypass_url:
-            return fetch_via_bypass(url, params, timeout, cookie=self.cookie)
+            return self._remember(fetch_via_bypass(url, params, timeout, cookie=self.cookie, **({'proxy_url': self.proxy} if self.proxy is not None else {})), url)
 
         headers = self.headers(kwargs.pop("headers", None))
 
@@ -218,21 +227,21 @@ class SiteClient:
                 with httpx.Client(
                     timeout=timeout,
                     follow_redirects=True,
-                    proxy=settings.proxy or None,
+                    proxy=self.proxy if self.proxy is not None else settings.proxy or None,
                     verify=False,
                     # 只认配置里的 PROXY，避免被宿主机环境变量里的代理劫持
                     trust_env=False,
                 ) as client:
                     response = client.get(url, headers=headers, params=params)
                     response.raise_for_status()
-                    return response.text
+                    return self._remember(response.text, str(response.url))
             except httpx.HTTPStatusError as exc:
                 status = exc.response.status_code
                 # 403/503 是典型的挑战页；502/504 多半是站点前面的防护层
                 # 掐了直连。两类都值得让 bypass 服务再试一次
                 if status in (403, 503) or status >= 500:
                     logger.info(f"{url} 返回 {status}，尝试通过 bypass 服务获取")
-                    return fetch_via_bypass(url, params, timeout, cookie=self.cookie)
+                    return self._remember(fetch_via_bypass(url, params, timeout, cookie=self.cookie, **({'proxy_url': self.proxy} if self.proxy is not None else {})), url)
                 logger.warning(f"请求 {url} 失败: {status}")
                 return ""
             except httpx.TimeoutException as exc:
@@ -240,7 +249,7 @@ class SiteClient:
                 # 但部分站点是对直连静默丢包而非返回挑战页，配了 bypass 就交给它
                 if settings.bypass_url:
                     logger.info(f"{url} 直连超时，尝试通过 bypass 服务获取")
-                    return fetch_via_bypass(url, params, timeout, cookie=self.cookie)
+                    return self._remember(fetch_via_bypass(url, params, timeout, cookie=self.cookie, **({'proxy_url': self.proxy} if self.proxy is not None else {})), url)
                 logger.warning(f"请求 {url} 超时: {exc}")
                 return ""
             except (httpx.TransportError, ssl.SSLError) as exc:
@@ -265,12 +274,20 @@ def _cookie_pairs(cookie: str) -> list[dict]:
     return out
 
 
+class FetchedPage(str):
+    def __new__(cls, text: str, url: str):
+        value = super().__new__(cls, text)
+        value.url = url
+        return value
+
+
 def fetch_via_bypass(
     url: str,
     params: dict | None = None,
     timeout: float = 60.0,
     quick: bool = False,
     cookie: str = "",
+    proxy_url: str | None = None,
 ) -> str:
     """通过用户自建的 bypass 服务抓取页面。
 
@@ -307,6 +324,14 @@ def fetch_via_bypass(
             if base.endswith("/v1") or _is_flaresolverr(base):
                 endpoint = base if base.endswith("/v1") else f"{base}/v1"
                 body: dict = {"cmd": "request.get", "url": url, "maxTimeout": solver_timeout}
+                selected_proxy = settings.proxy if proxy_url is None else proxy_url
+                if selected_proxy:
+                    from urllib.parse import urlsplit, unquote
+                    proxy = urlsplit(selected_proxy)
+                    address = f'{proxy.scheme}://{proxy.netloc.rsplit("@", 1)[-1]}'
+                    body['proxy'] = {'url': address}
+                    if proxy.username:
+                        body['proxy'].update(username=unquote(proxy.username), password=unquote(proxy.password or ''))
                 # Byparr 的 LinkRequest 没有 cookies 字段，多给不会报错（被忽略），
                 # 代价只是它过不了 mgstage 那种靠 Cookie 的年龄门。
                 pairs = _cookie_pairs(clean_header_value(cookie))
@@ -326,12 +351,12 @@ def fetch_via_bypass(
                     message = payload.get("message") or payload.get("msg") or ""
                     logger.warning(f"bypass 返回失败: {str(message)[:120]}")
                     return ""
-                return html
+                return FetchedPage(html, solution.get('url') or url)
 
             # cloudflare-bypass-for-scraping 风格
             response = client.get(f"{base}/html", params={"url": url})
             response.raise_for_status()
-            return response.text
+            return FetchedPage(response.text, url)
     except Exception as exc:
         logger.warning(f"bypass 服务请求失败: {exc}")
         return ""

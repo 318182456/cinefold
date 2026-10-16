@@ -84,6 +84,7 @@ def html_to_code(html: str, code: str = "") -> CodeInfo | None:
 
     info = CodeInfo(code=get_true_code(work.get("work_id") or code))
     info.title = (work.get("title") or "").strip()
+    info.outline = str(work.get('description') or work.get('outline') or '').strip()
     info.release_date = _js_date(work.get("min_date") or "")
 
     info.casts = join_list(
@@ -99,6 +100,7 @@ def html_to_code(html: str, code: str = "") -> CodeInfo | None:
         products[0] if products else {}
     )
     if product:
+        info.outline = info.outline or str(product.get('description') or '').strip()
         info.producer = ((product.get("maker") or {}).get("name") or "").strip()
         info.publisher = ((product.get("label") or {}).get("name") or "").strip()
         info.series = ((product.get("series") or {}).get("name") or "").strip()

@@ -123,6 +123,7 @@ def html_to_code(html: str, code: str = "", host: str = HOST) -> CodeInfo | None
         if heading.endswith(suffix):
             heading = heading[: -len(suffix)].strip(" -")
     info.title = heading
+    info.outline = (doc('.items_article_Contents, .items_article_Description').eq(0).text() or doc('meta[name="description"]').attr('content') or '').strip()
 
     # 卖家即投稿者，FC2 没有片商概念，落到 producer 上最贴近
     seller = (doc(".items_article_headerInfo .items_article_MainitemThumb a").text()
@@ -192,6 +193,8 @@ def hub_html_to_code(html: str, code: str = "", host: str = HUB_HOST) -> CodeInf
                 heading = heading[len(candidate):].strip(" -：:")
                 break
         info.title = heading
+    info.outline = (doc('.video-description, .description').eq(0).text() or doc('meta[name="description"]').attr('content') or '').strip()
+    info.producer = doc('a[href*="/seller"], a[href*="/users/"]').eq(0).text().strip()
 
     casts = [a.text() for a in doc('a[href*="/actress"], a[href*="/star"]').items()]
     if casts:

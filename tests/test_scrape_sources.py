@@ -88,7 +88,10 @@ def test_listing_shows_complete_missing_failed_and_interrupted(env):
     target = Path(settings.medialink_scrape_dir) / 'SONE-725.mp4'
     target.parent.mkdir(); os.link(original, target)
     nfo.write(target.with_suffix('.nfo'), nfo.NfoData(code='SONE-725', title='标题'))
-    for kind in ('poster', 'fanart', 'thumb'): target.with_name(f'{target.stem}-{kind}.jpg').write_bytes(b'image')
+    from io import BytesIO
+    from PIL import Image
+    image = BytesIO(); Image.new('RGB', (100, 100)).save(image, 'JPEG')
+    for kind in ('poster', 'fanart', 'thumb'): target.with_name(f'{target.stem}-{kind}.jpg').write_bytes(image.getvalue())
     with db() as session:
         session.add(MediaLink(code='SONE-725', source_path=str(original), link_path=str(target))); session.commit()
     scrapeinventory.refresh_now()

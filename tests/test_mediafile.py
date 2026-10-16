@@ -116,7 +116,7 @@ class Test分集识别:
             # 画质残留，不是第 1080 集
             "ABP-554-1080.mp4",
             # 分集号上限之外
-            "ABP-554-9.mp4",
+            "ABP-554-2026.mp4",
         ],
     )
     def test_不该认成分集(self, filename):

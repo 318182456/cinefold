@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Float, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, Float, Integer, String, Text, JSON
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database.base import DBBase
@@ -36,6 +36,9 @@ class DataSource(DBBase):
     # 形如 "only:FC2,SIRO" / "skip:MD,MDX" / 两条用 ; 分隔。
     # 为空表示不限制，什么番号都问。语法见 sources.parse_code_rule
     code_rule: Mapped[str | None] = mapped_column(Text, nullable=True)
+    parser: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    options: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    proxy: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # 软删除标记。内置源删掉后不能真删行，否则 sync_builtin_sources()
     # 下次启动就把它补回来了；置 True 让 sync 跳过，也留出恢复的余地
@@ -59,6 +62,9 @@ class DataSource(DBBase):
             "priority": self.priority,
             # cookie 只回传是否已配置，不外泄内容
             "has_cookie": bool(self.cookie),
+            "has_proxy": bool(self.proxy),
+            "parser": self.parser or '',
+            "options": self.options or {},
             "bypass_first": self.bypass_first,
             "code_rule": self.code_rule or "",
             "deleted": self.deleted,

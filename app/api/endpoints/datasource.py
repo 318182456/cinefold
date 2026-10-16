@@ -22,6 +22,9 @@ class SourceRequest(BaseModel):
     cookie: str | None = None
     bypass_first: bool | None = None
     code_rule: str | None = None
+    parser: str | None = None
+    options: dict | None = None
+    proxy: str | None = None
 
 
 class SourceCreateRequest(BaseModel):
@@ -33,6 +36,10 @@ class SourceCreateRequest(BaseModel):
     priority: int = 100
     cookie: str = ""
     bypass_first: bool = False
+    code_rule: str = ''
+    parser: str = ''
+    options: dict = {}
+    proxy: str = ''
 
 
 class ReorderRequest(BaseModel):
@@ -69,10 +76,10 @@ def list_datasources(current_user: str = Depends(get_current_user)):
                     removed.append({"key": row.key, "name": row.name})
                 continue
             item = row.to_dict()
-            item["has_parser"] = bool(SOURCE_MAP.get(row.key, {}).get("parser"))
+            item["has_parser"] = bool(row.parser or SOURCE_MAP.get(row.key, {}).get("parser"))
             item["builtin"] = is_builtin(row.key)
             item["protected"] = is_protected(row.key)
-            item["in_detail"] = row.key in detail_keys
+            item["in_detail"] = row.key in detail_keys or row.parser in ('http_json', 'http_html')
             # 用途分区：字幕源与番号源共用这张表，但页面上要分开列 ——
             # 混在一起时用户会以为字幕站也参与番号检索
             item["kind"] = SOURCE_MAP.get(row.key, {}).get("kind", "detail")
@@ -87,17 +94,24 @@ def create_datasource(
 ):
     """新增自定义数据源。
 
-    没有解析器，只能做连通性测试 —— 解析器要在代码里实现，加不进来。
+    可配置 JSON 字段路径或 CSS 选择器，也可只登记连通性探针。
     """
     key = (body.key or "").strip().lower()
     if not key:
         return ResponseEntity.fail("标识不能为空", code=400)
     if not key.replace("_", "").replace("-", "").isalnum():
         return ResponseEntity.fail("标识只能用字母、数字、下划线和连字符", code=400)
+    from app.modules.ladysite.sources import is_builtin
+    if is_builtin(key):
+        return ResponseEntity.fail('内置源请使用修改或恢复功能，不能覆盖为自定义解析器', code=409)
 
     host = (body.host or "").strip().rstrip("/")
     if not host:
         return ResponseEntity.fail("地址不能为空", code=400)
+    from app.modules.ladysite.custom import validate_options
+    error = validate_options(body.parser, body.options)
+    if error:
+        return ResponseEntity.fail(error, code=400)
 
     with session_scope() as session:
         row = session.scalar(select(DataSource).where(DataSource.key == key))
@@ -113,6 +127,7 @@ def create_datasource(
             row.priority = body.priority
             row.cookie = body.cookie or None
             row.bypass_first = body.bypass_first
+            row.parser, row.options, row.proxy, row.code_rule = body.parser, body.options, body.proxy, body.code_rule
             row.status = None
             row.status_message = None
             row.checked_time = None
@@ -127,6 +142,7 @@ def create_datasource(
             priority=body.priority,
             cookie=body.cookie or None,
             bypass_first=body.bypass_first,
+            parser=body.parser, options=body.options, proxy=body.proxy, code_rule=body.code_rule,
         ))
 
     return ResponseEntity.ok(message="已添加")
@@ -236,6 +252,14 @@ def update_datasource(
         if row is None or row.deleted:
             return ResponseEntity.fail(f"未知数据源 {key}", code=404)
 
+        if 'parser' in updates or 'options' in updates:
+            from app.modules.ladysite.sources import is_builtin
+            if is_builtin(key) and (updates.get('parser') or updates.get('options')):
+                return ResponseEntity.fail('内置源不能修改为自定义解析器', code=400)
+            from app.modules.ladysite.custom import validate_options
+            error = validate_options(updates.get('parser', row.parser) or '', updates.get('options', row.options) or {})
+            if error:
+                return ResponseEntity.fail(error, code=400)
         for field, value in updates.items():
             if field == "host" and value:
                 value = value.rstrip("/")
