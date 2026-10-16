@@ -23,6 +23,7 @@ let rebuildTimer, rebuildRequest = 0, rebuildPreviewPending = false
 const rebuildLocked = computed(() => !rebuildKnown.value || rebuild.value.running || rebuildBusy.value)
 const rebuildPlan = computed(() => rebuild.value.plan || null)
 const rebuildOutput = computed(() => rebuildPlan.value?.output_dir || rebuild.value.output_dir || '')
+const rebuildPreviewing = computed(() => rebuild.value.running && ['preview', 'previewing', 'planning'].includes(rebuild.value.phase))
 const rebuildCanRun = computed(() => !!rebuildPlan.value?.output_dir && !!rebuildReadyToken.value
   && rebuildReadyToken.value === rebuild.value.token && !rebuildLocked.value && !rebuild.value.error
   && !rebuildStatusError.value && !rebuild.value.protection_error && !job.value.running && !inventory.value.running
@@ -271,6 +272,10 @@ onUnmounted(() => { disposed = true; request++; rebuildRequest++; clearTimeout(t
     <p v-else class="text-xs text-gray-500">请先在设置 → 刮削 → 目录与命名中添加下载源目录。</p>
     <div v-if="inventory.running" class="rounded-lg bg-gray-800/40 p-3 text-xs text-brand">正在后台更新清单：已读取 {{ inventory.files }} 个视频，目录 {{ inventory.done }} / {{ inventory.total }}。可以继续查询已保存的视频。</div>
     <p v-if="inventory.errors?.length && !data.warnings.length" class="text-xs text-amber-400">{{ inventory.errors.join('；') }}</p>
+    <div class="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-amber-600/20 bg-amber-500/5 p-3">
+      <div><p class="text-sm text-gray-300">全部重新刮削</p><p class="mt-1 text-xs text-gray-500">自动处理全部下载源，无需勾选视频，不受搜索、筛选和分页影响。</p></div>
+      <button class="btn-ghost !text-xs text-amber-400" @click="openRebuild">全部重新刮削</button>
+    </div>
     <form class="flex flex-wrap gap-2" @submit.prevent="search">
       <select v-model="root" class="input !w-auto max-w-full" aria-label="筛选源目录" @change="search"><option value="">全部下载源</option><option v-for="item in data.roots" :key="item.path" :value="item.path">{{ item.path }}</option></select>
       <input v-model="keyword" class="input min-w-36 flex-1" placeholder="搜索文件名、路径、番号或标题" aria-label="搜索源视频" />
@@ -280,7 +285,6 @@ onUnmounted(() => { disposed = true; request++; rebuildRequest++; clearTimeout(t
     <div class="flex flex-wrap items-center gap-3 border-t border-gray-800 pt-3">
       <label class="flex cursor-pointer items-center gap-2 text-xs text-gray-400"><input type="checkbox" :checked="allSelected" aria-label="选择当前页可处理视频" @change="toggleAll" />全选当前页</label>
       <button class="btn-primary !px-3 !py-1.5 !text-xs" :disabled="rebuildLocked || !selectedRows.length || job.running" @click="open(selectedRows)">批量刮削{{ selectedRows.length ? ` · ${selectedRows.length}` : '' }}</button>
-      <button class="btn-ghost !px-3 !py-1.5 !text-xs text-amber-400" @click="openRebuild">全部重新刮削</button>
       <span class="ml-auto text-xs text-gray-500">{{ data.total }} 个视频<span v-if="keyword"> · 概况已按搜索条件筛选</span></span>
     </div>
     <p v-for="(warning, i) in data.warnings" :key="i" class="text-xs text-amber-400">{{ warning }}</p>
@@ -322,6 +326,7 @@ onUnmounted(() => { disposed = true; request++; rebuildRequest++; clearTimeout(t
     </ModalDialog>
     <ModalDialog v-model:open="rebuildOpen" title="全部重新刮削" size="2xl" scrollable>
       <div class="space-y-4 text-sm">
+        <p class="text-xs text-gray-300">无需选择影片。确认后自动重建全部可恢复的下载源，包含已刮削和失败的视频；当前列表的勾选、搜索、筛选和分页不会限制重建范围。</p>
         <div class="space-y-2 rounded-lg border border-amber-600/30 bg-amber-500/5 p-3 text-xs text-amber-200">
           <p>将清空播放输出目录，再从全部可恢复的下载源重新生成视频链接、NFO 和图片。旧图片、NFO 等文件会保留在播放目录之外；视频始终保留下载源，恢复方式以预览结果为准。</p>
           <p>下载源文件和数据库中的影片信息保留。重建期间部分影片会暂时无法播放，失败项需要从失败列表重试。</p>
@@ -351,10 +356,11 @@ onUnmounted(() => { disposed = true; request++; rebuildRequest++; clearTimeout(t
           <details v-if="rebuildPlan.sample_paths?.length"><summary class="cursor-pointer text-gray-400">查看范围样例</summary><p v-for="(path, index) in rebuildPlan.sample_paths" :key="index" class="mt-2 break-all font-mono text-gray-500">{{ rebuildMessage(path) }}</p></details>
         </div>
         <div v-if="rebuild.quarantine_dir" class="text-xs text-gray-400"><p>旧资料与恢复清单保存目录</p><p class="mt-1 break-all font-mono">{{ rebuild.quarantine_dir }}</p></div>
-        <p v-if="rebuild.running" class="text-xs text-brand">{{ rebuildPhase }} · {{ rebuild.done || 0 }} / {{ rebuild.total || 0 }} 项 · 成功 {{ rebuild.ok || 0 }} 项。任务在后台执行，可以离开页面。</p>
+        <p v-if="rebuildPreviewing" class="text-xs text-brand">正在扫描全部源视频并核对播放目录，尚未开始清空或重刮。可以先输入确认目录，等待预览完成；任务在后台执行，可以离开页面。</p>
+        <p v-else-if="rebuild.running" class="text-xs text-brand">{{ rebuildPhase }} · {{ rebuild.done || 0 }} / {{ rebuild.total || 0 }} 项 · 成功 {{ rebuild.ok || 0 }} 项。任务在后台执行，可以离开页面。</p>
         <p v-if="rebuild.deletion_protected" class="text-xs text-amber-300">删除联动保护保持启用；重建完成并确认 Emby 扫描完成后，再在视频清单上方解除。</p>
         <label class="flex items-start gap-2 text-xs text-gray-300"><input v-model="rebuildRefreshMetadata" type="checkbox" :disabled="rebuild.running || rebuildBusy" class="mt-0.5" /><span>强制联网重新获取元数据<span class="mt-1 block text-gray-500">默认复用保留的数据库影片资料；开启后重新请求刮削源。</span></span></label>
-        <label class="block space-y-2 text-xs text-gray-400"><span>输入完整播放输出目录以确认</span><input v-model="rebuildConfirmation" class="input font-mono" :disabled="rebuild.running || rebuildBusy" :placeholder="rebuildOutput || '完整输出目录路径'" aria-label="确认全部重刮的输出目录" aria-describedby="rebuild-confirm-hint" autocomplete="off" spellcheck="false" /><span id="rebuild-confirm-hint" class="block text-gray-500">可以先输入目录；只有预览成功、没有阻止项且输入目录完全一致时，才能执行。</span></label>
+        <label class="block space-y-2 text-xs text-gray-400"><span>输入完整播放输出目录以确认</span><input v-model="rebuildConfirmation" class="input font-mono" :placeholder="rebuildOutput || '完整输出目录路径'" aria-label="确认全部重刮的输出目录" aria-describedby="rebuild-confirm-hint" autocomplete="off" spellcheck="false" /><span id="rebuild-confirm-hint" class="block text-gray-500">预览期间也可以输入或粘贴目录；只有预览成功、没有阻止项且输入目录完全一致时，才能执行。</span></label>
         <div class="flex flex-wrap justify-end gap-2"><button class="btn-ghost !text-xs" @click="rebuildOpen = false">关闭</button><button class="btn-primary !text-xs" :disabled="!rebuildCanRun" @click="runRebuild">确认清空播放目录并全部重刮</button></div>
       </div>
     </ModalDialog>
