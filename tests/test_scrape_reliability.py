@@ -263,6 +263,39 @@ def scrape_case(db, tmp_path, monkeypatch):
     return video, settings
 
 
+def test_force_scrape_does_not_fall_back_to_old_metadata(scrape_case, db, monkeypatch):
+    video, _ = scrape_case
+    initial = scrape.scrape_file(video)
+    assert initial.ok
+    target = initial.links[0]
+    old_nfo = target.with_suffix('.nfo').read_bytes()
+    monkeypatch.setattr(merge, 'fetch_merged', lambda code: {})
+    result = scrape.scrape_group('SONE-725', [parse(video)], force=True)
+    assert not result.ok and '强制重新刮削未取得' in result.error
+    assert target.with_suffix('.nfo').read_bytes() == old_nfo
+    assert target.exists() and video.exists()
+
+
+def test_force_scrape_uses_fresh_metadata_and_overwrites_nfo(scrape_case, db, monkeypatch):
+    video, _ = scrape_case
+    initial = scrape.scrape_file(video)
+    assert initial.ok
+    monkeypatch.setattr(scrape, 'load_group_meta', lambda *a, **kw: pytest.fail('force must skip local metadata'))
+    monkeypatch.setattr(merge, 'fetch_merged', lambda code: {'code': code, 'title': '全新的网络标题'})
+    def cover(meta, code, refresh=False):
+        assert refresh and meta['title'] == '全新的网络标题'
+        assert not any(k.startswith('_local_') for k in meta)
+        return b''
+    monkeypatch.setattr(scrape, '_cover_bytes', cover)
+    result = scrape.scrape_group('SONE-725', [parse(video)], overwrite=False, fetch_meta=False,
+                                 force=True, preserved_meta={'title': '旧标题', '_local_cover': 'old.jpg'})
+    assert result.ok
+    assert '全新的网络标题' in result.links[0].with_suffix('.nfo').read_text(encoding='utf-8')
+    with db() as session:
+        assert session.get(Code, 'SONE-725').title == '全新的网络标题'
+    assert video.exists()
+
+
 def test_nfo_failure_never_registers_or_completes(scrape_case, db, monkeypatch):
     video, _ = scrape_case
     monkeypatch.setattr(scrape.nfo, 'write', lambda *a, **kw: False)

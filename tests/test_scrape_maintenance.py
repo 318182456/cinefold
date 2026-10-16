@@ -94,3 +94,15 @@ def test_rebuild_api_requires_auth_and_explicit_execution(monkeypatch):
     assert client.post('/api/v1/scrape/rebuild/run', json={
         'token': 't', 'confirmation': '/library', 'refresh_metadata': True}).status_code == 200
     assert calls == [('t', '/library', {'refresh_metadata': True})]
+    assert client.post('/api/v1/scrape/rebuild/run', json={
+        'token': 't', 'confirmation': '/library', 'force': True}).status_code == 200
+    assert calls[-1] == ('t', '/library', {'refresh_metadata': False, 'force': True})
+    assert client.post('/api/v1/scrape/rebuild/run', json={
+        'token': 't', 'confirmation': '/library', 'confirm_discard': True}).status_code == 200
+    assert calls[-1] == ('t', '/library', {'refresh_metadata': False, 'confirm_discard': True})
+    policies = []
+    monkeypatch.setattr(scraperebuild, 'preview', lambda **kw: policies.append(kw) or {'running': True})
+    assert client.post('/api/v1/scrape/rebuild/preview', json={'missing_policy': 'keep'}).status_code == 200
+    assert client.post('/api/v1/scrape/rebuild/preview', json={'missing_policy': 'discard'}).status_code == 200
+    assert policies == [{'missing_policy': 'keep'}, {'missing_policy': 'discard'}]
+    assert client.post('/api/v1/scrape/rebuild/preview', json={'missing_policy': 'anything'}).status_code == 422

@@ -551,6 +551,7 @@ def scrape_group(
     refresh_metadata: bool = False,
     existing_targets: dict[str, Path] | None = None,
     preserved_meta: dict | None = None,
+    force: bool = False,
 ) -> ScrapeResult:
     """刮削同一番号的一组文件（可能是多个分集）。
 
@@ -560,6 +561,8 @@ def scrape_group(
     result = ScrapeResult(code=code)
     settings = get_settings()
     overwrite = settings.scrape_overwrite if overwrite is None else overwrite
+    if force:
+        fetch_meta, refresh_metadata, overwrite = True, True, True
 
     playable = [i for i in items if not i.trailer and not i.ignored]
     dropped = [i for i in items if i.trailer or i.ignored]
@@ -577,9 +580,25 @@ def scrape_group(
         result.error = '；'.join(duplicates)
         return result
 
-    meta = (load_group_meta(code, playable, fetch=fetch_meta, refresh=True)
-            if refresh_metadata else load_group_meta(code, playable, fetch=fetch_meta))
-    if preserved_meta:
+    if force:
+        # Force requires a fresh, identity-checked network result. Never turn a
+        # failed remote request into a successful scrape using old DB/NFO data.
+        fresh = merge.fetch_merged(code)
+        result.sources = fresh.get('_sources', []) or getattr(fresh, 'sources', [])
+        meta = {'code': code, **merge.clean_detail(fresh, code)}
+        if not (meta.get('title') or meta.get('cn_title')):
+            result.error = f'强制重新刮削未取得新的网络元数据，保留现有文件: {code}'
+            return result
+        from app import services
+        services._ensure_codes([code])
+        _save_meta(code, meta, overwrite=True)
+        meta['_sources'] = result.sources
+        if fresh.get('_image_candidates'):
+            meta['_image_candidates'] = fresh['_image_candidates']
+    else:
+        meta = (load_group_meta(code, playable, fetch=fetch_meta, refresh=True)
+                if refresh_metadata else load_group_meta(code, playable, fetch=fetch_meta))
+    if preserved_meta and not force:
         meta = {**{k: v for k, v in preserved_meta.items() if v}, **meta,
                 **{k: v for k, v in preserved_meta.items() if k.startswith('_local_') and v}}
     result.sources = meta.get("_sources", [])

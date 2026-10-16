@@ -221,7 +221,9 @@ def list_videos(*, root: str = '', keyword: str = '', status: str = '', page: in
 
 
 @maintenance_guarded
-def start(entries: list[dict], *, overwrite: bool = False, refresh_metadata: bool = False, fetch_meta: bool = True) -> dict:
+def start(entries: list[dict], *, overwrite: bool = False, refresh_metadata: bool = False, fetch_meta: bool = True, force: bool = False) -> dict:
+    if force:
+        overwrite, refresh_metadata, fetch_meta = True, True, True
     if refresh_metadata and not fetch_meta:
         raise ValueError("重新获取元数据时需要开启联网")
     normalized, seen = [], set()
@@ -265,7 +267,7 @@ def start(entries: list[dict], *, overwrite: bool = False, refresh_metadata: boo
         for code, items in groups.items():
             record_attempt(items, code, status='queued', job_id=job_id)
         try:
-            Thread(target=_run, args=(groups, job_id, overwrite, refresh_metadata, fetch_meta), daemon=True, name='manual-scrape').start()
+            Thread(target=_run, args=(groups, job_id, overwrite, refresh_metadata, fetch_meta, force), daemon=True, name='manual-scrape').start()
         except Exception:
             _STATE.update(running=False, error='启动刮削任务失败')
             raise
@@ -280,7 +282,7 @@ def cancel() -> dict:
 
 
 @maintenance_guarded
-def _run(groups, job_id, overwrite, refresh_metadata, fetch_meta):
+def _run(groups, job_id, overwrite, refresh_metadata, fetch_meta, force=False):
     """两组影片并行准备网络资料；scrape 内部仍串行提交文件。"""
     queue = iter(groups.items())
 
@@ -298,7 +300,7 @@ def _run(groups, job_id, overwrite, refresh_metadata, fetch_meta):
                         MediaLink.source_path.in_([str(i.path) for i in items])).order_by(MediaLink.link_path)):
                     existing.setdefault(row.source_path, Path(row.link_path))
             return scrape.scrape_group(code, items, fetch_meta=fetch_meta, overwrite=overwrite,
-                refresh_metadata=refresh_metadata, existing_targets=existing)
+                refresh_metadata=refresh_metadata, existing_targets=existing, **({'force': True} if force else {}))
         except Exception as exc:
             logger.exception(f"[{code}] 手动刮削任务失败")
             return scrape.ScrapeResult(code=code, error=str(exc))

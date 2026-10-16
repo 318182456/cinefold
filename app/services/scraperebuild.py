@@ -217,11 +217,15 @@ def _free_space(parent):
     return shutil.disk_usage(parent).free
 
 
-def _collect():
+def _collect(missing_policy='block'):
     """Read-only plan. No downloader calls and no discovery outside known paths."""
     settings = get_settings()
     output = _safe_path(settings.medialink_scrape_dir or settings.medialink_library_path, output=True)
     quarantine_mode, quarantine_parent = _quarantine_location(output, settings)
+    if missing_policy not in ('block', 'keep', 'discard'):
+        raise ValueError('未知缺失源处理方式')
+    if missing_policy != 'block':
+        quarantine_mode = 'copy_sidecars'
     with session_scope() as session:
         roots = [_plain(row) for row in session.scalars(select(ScrapeSourceRoot))]
         inventory = [_plain(row) for row in session.scalars(select(ScrapeSourceVideo))]
@@ -317,7 +321,7 @@ def _collect():
         inode_map.setdefault(tuple(row['stamp'][:2]), []).append(row)
         size_map.setdefault(row['stamp'][2], []).append(row)
     by_link = {row['link_path']: row for row in links}
-    evidence, metadata = [], []
+    evidence, metadata, unrecoverable = [], [], []
     for video in old_videos:
         stamp = _stamp(video)
         row = by_link.get(str(video), {})
@@ -340,7 +344,9 @@ def _collect():
                 verified, method = candidate, 'sha256'
                 break
         if verified is None:
-            blockers.append(f'无法验证独立下载源，不能移走此视频: {video}')
+            unrecoverable.append(str(video))
+            if missing_policy == 'block':
+                blockers.append(f'无法验证独立下载源，不能移走此视频: {video}')
             continue
         if _stamp(video) != stamp or _stamp(verified['path']) != verified['stamp']:
             raise ValueError('校验时视频发生变化，请下载完成后重新预览')
@@ -355,12 +361,19 @@ def _collect():
                              'part': part, 'detail': detail})
             if not same_identity:
                 warnings.append(f'旧登记与下载源番号不同，保留旧资料但不套用到新番号: {video}')
-    if not sources:
+    if not sources and missing_policy == 'block':
         blockers.append('没有可用于重建的已完成源视频')
     model_dump = getattr(settings, 'model_dump', None)
     settings_data = model_dump() if model_dump else vars(settings)
     database_digest = _digest([roots, inventory, links, attempts, codes])
+    keep_dirs = {str(Path(path).parent) for path in unrecoverable} if missing_policy == 'keep' else set()
+    retained = [str(output / relative) for relative, _, kind in output_manifest if kind == 'file'
+                and any((output / relative).is_relative_to(Path(folder)) for folder in keep_dirs)]
+    if unrecoverable and missing_policy != 'block':
+        warnings.append(f'{len(unrecoverable)} 个视频无法验证独立下载源；' +
+                        ('保留其所在目录的文件，其余影片继续重建' if missing_policy == 'keep' else '确认后删除这些播放视频，不保留视频备份'))
     fingerprint = _digest([str(output), output.exists(), output_manifest, sources, evidence, database_digest, settings_data,
+                           missing_policy, unrecoverable, retained,
                            quarantine_mode, str(quarantine_parent), backup_bytes])
     plan = {'output_dir': str(output), 'source_count': len(sources), 'video_count': len(old_videos),
             'deduplicated_count': deduplicated,
@@ -368,9 +381,12 @@ def _collect():
             'file_count': sum(item[2] == 'file' for item in output_manifest),
             'blocked_count': len(blockers), 'blockers': blockers[:200], 'warnings': warnings[:200],
             'sample_paths': [str(path) for path in old_videos[:20]], 'metadata_count': len(metadata)}
+    plan.update(missing_policy=missing_policy, unrecoverable_count=len(unrecoverable),
+                unrecoverable_paths=unrecoverable, retained_file_count=len(retained))
     return {'public': plan, 'fingerprint': fingerprint, 'manifest': output_manifest, 'sources': sources,
             'quarantine_parent': str(quarantine_parent),
             'quarantine_mode': quarantine_mode,
+            'missing_policy': missing_policy, 'unrecoverable': unrecoverable, 'retained': retained,
             'evidence': evidence, 'metadata': metadata,
             'links': [row for row in links if _under(row['link_path'], output)],
             'codes': codes, 'inventory': inventory, 'issued': time.time()}
@@ -400,7 +416,7 @@ def _under(raw, output):
         return False
 
 
-def preview():
+def preview(missing_policy='block'):
     global _PLAN
     with _LOCK:
         if _STATE['running']:
@@ -413,7 +429,7 @@ def preview():
         global _PLAN
         try:
             with _maintenance().activity():
-                plan = _collect()
+                plan = _collect(missing_policy) if missing_policy != 'block' else _collect()
                 token = hmac.new(_SECRET, f"{plan['fingerprint']}:{plan['issued']}".encode(), hashlib.sha256).hexdigest()
                 plan['token'] = token
                 with _LOCK:
@@ -433,12 +449,14 @@ def preview():
     return state()
 
 
-def start(token: str, confirmation: str, *, refresh_metadata: bool = False):
+def start(token: str, confirmation: str, *, refresh_metadata: bool = False, force: bool = False, confirm_discard: bool = False):
     with _LOCK:
         if _STATE['running'] or not _PLAN or not hmac.compare_digest(token or '', _PLAN['token']):
             raise ValueError('预览已失效，请重新预览')
         if _PLAN['public']['blocked_count']:
             raise ValueError('存在无法安全重建的视频，请先处理预览中的阻止项')
+        if _PLAN.get('missing_policy') == 'discard' and _PLAN.get('unrecoverable') and not confirm_discard:
+            raise ValueError('请额外确认删除无法验证独立下载源的视频')
         if confirmation != _PLAN['public']['output_dir']:
             raise ValueError('请输入完整输出目录确认重建')
         if time.time() - _PLAN['issued'] > _TOKEN_LIFETIME:
@@ -454,7 +472,7 @@ def start(token: str, confirmation: str, *, refresh_metadata: bool = False):
         _STATE.update(running=True, phase='checking', done=0, total=plan['public']['source_count'], ok=0, error='', results=[],
                       job_id=uuid.uuid4().hex, output_dir=plan['public']['output_dir'])
     try:
-        Thread(target=_run, args=(plan, refresh_metadata), daemon=True, name='library-rebuild').start()
+        Thread(target=_run, args=(plan, refresh_metadata, force), daemon=True, name='library-rebuild').start()
     except Exception:
         _maintenance().release()
         _update(running=False, phase='failed', error='无法启动全量重建')
@@ -494,13 +512,13 @@ def _save_metadata(plan):
                         setattr(row, key, value)
 
 
-def _map_cache_paths(output, storage):
+def _map_cache_paths(output, storage, retained=()):
     with session_scope() as session:
         for row in session.scalars(select(Code)):
             for key in ('local_banner', 'local_still_photo'):
                 value = getattr(row, key, None)
                 if value:
-                    setattr(row, key, ','.join(_remap(part, output, storage) for part in value.split(',')))
+                    setattr(row, key, ','.join(part if part in retained else _remap(part, output, storage) for part in value.split(',')))
 
 
 def _write_manifest(path, manifest):
@@ -593,6 +611,8 @@ def _clear_copied_output(plan, output, storage, quarantine, manifest):
     _check_sources(plan)
     sources = {source['path']: source for source in plan['sources']}
     evidence = {item['video']: item for item in plan['evidence']}
+    retained = set(plan.get('retained', []))
+    discarded = set(plan.get('unrecoverable', [])) if plan.get('missing_policy') == 'discard' else set()
     backups = {item['path']: item for item in manifest['sidecar_backups']}
     for backup in backups.values():
         saved = storage / backup['path']
@@ -610,7 +630,14 @@ def _clear_copied_output(plan, output, storage, quarantine, manifest):
         expected = expected_stamps[str(path)]
         if not _under(path, output) or _unsafe_links(path) or _stamp(path) != expected:
             raise ValueError(f'待清理文件已变化或路径不安全，停止清理: {path}')
-        if path.suffix.lower() in local.VIDEO_SUFFIXES:
+        if str(path) in retained:
+            continue
+        if str(path) in discarded:
+            # Only explicitly confirmed, snapshotted unrecoverable videos may
+            # bypass independent-source evidence. Path/stamp checks still apply.
+            if path.suffix.lower() not in local.VIDEO_SUFFIXES:
+                raise ValueError('待丢弃文件不是已预览的视频')
+        elif path.suffix.lower() in local.VIDEO_SUFFIXES:
             proof = evidence.get(str(path))
             source = sources.get(proof['source']) if proof else None
             if not source:
@@ -642,7 +669,7 @@ def _clear_copied_output(plan, output, storage, quarantine, manifest):
         # Never recurse or remove the root. Newly arrived files are untouched.
         path.unlink()
         _fsync_directory(path.parent)
-        _append_operation(quarantine, {'operation': 'unlink_verified', 'path': relative})
+        _append_operation(quarantine, {'operation': 'unlink_discard_confirmed' if str(path) in discarded else 'unlink_verified', 'path': relative})
         # Only this successful unlink's shared inode may legitimately acquire
         # a new ctime. Unrelated source/sidecar stamps remain fully strict.
         for raw in inode_paths.get(tuple(expected[:2]), []):
@@ -656,8 +683,14 @@ def _clear_copied_output(plan, output, storage, quarantine, manifest):
     for directory, expected in sorted(directories, key=lambda item: len(item[0].parts), reverse=True):
         if _unsafe_links(directory) or not _under(directory, output) or _stamp(directory)[:2] != expected[:2]:
             raise ValueError('清理空目录时发现不安全路径，停止操作')
+        if any(Path(raw).is_relative_to(directory) for raw in retained):
+            continue
         directory.rmdir()
-    if any(output.iterdir()):
+    remaining, _, remaining_blockers = _tree(output)
+    expected_remaining = {str(Path(raw).relative_to(output)) for raw in retained}
+    expected_remaining.update(relative for relative, _, kind in plan['manifest'] if kind == 'dir'
+                              and any(Path(raw).is_relative_to(output / relative) for raw in retained))
+    if remaining_blockers or {item[0] for item in remaining} != expected_remaining:
         raise ValueError('输出目录出现未预览的新文件，已保留原位，停止重建')
     for source in plan['sources']:
         if _unsafe_links(Path(source['path'])) or _stamp(source['path']) != expected_stamps[source['path']]:
@@ -665,11 +698,12 @@ def _clear_copied_output(plan, output, storage, quarantine, manifest):
     return {source['path']: expected_stamps[source['path']] for source in plan['sources']}
 
 
-def _run(plan, refresh_metadata):
+def _run(plan, refresh_metadata, force=False):
     quarantine = None
     manifest = None
     try:
-        checked = _collect()
+        policy = plan.get('missing_policy', 'block')
+        checked = _collect(policy) if policy != 'block' else _collect()
         if checked['fingerprint'] != plan['fingerprint'] or checked['public']['blocked_count']:
             raise ValueError('文件、配置或数据库已变化，请重新预览；尚未移动任何文件')
         output = Path(plan['public']['output_dir'])
@@ -701,6 +735,7 @@ def _run(plan, refresh_metadata):
                     'phase': 'quarantine', 'original_manifest': plan['manifest'], 'sources': plan['sources'],
                     'evidence': plan['evidence'], 'media_links': plan['links'], 'metadata': plan['metadata'],
                     'codes': plan['codes'],
+                    'missing_policy': policy, 'unrecoverable': plan.get('unrecoverable', []), 'retained': plan.get('retained', []),
                     'moved': [], 'results': []}
         manifest_path = quarantine / 'manifest.json'
         _write_manifest(manifest_path, manifest)
@@ -730,18 +765,21 @@ def _run(plan, refresh_metadata):
                 manifest['moved'].append(child.name)
                 _append_operation(quarantine, {'operation': 'rename', 'name': child.name})
             source_stamps = _check_sources(plan, owned_inodes=moved_inodes)
-        _map_cache_paths(output, storage)
+        retained = set(plan.get('retained', []))
+        _map_cache_paths(output, storage, retained) if retained else _map_cache_paths(output, storage)
         manifest['recovery_source_stamps'] = source_stamps
         manifest['recovery_signature_fields'] = ['device', 'inode', 'size', 'mtime_ns', 'ctime_ns']
         # Only this output's associations are retired. Download history,
         # subscriptions and Code metadata remain intact.
         with session_scope() as session:
             for old in plan['links']:
+                if old['link_path'] in retained:
+                    continue
                 row = session.get(MediaLink, old['link_path'])
                 if row is not None:
                     session.delete(row)
             for cached in session.scalars(select(ScrapeSourceVideo)):
-                cached.links = [path for path in (cached.links or []) if not _under(path, output)]
+                cached.links = [path for path in (cached.links or []) if path in retained or not _under(path, output)]
                 if not cached.links:
                     cached.artifact_status = 'pending'
         manifest['phase'] = 'rebuilding'
@@ -769,7 +807,7 @@ def _run(plan, refresh_metadata):
                         raise ValueError('源视频已变化，停止此影片的重建')
                 with _maintenance().internal():
                     result = scrape.scrape_group(code, items, refresh_metadata=refresh_metadata,
-                                                 preserved_meta=preserved.get(code))
+                                                 preserved_meta=preserved.get(code), **({'force': True} if force else {}))
                 row = {'code': code, 'ok': result.ok, 'error': result.error,
                        'warnings': result.warnings, 'links': [str(path) for path in result.links]}
             except Exception as exc:

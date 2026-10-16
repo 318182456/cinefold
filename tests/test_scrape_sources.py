@@ -169,6 +169,20 @@ def test_failed_group_does_not_block_remaining_files_and_records_survive(env, mo
         assert session.get(ScrapeAttempt, sources.key(second)).status == 'succeeded'
 
 
+def test_force_queue_enables_network_overwrite_and_propagates_force(env, monkeypatch):
+    root, _, _, _, tasks = env
+    path = video(root)
+    calls = []
+    def run(code, items, **options):
+        calls.append(options)
+        return scrape.ScrapeResult(code=code, links=[items[0].path])
+    monkeypatch.setattr(scrape, 'scrape_group', run)
+    sources.start([{'path': str(path)}], force=True, fetch_meta=False)
+    tasks[0].run()
+    assert len(calls) == 1
+    assert all(calls[0][key] for key in ('force', 'overwrite', 'refresh_metadata', 'fetch_meta'))
+
+
 def test_manual_batch_runs_two_movies_at_a_time(env, monkeypatch):
     root, _, _, _, tasks = env
     paths = [video(root, f'SONE-{number}.mp4') for number in (725, 726, 727)]

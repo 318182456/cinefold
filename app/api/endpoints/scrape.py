@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Literal
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -43,12 +44,19 @@ class SourceJobRequest(BaseModel):
     overwrite: bool = False
     refresh_metadata: bool = False
     fetch_meta: bool = True
+    force: bool = False
 
 
 class RebuildRequest(BaseModel):
     token: str = Field(min_length=1, max_length=256)
     confirmation: str = Field(min_length=1, max_length=4000)
     refresh_metadata: bool = False
+    force: bool = False
+    confirm_discard: bool = False
+
+
+class RebuildPreviewRequest(BaseModel):
+    missing_policy: Literal['block', 'keep', 'discard'] = 'block'
 
 
 class RebuildProtectionRequest(BaseModel):
@@ -56,10 +64,10 @@ class RebuildProtectionRequest(BaseModel):
 
 
 @router.post('/rebuild/preview')
-def preview_rebuild(current_user: str = Depends(get_current_user)):
+def preview_rebuild(body: RebuildPreviewRequest | None = None, current_user: str = Depends(get_current_user)):
     from app.services import scraperebuild
     try:
-        return ResponseEntity.ok(scraperebuild.preview())
+        return ResponseEntity.ok(scraperebuild.preview(**({'missing_policy': body.missing_policy} if body else {})))
     except (ValueError, OSError) as exc:
         raise HTTPException(409, str(exc)) from exc
 
@@ -75,7 +83,8 @@ def run_rebuild(body: RebuildRequest, current_user: str = Depends(get_current_us
     from app.services import scraperebuild
     try:
         return ResponseEntity.ok(scraperebuild.start(body.token, body.confirmation,
-                                refresh_metadata=body.refresh_metadata))
+                                refresh_metadata=body.refresh_metadata, **({'force': True} if body.force else {}),
+                                **({'confirm_discard': True} if body.confirm_discard else {})))
     except (ValueError, OSError) as exc:
         raise HTTPException(409, str(exc)) from exc
 
@@ -160,7 +169,7 @@ def start_source_job(body: SourceJobRequest, current_user: str = Depends(get_cur
     from app.services.scrapesources import start
     try:
         return ResponseEntity.ok(start([i.model_dump() for i in body.items], overwrite=body.overwrite,
-            refresh_metadata=body.refresh_metadata, fetch_meta=body.fetch_meta))
+            refresh_metadata=body.refresh_metadata, fetch_meta=body.fetch_meta, **({'force': True} if body.force else {})))
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
 

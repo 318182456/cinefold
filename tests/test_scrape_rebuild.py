@@ -94,6 +94,107 @@ def test_preview_is_read_only_and_validates_independent_download(library):
     assert not value['deletion_protected']
 
 
+def add_unrecoverable(library):
+    directory = library['output'] / 'only-copy'
+    directory.mkdir()
+    video = directory / 'ABP-123.mp4'
+    video.write_bytes(b'only remaining video copy')
+    video.with_suffix('.nfo').write_text('<movie><title>Only copy</title></movie>')
+    with library['db']() as session:
+        session.add(MediaLink(code='ABP-123', source_path=str(video), link_path=str(video)))
+        session.commit()
+    return video
+
+
+@pytest.mark.parametrize('policy', ['keep', 'discard'])
+def test_missing_source_policy_continues_rebuild(library, monkeypatch, policy):
+    orphan = add_unrecoverable(library)
+    original = orphan.read_bytes()
+    old_nfo = orphan.with_suffix('.nfo').read_bytes()
+    scraperebuild.preview(policy)
+    value = wait()
+    assert value['plan']['blocked_count'] == 0
+    assert value['plan']['unrecoverable_count'] == 1
+    assert value['plan']['missing_policy'] == policy
+    assert value['plan']['quarantine_mode'] == 'copy_sidecars'
+    assert orphan.read_bytes() == original  # preview never deletes
+    if policy == 'discard':
+        with pytest.raises(ValueError, match='额外确认'):
+            scraperebuild.start(value['token'], str(library['output']))
+        assert orphan.exists()
+    calls = []
+    def run(code, items, **kwargs):
+        calls.append(code)
+        return scrape.ScrapeResult(code=code, links=[items[0].path])
+    monkeypatch.setattr(scrape, 'scrape_group', run)
+    scraperebuild.start(value['token'], str(library['output']), confirm_discard=policy == 'discard')
+    result = wait()
+    assert result['phase'] == 'completed', result
+    assert calls == ['SONE-725']
+    assert library['source'].exists()
+    storage = Path(result['quarantine_dir']) / 'library'
+    assert not (storage / 'only-copy' / orphan.name).exists()
+    assert (storage / 'only-copy' / orphan.with_suffix('.nfo').name).read_bytes() == old_nfo
+    with library['db']() as session:
+        link = session.get(MediaLink, str(orphan))
+        if policy == 'keep':
+            assert orphan.read_bytes() == original and orphan.with_suffix('.nfo').read_bytes() == old_nfo
+            assert link is not None
+        else:
+            assert not orphan.exists() and link is None
+    manifest = json.loads((storage.parent / 'manifest.json').read_text(encoding='utf-8'))
+    assert manifest['missing_policy'] == policy
+    assert manifest['unrecoverable'] == [str(orphan)]
+
+
+def test_discard_does_not_bypass_changed_files(library):
+    orphan = add_unrecoverable(library)
+    scraperebuild.preview('discard')
+    value = wait()
+    orphan.write_bytes(b'changed after preview')
+    scraperebuild.start(value['token'], str(library['output']), confirm_discard=True)
+    result = wait()
+    assert result['phase'] == 'failed'
+    assert orphan.read_bytes() == b'changed after preview'
+    assert library['video'].exists() and library['source'].exists()
+
+
+def test_unknown_missing_policy_is_rejected(library):
+    with pytest.raises(ValueError, match='未知'):
+        scraperebuild._collect('ignore-everything')
+
+
+@pytest.mark.parametrize('policy', ['keep', 'discard'])
+def test_missing_policy_handles_library_without_any_download_sources(library, policy):
+    library['source'].unlink()
+    scraperebuild.preview(policy)
+    value = wait()
+    assert value['plan']['source_count'] == 0
+    assert value['plan']['unrecoverable_count'] == 1
+    assert value['plan']['blocked_count'] == 0
+    scraperebuild.start(value['token'], str(library['output']), confirm_discard=policy == 'discard')
+    result = wait()
+    assert result['phase'] == 'completed', result
+    assert library['video'].exists() == (policy == 'keep')
+
+
+def test_keep_policy_preserves_sibling_video_and_its_association(library, monkeypatch):
+    orphan = library['video'].with_name('ABP-123.mp4')
+    orphan.write_bytes(b'only copy in shared folder')
+    scraperebuild.preview('keep')
+    value = wait()
+    assert str(library['video']) in scraperebuild._PLAN['retained']
+    monkeypatch.setattr(scrape, 'scrape_group', lambda code, items, **kw:
+                        scrape.ScrapeResult(code=code, links=[library['video']]))
+    scraperebuild.start(value['token'], str(library['output']))
+    result = wait()
+    assert result['phase'] == 'completed', result
+    assert orphan.exists() and library['video'].exists()
+    assert library['video'].with_suffix('.nfo').is_file()
+    with library['db']() as session:
+        assert session.get(MediaLink, str(library['video'])) is not None
+
+
 def test_quarantine_stays_outside_entire_configured_playback_tree(library, monkeypatch):
     # A scrape subdirectory can live inside a broader Emby playback root.
     # Storing old videos beside that subdirectory would keep them playable.
