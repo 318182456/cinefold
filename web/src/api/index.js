@@ -237,6 +237,11 @@ export const subscribeActor = (name, limitDate) =>
 export const cancelActor = (name) => http.post('/actors/cancel', { name })
 export const getActorRank = () => http.get('/actors/rank')
 export const getActorCodes = (name) => http.get('/actors/codes', { params: { name } })
+export const getActorProfile = (params) => http.get('/actors/profile', { params })
+export const refreshActorProfile = (name, maxPages = 3) =>
+  http.post('/actors/profile/refresh', { name, max_pages: maxPages })
+export const getActorProfileSync = (name) => http.get('/actors/profile/sync', { params: { name } })
+export const subscribeActorWorks = (name) => http.post('/actors/profile/subscribe', { name })
 
 // ---------------------------------------------------------------- 系统
 export const getConfig = () => http.get('/config')

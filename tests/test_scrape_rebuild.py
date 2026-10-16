@@ -368,3 +368,219 @@ def test_registered_number_rebuilds_filename_without_number_offline(library, mon
     assert result['phase'] == 'completed', result
     target = library['output'] / 'SONE-725' / 'new' / 'SONE-725.mp4'
     assert target.samefile(source)
+
+
+@pytest.fixture
+def copy_mode(library, monkeypatch):
+    parent = library['tmp'] / 'app-data' / 'rebuild-quarantine'
+    monkeypatch.setattr(scraperebuild, 'DATA_DIR', library['tmp'] / 'app-data')
+    monkeypatch.setattr(scraperebuild, '_quarantine_location', lambda *a: ('copy_sidecars', parent))
+    return library
+
+
+def test_different_device_selects_small_artifact_backup_outside_playback(library, monkeypatch):
+    data = library['tmp'] / 'app-data'
+    monkeypatch.setattr(scraperebuild, 'DATA_DIR', data)
+    monkeypatch.setattr(scraperebuild, '_device', lambda path: 1 if path == library['output'] else 2)
+    mode, parent = scraperebuild._quarantine_location(library['output'], library['settings'])
+    assert mode == 'copy_sidecars' and parent == data / 'rebuild-quarantine'
+    assert not parent.is_relative_to(library['output'])
+
+
+def test_different_bind_mount_selects_backup_even_with_same_device(library, monkeypatch):
+    monkeypatch.setattr(scraperebuild, 'DATA_DIR', library['tmp'] / 'app-data')
+    monkeypatch.setattr(scraperebuild, '_device', lambda path: 1)
+    monkeypatch.setattr(scraperebuild, '_same_rename_mount', lambda *a: False)
+    assert scraperebuild._quarantine_location(library['output'], library['settings'])[0] == 'copy_sidecars'
+
+
+def test_fallback_cannot_be_inside_wide_playback_root(library, monkeypatch):
+    library['settings'].medialink_library_path = str(library['tmp'])
+    monkeypatch.setattr(scraperebuild, 'DATA_DIR', library['tmp'] / 'app-data')
+    monkeypatch.setattr(scraperebuild, '_same_rename_mount', lambda *a: False)
+    with pytest.raises(ValueError, match='整个播放目录之外'):
+        scraperebuild._quarantine_location(library['output'], library['settings'])
+
+
+def test_cross_filesystem_mode_backs_up_artifacts_without_copying_video(copy_mode, monkeypatch):
+    from app.modules.scrape import merge
+    case = copy_mode
+    subtitle = case['video'].with_suffix('.zh.srt')
+    subtitle.write_text('1\n00:00:00,000 --> 00:00:02,000\n保留字幕\n', encoding='utf-8')
+    subtitle_bytes = subtitle.read_bytes()
+    monkeypatch.setattr(merge, 'fetch_merged', lambda *a, **kw: pytest.fail('metadata already exists'))
+    monkeypatch.setattr(scrape, '_download', lambda *a, **kw: pytest.fail('old images already exist'))
+    value = preview()
+    expected = sum(path.stat().st_size for path in case['output'].rglob('*') if path.is_file() and path.suffix != '.mp4')
+    assert value['plan']['quarantine_mode'] == 'copy_sidecars'
+    assert value['plan']['backup_bytes'] == expected
+    scraperebuild.start(value['token'], str(case['output']))
+    result = wait()
+    assert result['phase'] == 'completed', result
+    target = case['output'] / 'SONE-725' / 'new' / 'SONE-725.mp4'
+    assert target.samefile(case['source'])
+    quarantine = Path(result['quarantine_dir'])
+    assert not list(quarantine.rglob('*.mp4'))
+    saved_subtitle = quarantine / 'library' / 'old-name' / subtitle.name
+    assert saved_subtitle.read_bytes() == subtitle_bytes
+    manifest = json.loads((quarantine / 'manifest.json').read_text(encoding='utf-8'))
+    assert manifest['video_storage'] == 'source_references'
+    assert manifest['evidence'][0]['source'] == str(case['source'])
+    assert manifest['sidecar_backups']
+    assert manifest['recovery_source_stamps'][str(case['source'])] == scraperebuild._stamp(case['source'])
+    assert result['quarantine_mode'] == 'copy_sidecars'
+    assert not case['video'].exists() and case['source'].exists()
+
+
+def test_backup_failure_never_starts_removing_originals(copy_mode, monkeypatch):
+    case = copy_mode
+    original = scraperebuild._backup_sidecars
+    def fail(*args):
+        original(*args)
+        raise OSError('backup storage failed')
+    monkeypatch.setattr(scraperebuild, '_backup_sidecars', fail)
+    value = preview()
+    scraperebuild.start(value['token'], str(case['output']))
+    result = wait()
+    assert result['phase'] == 'failed' and 'backup storage failed' in result['error']
+    assert case['video'].exists() and case['video'].with_suffix('.nfo').exists()
+    with case['db']() as session:
+        assert session.get(MediaLink, str(case['video']))
+
+
+def test_changed_backup_is_detected_before_removing_any_file(copy_mode, monkeypatch):
+    case = copy_mode
+    original = scraperebuild._backup_sidecars
+    def corrupt(plan, storage):
+        backups = original(plan, storage)
+        (storage / backups[-1]['path']).write_bytes(b'broken')
+        return backups
+    monkeypatch.setattr(scraperebuild, '_backup_sidecars', corrupt)
+    value = preview()
+    scraperebuild.start(value['token'], str(case['output']))
+    result = wait()
+    assert result['phase'] == 'failed' and '备份' in result['error']
+    assert case['video'].exists() and case['video'].with_suffix('.nfo').exists()
+
+
+def test_new_file_arriving_during_backup_is_never_removed(copy_mode, monkeypatch):
+    case = copy_mode
+    original = scraperebuild._backup_sidecars
+    added = case['output'] / 'new-unique-video.mp4'
+    def change(*args):
+        result = original(*args)
+        added.write_bytes(b'unique')
+        return result
+    monkeypatch.setattr(scraperebuild, '_backup_sidecars', change)
+    value = preview()
+    scraperebuild.start(value['token'], str(case['output']))
+    result = wait()
+    assert result['phase'] == 'failed'
+    assert added.read_bytes() == b'unique'
+    assert case['video'].exists()
+
+
+def test_source_disappearing_during_backup_prevents_any_cleanup(copy_mode, monkeypatch):
+    case = copy_mode
+    original = scraperebuild._backup_sidecars
+    def remove_source(*args):
+        result = original(*args)
+        case['source'].unlink()
+        return result
+    monkeypatch.setattr(scraperebuild, '_backup_sidecars', remove_source)
+    value = preview()
+    scraperebuild.start(value['token'], str(case['output']))
+    assert wait()['phase'] == 'failed'
+    assert case['video'].exists()  # now the only video directory entry
+
+
+def test_missing_backup_space_blocks_preview_without_counting_large_video(copy_mode, monkeypatch):
+    monkeypatch.setattr(scraperebuild, '_free_space', lambda parent: 0)
+    value = preview()
+    assert value['plan']['blocked_count']
+    assert any('备份空间不足' in message for message in value['plan']['blockers'])
+    assert copy_mode['video'].exists()
+
+
+def test_same_directory_entry_alias_is_not_an_independent_hardlink(library, monkeypatch):
+    original = Path.samefile
+    def samefile(left, other):
+        if left == library['source'].parent and Path(other) == library['video'].parent:
+            return True  # simulate two bind mounts exposing the same directory
+        return original(left, other)
+    monkeypatch.setattr(Path, 'samefile', samefile)
+    value = preview()
+    assert value['plan']['blocked_count']
+    assert library['video'].exists() and library['source'].exists()
+
+
+def test_failed_preview_still_exposes_output_path(library):
+    library['settings'].medialink_scrape_dir = str(library['root'])
+    scraperebuild.preview()
+    value = wait()
+    assert value['phase'] == 'failed'
+    assert value['output_dir'] == str(library['root'])
+
+
+def test_copy_cleanup_tracks_only_owned_hardlink_ctime_changes(copy_mode, monkeypatch):
+    case = copy_mode
+    duplicate = case['video'].with_name('duplicate.mp4')
+    os.link(case['source'], duplicate)
+    with case['db']() as session:
+        session.add(MediaLink(code='SONE-725', source_path=str(case['source']), link_path=str(duplicate)))
+        session.commit()
+    stamp, unlink = scraperebuild._stamp, Path.unlink
+    changes = {}
+
+    def simulated_stamp(path):
+        value = stamp(path)
+        value[4] += changes.get(tuple(value[:2]), 0)
+        return value
+
+    def tracked_unlink(path, *args, **kwargs):
+        identity = tuple(stamp(path)[:2])
+        unlink(path, *args, **kwargs)
+        changes[identity] = changes.get(identity, 0) + 1
+
+    monkeypatch.setattr(scraperebuild, '_stamp', simulated_stamp)
+    monkeypatch.setattr(Path, 'unlink', tracked_unlink)
+    monkeypatch.setattr(scrape, 'scrape_group', lambda *a, **kw: scrape.ScrapeResult(code='SONE-725', error='test complete'))
+    value = preview()
+    scraperebuild.start(value['token'], str(case['output']))
+    result = wait()
+    assert result['phase'] == 'partial', result
+    assert not case['video'].exists() and not duplicate.exists()
+    assert case['source'].read_bytes() == b'original video content'
+
+
+def test_each_video_rechecks_independent_source_before_unlink(copy_mode, monkeypatch):
+    case = copy_mode
+    duplicate = case['video'].with_name('duplicate.mp4')
+    os.link(case['source'], duplicate)
+    with case['db']() as session:
+        session.add(MediaLink(code='SONE-725', source_path=str(case['source']), link_path=str(duplicate)))
+        session.commit()
+    original = Path.unlink
+
+    def source_disappears(path, *args, **kwargs):
+        original(path, *args, **kwargs)
+        if path == case['video']:
+            original(case['source'])
+
+    monkeypatch.setattr(Path, 'unlink', source_disappears)
+    value = preview()
+    scraperebuild.start(value['token'], str(case['output']))
+    result = wait()
+    assert result['phase'] == 'failed'
+    assert duplicate.read_bytes() == b'original video content'  # sole remaining video name
+
+
+def test_quarantine_location_is_bound_to_preview_token(copy_mode, monkeypatch):
+    value = preview()
+    other = copy_mode['tmp'] / 'another-quarantine'
+    monkeypatch.setattr(scraperebuild, '_quarantine_location', lambda *a: ('copy_sidecars', other))
+    scraperebuild.start(value['token'], str(copy_mode['output']))
+    result = wait()
+    assert result['phase'] == 'failed' and '已变化' in result['error']
+    assert copy_mode['video'].exists()
+    assert not other.exists()

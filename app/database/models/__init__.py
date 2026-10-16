@@ -1,4 +1,6 @@
 from app.database.models.actor import Actor
+from app.database.models.actorprofile import ActorProfile
+from app.database.models.embycollection import EmbyCollectionLink
 from app.database.models.cache import Cache
 from app.database.models.code import Code, CodeStatus
 from app.database.models.codealias import CodeAlias
@@ -20,7 +22,7 @@ from app.database.models.curation import (
 )
 
 __all__ = [
-    "Actor", "Cache", "Code", "CodeAlias", "CodeStatus", "DataSource", "History",
+    "Actor", "ActorProfile", "EmbyCollectionLink", "Cache", "Code", "CodeAlias", "CodeStatus", "DataSource", "History",
     "MediaLink", "MediaMerge", "Passkey", "PendingDelete", "Review", "User", "WatchDir",
     "CodeProfile", "Collection", "CollectionItem", "DownloadProfile", "EmbyWatch",
     "LibraryPreference", "RuleExclusion", "SubscriptionRule",

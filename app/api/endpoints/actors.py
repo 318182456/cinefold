@@ -3,10 +3,10 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
-from sqlalchemy import func, select
+from sqlalchemy import select
 
 from app.api.endpoints import get_current_user
-from app.database.models import Actor, Code
+from app.database.models import Actor
 from app.database.session import session_scope
 from app.schemas.reponse import ResponseEntity
 
@@ -16,6 +16,44 @@ router = APIRouter(tags=["actors"])
 class ActorRequest(BaseModel):
     name: str
     limit_date: str | None = None
+
+
+class ActorRefreshRequest(BaseModel):
+    name: str
+    max_pages: int = 3
+
+
+@router.get('/actors/profile')
+def actor_profile(name: str, page: int = 1, size: int = 24, filter: str = 'all', current_user: str = Depends(get_current_user)):
+    from app.services.actorprofile import profile
+    try:
+        return ResponseEntity.ok(profile(name, page=page, size=size, filter=filter))
+    except ValueError as exc:
+        return ResponseEntity.fail(str(exc), code=400)
+
+
+@router.post('/actors/profile/refresh')
+def refresh_actor_profile(body: ActorRefreshRequest, current_user: str = Depends(get_current_user)):
+    from app.services.actorprofile import refresh
+    try:
+        return ResponseEntity.ok(refresh(body.name, body.max_pages))
+    except ValueError as exc:
+        return ResponseEntity.fail(str(exc), code=400)
+
+
+@router.get('/actors/profile/sync')
+def actor_profile_sync(name: str, current_user: str = Depends(get_current_user)):
+    from app.services.actorprofile import sync_state
+    return ResponseEntity.ok(sync_state(name))
+
+
+@router.post('/actors/profile/subscribe')
+def subscribe_actor_works(body: ActorRequest, current_user: str = Depends(get_current_user)):
+    from app.services.actorprofile import subscribe_works
+    try:
+        return ResponseEntity.ok(subscribe_works(body.name))
+    except ValueError as exc:
+        return ResponseEntity.fail(str(exc), code=400)
 
 
 @router.get("/actors")
@@ -31,29 +69,8 @@ def list_actors(
     默认只列已订阅的。actor 表里还有爬虫库导入的资料缓存，那些不是订阅，
     列出来会让人以为自己订了上千个演员；subscribed=false 可查全表。
     """
-    with session_scope() as session:
-        query = select(Actor)
-        count_query = select(func.count()).select_from(Actor)
-        if subscribed:
-            query = query.where(Actor.subscribed.is_(True))
-            count_query = count_query.where(Actor.subscribed.is_(True))
-        if keyword:
-            pattern = f"%{keyword}%"
-            condition = Actor.name.like(pattern) | Actor.name_2.like(pattern)
-            query = query.where(condition)
-            count_query = count_query.where(condition)
-
-        total = session.scalar(count_query) or 0
-        rows = session.scalars(
-            query.order_by(Actor.update_time.desc())
-            .offset(max(page - 1, 0) * size)
-            .limit(size)
-        ).all()
-
-        return ResponseEntity.ok({
-            "total": total,
-            "items": [row.to_dict() for row in rows],
-        })
+    from app.services.actorprofile import directory
+    return ResponseEntity.ok(directory(keyword=keyword, page=page, size=size, subscribed=subscribed))
 
 
 @router.post("/actors/sub")
@@ -93,11 +110,8 @@ def rank(limit: int = 30, current_user: str = Depends(get_current_user)):
 @router.get("/actors/codes")
 def actor_codes(name: str, limit: int = 50, current_user: str = Depends(get_current_user)):
     """某演员的作品列表。"""
-    with session_scope() as session:
-        rows = session.scalars(
-            select(Code)
-            .where(Code.casts.like(f"%{name}%"))
-            .order_by(Code.release_date.desc())
-            .limit(limit)
-        ).all()
-        return ResponseEntity.ok({"items": [row.to_dict() for row in rows]})
+    from app.services.actorprofile import profile
+    try:
+        return ResponseEntity.ok({'items': profile(name, size=limit)['items']})
+    except ValueError as exc:
+        return ResponseEntity.fail(str(exc), code=400)

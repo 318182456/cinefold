@@ -66,12 +66,15 @@ class Avdb:
 
     def __init__(self, host: str = "", cookie: str = ""):
         settings = get_settings()
-        # JAVDB_HOST 是既有配置，仍然优先；都没设时才用数据源里的地址
-        if not host and not cookie and not settings.javdb_host:
-            client = SiteClient.from_source(self.name)
-            if client is not None:
-                self.client = client
-                return
+        # 地址的旧配置不能绕过数据源中的 Cookie、代理、限速和过盾设置。
+        client = SiteClient.from_source(self.name)
+        if client is not None:
+            source_host = _resolve_host(client.host)
+            legacy_host = settings.javdb_host if source_host == DEFAULT_HOST else ''
+            client.host = _resolve_host(host or legacy_host or source_host)
+            client.cookie = cookie or client.cookie or os.getenv('JAVDB_COOKIE', '')
+            self.client = client
+            return
 
         self.client = SiteClient(
             _resolve_host(host or settings.javdb_host),

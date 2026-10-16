@@ -6,6 +6,7 @@ import { useToast } from '@/composables/useToast'
 import PrivateImage from '@/components/PrivateImage.vue'
 import ModalDialog from '@/components/ModalDialog.vue'
 import MetadataConditions from '@/components/MetadataConditions.vue'
+import EmbyCollectionsPanel from '@/components/EmbyCollectionsPanel.vue'
 const toast = useToast()
 const route = useRoute(), router = useRouter()
 const items = ref([]), total = ref(0), page = ref(1), busy = ref(false), collections = ref([]), selected = ref(null), recommendations = ref([])
@@ -13,6 +14,7 @@ const filters = ref({ keyword: '', genre: '', actor: '', publisher: '', favorite
 const collectionOpen = ref(false), collectionForm = ref({ name: '', kind: 'manual', conditions: {} }), collectionEditing = ref(null), chosenCollection = ref('')
 const embyOpen = ref(false), embyUsers = ref([]), embyUser = ref(''), embySyncing = ref(false)
 const embyActing = ref(false)
+const aiCollectionsOpen = ref(false)
 async function embyAction(item, watch, action) {
   embyActing.value = true
   try {
@@ -58,13 +60,14 @@ onMounted(() => perform(reloadCollections))
 </script>
 <template>
   <div class="space-y-5">
-    <div class="flex flex-wrap items-center justify-between gap-3"><div><h1 class="text-xl font-semibold">媒体库</h1><p class="mt-1 text-sm text-gray-500">管理本地收藏与片单，在 Emby 中观看。</p></div><div class="flex gap-2"><button class="btn-ghost" @click="configureEmby">同步 Emby</button><button class="btn-primary" @click="newCollection()">新建片单</button></div></div>
+    <div class="flex flex-wrap items-center justify-between gap-3"><div><h1 class="text-xl font-semibold">媒体库</h1><p class="mt-1 text-sm text-gray-500">管理本地收藏与片单，在 Emby 中观看。</p></div><div class="flex flex-wrap gap-2"><button class="btn-ghost" @click="configureEmby">同步 Emby</button><button class="btn-ghost" @click="aiCollectionsOpen = true">AI 合集 · Emby</button><button class="btn-primary" @click="newCollection()">新建片单</button></div></div>
     <form class="card space-y-3" @submit.prevent="search">
       <div class="flex flex-wrap gap-3"><input v-model="filters.keyword" class="input !w-auto min-w-40 flex-1" placeholder="搜索番号、标题、演员、标签" aria-label="搜索媒体库"><select v-model="filters.collection_id" class="input !w-auto" @change="search"><option value="">全部影片</option><option v-for="c in collections" :key="c.id" :value="c.id">{{ c.kind === 'smart' ? '智能 · ' : '' }}{{ c.name }}</option></select><select v-model="filters.sort" class="input !w-auto" @change="search"><option value="recent">最近更新</option><option value="release">最新发行</option><option value="rating">个人评分</option><option value="plays">播放最多</option><option value="size">文件体积</option></select><button class="btn-ghost">搜索</button></div>
       <div class="flex flex-wrap items-center gap-4 text-sm"><label v-for="[key, label] in [['favorite','本地收藏'],['emby_favorite','Emby 收藏'],['watch_later','想看'],['unseen','未看完'],['include_skipped','显示已跳过']]" :key="key" class="flex items-center gap-2"><input v-model="filters[key]" type="checkbox" @change="search">{{ label }}</label><span class="ml-auto text-gray-500">{{ total }} 部</span></div>
       <div class="flex flex-wrap gap-3">
         <input v-model="filters.genre" class="input !w-auto" placeholder="精确标签" aria-label="标签筛选">
         <input v-model="filters.actor" class="input !w-auto" placeholder="精确演员名" aria-label="演员筛选">
+        <RouterLink v-if="filters.actor.trim()" :to="{ name: 'Actors', query: { name: filters.actor.trim() } }" class="btn-ghost text-xs">演员档案 ↗</RouterLink>
         <input v-model="filters.publisher" class="input !w-auto" placeholder="精确发行商" aria-label="发行商筛选">
         <button type="button" class="btn-ghost" @click="clearFilters">清除筛选</button>
       </div>
@@ -103,5 +106,6 @@ onMounted(() => perform(reloadCollections))
     </ModalDialog>
     <ModalDialog v-model:open="collectionOpen" title="片单" size="xl" scrollable><form class="space-y-4" @submit.prevent="saveCollection"><label><span class="label">名称</span><input v-model="collectionForm.name" class="input" required maxlength="128"></label><select v-model="collectionForm.kind" class="input" :disabled="!!collectionEditing"><option value="manual">手动收录</option><option value="smart">按条件自动收录</option></select><MetadataConditions v-if="collectionForm.kind === 'smart'" v-model="collectionForm.conditions" /><button class="btn-primary">保存片单</button></form></ModalDialog>
     <ModalDialog v-model:open="embyOpen" title="同步 Emby 观看状态"><div class="space-y-4"><p class="text-sm text-gray-400">选择用于统计的 Emby 用户。同步只读取 Emby，不修改播放进度；之后每 30 分钟自动更新。</p><select v-model="embyUser" class="input"><option value="">选择用户</option><option v-for="u in embyUsers" :key="u.id" :value="u.id">{{ u.name }}</option></select><button class="btn-primary" :disabled="embySyncing || !embyUser" @click="syncEmby">{{ embySyncing ? '同步中…' : '保存并同步' }}</button></div></ModalDialog>
+    <EmbyCollectionsPanel v-model:open="aiCollectionsOpen" @published="load" />
   </div>
 </template>
