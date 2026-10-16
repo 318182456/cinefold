@@ -47,6 +47,12 @@ class ConfirmRequest(BaseModel):
     delete_files: bool | None = None
 
 
+@router.get("/agent/proposals")
+def pending_proposals(current_user: str = Depends(get_current_user)):
+    from app.modules.agent.actions import list_proposals
+    return ResponseEntity.ok(list_proposals())
+
+
 @router.post("/agent/confirm")
 def agent_confirm(body: ConfirmRequest, current_user: str = Depends(get_current_user)):
     """执行助手提出的下载器操作。只有走过这一步才会真的动手。"""

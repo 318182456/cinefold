@@ -30,6 +30,17 @@ def run_actors() -> int:
     return services.run_run_actor()
 
 
+def sync_emby_watch() -> int:
+    from app.services.embysync import scheduled_sync
+    return scheduled_sync()
+
+
+def collect_resources() -> int:
+    from app.services.resources import start
+    start()
+    return 0
+
+
 def sub_rank() -> int:
     """榜单订阅任务。"""
     from app import services
@@ -453,6 +464,11 @@ JOBS: dict[str, dict] = {
 
 # 固定间隔任务，不走 crontab
 INTERVAL_JOBS: dict[str, dict] = {
+    "collect_resources": {"func": collect_resources, "name": "采集资源索引", "minutes": 60},
+    "sync_emby_watch": {
+        "func": sync_emby_watch,
+        "name": "同步 Emby 观看状态", "minutes": 30,
+    },
     "pt_wait": {
         "func": pt_wait, "name": "同步下载状态", "minutes": 5,
         "interval_key": "download_sync_interval",

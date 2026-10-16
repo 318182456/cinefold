@@ -25,6 +25,8 @@ FALLBACK_ENV_FILES = (PROJECT_ROOT / "app.env", PROJECT_ROOT / ".env")
 
 # 这些字段在返回给前端时会被打码
 SENSITIVE_KEYS = {
+    "discord_webhook_url",
+    "zspace_cookie",
     "emby_api_key", "plex_token", "jellyfin_api_key",
     "qbittorrent_password", "qbittorrent_apikey",
     "transmission_password", "thunder_authorization",
@@ -106,6 +108,10 @@ class Settings:
     # --- 媒体服务器 ---
     emby_url: str = ""
     emby_api_key: str = ""
+    emby_user_id: str = ""
+    discord_webhook_url: str = ""
+    zspace_url: str = ""
+    zspace_cookie: str = ""
     plex_url: str = ""
     plex_token: str = ""
     jellyfin_url: str = ""
@@ -503,6 +509,10 @@ def load_settings() -> Settings:
     s = Settings(
         emby_url=_env("EMBY_URL"),
         emby_api_key=_env("EMBY_API_KEY"),
+        emby_user_id=_env("EMBY_USER_ID"),
+        discord_webhook_url=_env("DISCORD_WEBHOOK_URL"),
+        zspace_url=_env("ZSPACE_URL"),
+        zspace_cookie=_env("ZSPACE_COOKIE"),
         plex_url=_env("PLEX_URL"),
         plex_token=_env("PLEX_TOKEN"),
         jellyfin_url=_env("JELLYFIN_URL"),

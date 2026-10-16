@@ -8,6 +8,11 @@ const routes = [
     children: [
       { path: '', name: 'Dashboard', component: () => import('@/views/Dashboard.vue'), meta: { title: '看板' } },
       { path: 'subscribe', name: 'Subscribe', component: () => import('@/views/Subscribe.vue'), meta: { title: '订阅' } },
+      { path: 'subscription-rules', name: 'SubscriptionRules', component: () => import('@/views/SubscriptionRules.vue'), meta: { title: '条件订阅' } },
+      { path: 'library', name: 'Library', component: () => import('@/views/Library.vue'), meta: { title: '媒体库' } },
+      { path: 'library-insights', name: 'LibraryInsights', component: () => import('@/views/LibraryInsights.vue'), meta: { title: '收藏分析' } },
+      { path: 'tool-connections', name: 'ToolConnections', component: () => import('@/views/ToolConnections.vue'), meta: { title: '工具接入' } },
+      { path: 'resources', name: 'Resources', component: () => import('@/views/Resources.vue'), meta: { title: '资源索引' } },
       { path: 'search', name: 'Search', component: () => import('@/views/Search.vue'), meta: { title: '搜索' } },
       { path: 'rank', name: 'Rank', component: () => import('@/views/Rank.vue'), meta: { title: '榜单' } },
       { path: 'hot', name: 'Hot', component: () => import('@/views/Hot.vue'), meta: { title: '推荐' } },

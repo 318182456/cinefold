@@ -16,6 +16,10 @@ def get_notifiers() -> list:
     settings = get_settings()
     notifiers = []
 
+    if settings.discord_webhook_url:
+        from app.modules.notify.discord import DiscordNotifier
+        notifiers.append(DiscordNotifier())
+
     if settings.telegram_bot_token and settings.telegram_chat_id:
         from app.modules.notify.telegram import TelegramNotifier
         notifiers.append(TelegramNotifier())

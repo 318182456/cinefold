@@ -1,5 +1,6 @@
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import {
   searchCodes,
   searchTorrents,
@@ -12,6 +13,7 @@ import CodeCard from '@/components/CodeCard.vue'
 import EmptyState from '@/components/EmptyState.vue'
 
 const toast = useToast()
+const route = useRoute()
 const keyword = ref('')
 const results = ref([])
 const torrents = ref([])
@@ -89,6 +91,13 @@ async function search() {
     searching.value = false
   }
 }
+
+watch(() => route.query.keyword, (value) => {
+  if (typeof value === 'string' && value.trim()) {
+    keyword.value = value
+    search()
+  }
+}, { immediate: true })
 
 async function findTorrents(code, refresh = false) {
   currentCode.value = code

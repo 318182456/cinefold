@@ -12,7 +12,7 @@ from loguru import logger
 from sqlalchemy import delete, func, or_, select
 
 from app.core.config import get_settings
-from app.database.models import Actor, Code, CodeStatus, History
+from app.database.models import Actor, Code, CodeStatus, History, RuleExclusion
 from app.database.session import session_scope
 from app.modules import downloadclient, mediaserver, notify, ptsite, translate
 from app.schemas.torrent import Torrent
@@ -50,6 +50,10 @@ def search_torrents(
     """
     settings = get_settings()
     torrents = _search_pt_cached(code, refresh=refresh)
+    from app.services.resources import search as search_index
+    indexed = search_index(code)
+    known_urls = {t.download_url for t in torrents}
+    torrents = list(torrents) + [t for t in indexed if t.download_url not in known_urls]
     if not torrents:
         return []
 
@@ -57,9 +61,13 @@ def search_torrents(
         torrent.code = torrent.code or code
 
     if use_filter:
-        torrents = filter_torrents(torrents, settings.default_filter)
+        from app.services.rules import effective_profile
+        profile = effective_profile(code)
+        torrents = filter_torrents(torrents, profile.filters if profile else settings.default_filter)
+    else:
+        profile = None
 
-    return sort_torrents(torrents, settings.default_sort, build_site_priority())
+    return sort_torrents(torrents, profile.sort if profile else settings.default_sort, build_site_priority())
 
 
 def _search_pt_cached(code: str, refresh: bool = False) -> list[Torrent]:
@@ -502,6 +510,8 @@ def _update_code_status(code: str, status: int) -> None:
 # ======================================================================
 def run_sub_task() -> int:
     """跑一轮订阅下载：把所有已订阅但未下载的番号推给下载器。"""
+    from app.services.rules import run_rules
+    run_rules()
     with session_scope() as session:
         codes = session.scalars(
             select(Code.code).where(Code.status == CodeStatus.SUBSCRIBED)
@@ -628,7 +638,9 @@ def is_filtered_code(code: str, title: str = "") -> str:
     等到那时才拦已经晚了——番号早就进了订阅列表。这里按番号情报
     的标题先筛一道。
     """
-    config = get_settings().default_filter or {}
+    from app.services.rules import effective_profile
+    profile = effective_profile(code)
+    config = profile.filters if profile else (get_settings().default_filter or {})
     if not config.get("exclude_vr"):
         return ""
 
@@ -672,6 +684,8 @@ def subscribe_code(code: str) -> bool:
             session.add(row)
         else:
             row.status = CodeStatus.SUBSCRIBED
+
+        session.execute(delete(RuleExclusion).where(RuleExclusion.code == row.code))
 
     _drop_vanished_history(code)
     send_subscribe_message(code)
@@ -723,6 +737,7 @@ def cancel_subscribe(code: str) -> bool:
         if row is None:
             return False
         row.status = CodeStatus.NONE
+        session.merge(RuleExclusion(code=row.code))
     return True
 
 
@@ -750,6 +765,7 @@ def cancel_subscribe_codes(codes: list[str]) -> dict:
         hit = {lookup[row.code] for row in rows if row.code in lookup}
         for row in rows:
             row.status = CodeStatus.NONE
+            session.merge(RuleExclusion(code=row.code))
 
     missing = [c for c in wanted if c not in hit]
     logger.info(f"批量取消订阅 {len(found)} 个番号，{len(missing)} 个不存在")
@@ -806,6 +822,7 @@ def bulk_cancel_subscribe(
         if not dry_run:
             for row in rows:
                 row.status = CodeStatus.NONE
+                session.merge(RuleExclusion(code=row.code))
             logger.info(f"批量取消订阅 {matched} 个番号")
 
     return {

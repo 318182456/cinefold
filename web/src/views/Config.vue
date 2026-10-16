@@ -217,6 +217,7 @@ const GROUPS = [
         fields: [
           { k: 'emby_url', label: '地址' },
           { k: 'emby_api_key', label: 'API Key', t: 'password' },
+          { k: 'emby_user_id', label: '观看统计用户 ID', hint: '媒体库页面可选择用户；同步其观看进度与播放次数' },
         ],
       },
       {
@@ -232,6 +233,13 @@ const GROUPS = [
         fields: [
           { k: 'plex_url', label: '地址' },
           { k: 'plex_token', label: 'Token', t: 'password' },
+        ],
+      },
+      {
+        title: '极影视（可选）',
+        fields: [
+          { k: 'zspace_url', label: '地址' },
+          { k: 'zspace_cookie', label: 'Cookie', t: 'password' },
         ],
       },
       {
@@ -494,6 +502,11 @@ const GROUPS = [
           { k: 'wechat_to_user', label: '推送用户' },
           { k: 'wechat_banner', label: '推送横幅图', t: 'bool' },
         ],
+      },
+      {
+        title: 'Discord',
+        hint: '在 Discord 频道的整合设置中创建 Webhook；保存后自动接收系统通知。',
+        fields: [{ k: 'discord_webhook_url', label: 'Webhook URL', t: 'password' }],
       },
     ],
     tests: ['telegram', 'wechat'],

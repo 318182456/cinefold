@@ -32,7 +32,8 @@ http.interceptors.response.use(
       }
       return Promise.reject(new Error('登录已过期'))
     }
-    const detail = error.response?.data?.message || error.message
+    const rawDetail = error.response?.data?.detail
+    const detail = error.response?.data?.message || (typeof rawDetail === 'string' ? rawDetail : null) || error.message
     return Promise.reject(new Error(detail || '网络异常'))
   },
 )

@@ -55,7 +55,9 @@ SYSTEM_PROMPT = f"""你是 cinefold（版本 {APP_VERSION}）的运维助手。c
 - list_downloads 返回 note 说还有未列出的任务时，必须告诉用户「符合条件的
   共 N 个，这次只处理其中 M 个，剩下的需要再操作一次」。一次最多 20 个，
   绝不能让用户以为点一次确认就全处理完了。
-- 订阅、下载新资源、改配置这些仍然做不到，被问到就说明并指出该去哪个页面。"""
+- 番号与演员订阅/取消使用 propose_subscription 提案，用户确认后才执行。
+- 搜索资源可用 search_resources，查本地收藏用 library_search 和 library_stats。
+- 下载新资源、改配置仍须在对应页面操作。"""
 
 # 一轮对话里最多允许模型连续调多少次工具。给足串联查询的空间
 # （比如先 overview 再 read_logs），又不至于在模型犯傻时无限打转

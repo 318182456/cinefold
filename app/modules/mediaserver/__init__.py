@@ -16,6 +16,10 @@ def get_media_servers() -> list[MediaServer]:
     settings = get_settings()
     servers: list[MediaServer] = []
 
+    if settings.zspace_url and settings.zspace_cookie:
+        from app.modules.mediaserver.zspace import ZSpace
+        servers.append(ZSpace())
+
     if settings.emby_url and settings.emby_api_key:
         from app.modules.mediaserver.emby import Emby
         servers.append(Emby())

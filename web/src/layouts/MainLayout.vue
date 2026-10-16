@@ -6,6 +6,7 @@ import { useConfigStore } from '@/stores/config'
 import AppLogo from '@/components/AppLogo.vue'
 import AgentPanel from '@/components/AgentPanel.vue'
 import PrivacyToggle from '@/components/PrivacyToggle.vue'
+import CommandMenu from '@/components/CommandMenu.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -17,6 +18,16 @@ const version = ref('')
 const update = ref(null)
 
 const groups = [
+  {
+    title: '收藏管理',
+    items: [
+      { name: 'Library', label: '媒体库与片单', icon: 'M4 4h16v16H4zM4 9h16M9 9v11' },
+      { name: 'LibraryInsights', label: '收藏分析与体检', icon: 'M4 20h16M7 16v-4m5 4V8m5 8V4' },
+      { name: 'SubscriptionRules', label: '条件订阅与方案', icon: 'M4 6h16M7 12h10M10 18h4' },
+      { name: 'ToolConnections', label: '工具接入', icon: 'M8 7h8v10H8zM5 10H3m18 4h-2M10 5V3m4 18v-2' },
+      { name: 'Resources', label: '资源索引', icon: 'M4 4h16v5H4zM4 12h16v8H4zM8 15h8' },
+    ],
+  },
   {
     title: '资源',
     items: [
@@ -131,6 +142,7 @@ onMounted(async () => {
       </nav>
 
       <div class="border-t border-gray-800 p-3 pb-[calc(0.75rem+env(safe-area-inset-bottom))]">
+        <CommandMenu />
         <p v-if="version" class="flex items-center gap-1.5 px-2 pb-2 text-[11px] text-gray-600">
           <span>v{{ version }}</span>
           <template v-if="update">

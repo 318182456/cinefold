@@ -20,6 +20,10 @@ PROPOSAL_TTL = 300
 
 # 动作 → (人话, 是否不可逆)
 ACTIONS = {
+    "subscribe_codes": ("订阅番号", False),
+    "cancel_codes": ("取消番号订阅", False),
+    "subscribe_actor": ("订阅演员", False),
+    "cancel_actor": ("取消演员订阅", False),
     "pause": ("暂停", False),
     "resume": ("恢复", False),
     "recheck": ("重新检查", False),
@@ -71,6 +75,13 @@ def take_proposal(proposal_id: str) -> dict | None:
     with _lock:
         _sweep()
         return _proposals.pop(proposal_id, None)
+
+
+def list_proposals() -> list[dict]:
+    import copy
+    with _lock:
+        _sweep()
+        return copy.deepcopy(list(_proposals.values()))
 
 
 def _clients_for(name: str = ""):
@@ -164,6 +175,21 @@ def execute(proposal_id: str, delete_files: bool | None = None) -> dict:
         return {"ok": False, "message": "操作已过期或已执行，请重新提问"}
 
     action = record["action"]
+    if action in ("subscribe_codes", "cancel_codes", "subscribe_actor", "cancel_actor"):
+        from app import services
+        affected = 0
+        for target in record["targets"]:
+            code = target.get("code")
+            name = target.get("actor")
+            if action == "subscribe_codes" and code:
+                affected += bool(services.subscribe_code(code))
+            elif action == "cancel_codes" and code:
+                affected += bool(services.cancel_subscribe(code))
+            elif action == "subscribe_actor" and name:
+                affected += bool(services.subscribe_actor(name, target.get("limit_date") or ""))
+            elif action == "cancel_actor" and name:
+                affected += bool(services.cancel_actor(name))
+        return {"ok": bool(affected), "message": f"已{record['label']} {affected} 项", "affected": affected}
     hashes = [t["hash"] for t in record["targets"] if t.get("hash")]
     if not hashes:
         return {"ok": False, "message": "没有可操作的任务"}

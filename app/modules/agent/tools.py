@@ -1,6 +1,6 @@
 """agent 可调用的工具集。
 
-除 propose_action 外全是只读的，直接查库或读现成的服务层结果。
+查询工具只读；propose_action 和 propose_subscription 只创建待确认提案。
 
 propose_action 也不直接动手：它只登记一个待确认操作，用户在面板上点确认才
 真正执行（见 actions.py）。对话入口很容易被问出"把进度低的都删了"，而模型
@@ -540,8 +540,78 @@ REGISTRY = {
     "check_config": tool_check_config,
 }
 
+
+def tool_propose_subscription(args: dict) -> dict:
+    from datetime import date
+    from app.modules.agent.actions import create_proposal
+    from app.services import get_code_row
+    from app.utils import get_true_code
+
+    action = args.get("action")
+    if action not in ("subscribe_codes", "cancel_codes", "subscribe_actor", "cancel_actor"):
+        return {"error": "未知订阅动作"}
+    targets = []
+    if action.endswith("codes"):
+        codes = args.get("codes")
+        if not isinstance(codes, list) or not 1 <= len(codes) <= ROW_LIMIT:
+            return {"error": f"请提供 1 到 {ROW_LIMIT} 个番号"}
+        with session_scope() as session:
+            for value in dict.fromkeys(str(x).strip() for x in codes):
+                normalized = get_true_code(value)
+                if not normalized:
+                    return {"error": f"无效番号：{value}"}
+                row = get_code_row(session, normalized)
+                if action == "cancel_codes" and row is None:
+                    return {"error": f"番号不在库中：{normalized}"}
+                if action == "subscribe_codes" and row and row.status >= CodeStatus.DOWNLOADING:
+                    return {"error": f"{row.code} 已下载或正在下载，请在页面核对后操作"}
+                targets.append({"code": row.code if row else normalized, "name": f"{normalized} {row.cn_title or row.title or ''}" if row else normalized, "progress_percent": None})
+    else:
+        name = str(args.get("actor") or "").strip()
+        if not name or len(name) > 128:
+            return {"error": "请提供演员名"}
+        limit_date = args.get("limit_date") or date.today().isoformat()
+        date.fromisoformat(limit_date)
+        targets.append({"actor": name, "name": f"{name}（起始日期 {limit_date}）", "limit_date": limit_date, "progress_percent": None})
+    return {"proposal": create_proposal(action, targets), "message": "已生成待确认订阅操作，请在助手面板或工具接入页确认。"}
+
+
+def tool_library(args: dict) -> dict:
+    from app.services.library import library_items
+    return library_items(keyword=str(args.get("keyword") or "")[:200], favorite=bool(args.get("favorite")), unseen=bool(args.get("unseen")), size=ROW_LIMIT)
+
+
+def tool_library_stats(args: dict) -> dict:
+    from app.services.library import library_stats
+    return library_stats()
+
+
+def tool_search_resources(args: dict) -> dict:
+    from app.services import search_torrents
+    from app.utils import get_true_code
+    code = get_true_code(str(args.get("code") or ""))
+    if not code:
+        return {"error": "请提供有效番号"}
+    return {"items": [t.to_dict() for t in search_torrents(code, use_filter=False)[:ROW_LIMIT]]}
+
+
+REGISTRY.update(propose_subscription=tool_propose_subscription, library_search=tool_library,
+                library_stats=tool_library_stats, search_resources=tool_search_resources)
+
+for _name, _description, _properties, _required in [
+    ("propose_subscription", "生成番号/演员订阅或取消订阅的待确认提案，不会立即执行。用户必须在界面确认。", {
+        "action": {"type": "string", "enum": ["subscribe_codes", "cancel_codes", "subscribe_actor", "cancel_actor"]},
+        "codes": {"type": "array", "items": {"type": "string"}, "maxItems": ROW_LIMIT},
+        "actor": {"type": "string"}, "limit_date": {"type": "string", "description": "演员订阅起始日期 YYYY-MM-DD"}}, ["action"]),
+    ("library_search", "查询本地媒体库收藏、文件路径和 Emby 观看状态。", {"keyword": {"type": "string"}, "favorite": {"type": "boolean"}, "unseen": {"type": "boolean"}}, []),
+    ("library_stats", "查询收藏分布、演员和标签偏好与 Emby 累计观看统计。", {}, []),
+    ("search_resources", "按番号检索各站资源，不执行下载。", {"code": {"type": "string"}}, ["code"]),
+]:
+    TOOL_SCHEMAS.append({"type": "function", "function": {"name": _name, "description": _description,
+        "parameters": {"type": "object", "properties": _properties, "required": _required}}})
+
 # 会产生待确认提案的工具。答复里要把提案带给前端，靠它识别
-PROPOSAL_TOOLS = {"propose_action"}
+PROPOSAL_TOOLS = {"propose_action", "propose_subscription"}
 
 
 def call_tool(name: str, arguments: str | dict) -> str:

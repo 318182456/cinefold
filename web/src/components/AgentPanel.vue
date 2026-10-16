@@ -406,13 +406,13 @@ onBeforeUnmount(() => {
                 <span :class="proposal.destructive ? 'font-medium text-red-300' : 'text-gray-300'">
                   {{ proposal.label }}
                 </span>
-                <span class="text-gray-500">· {{ proposal.targets.length }} 个任务</span>
+                <span class="text-gray-500">· {{ proposal.targets.length }} 项</span>
               </p>
 
               <ul class="mt-1.5 space-y-0.5">
                 <li
                   v-for="target in proposal.targets"
-                  :key="target.hash"
+                  :key="target.hash || target.code || target.actor"
                   class="flex items-baseline gap-1.5 text-gray-400"
                 >
                   <span class="truncate">{{ target.name }}</span>

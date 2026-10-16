@@ -11,14 +11,18 @@
 |---|---|
 | 下载器 | qBittorrent（含 5.x）· Transmission · 迅雷 |
 | 转移做种 | qB 下载完的种子转给 Transmission 长期做种，文件不移动 |
-| 媒体库 | Emby · Jellyfin · Plex |
+| 媒体库 | Emby · Jellyfin · Plex · 极影视；本地收藏与手动/智能片单 |
+| 条件订阅 | 标签 · 演员组合 · 厂牌 · 系列 · 番号前缀；每条规则独立下载方案 |
+| 收藏分析 | 收藏/想看/评分/笔记 · 相似推荐 · Emby 观看状态与累计次数 · 年度分布 |
+| 健康检查 | 缺失/空文件/疑似样片 · 元数据缺项 · 多版本/分卷识别 · SHA-256 内容查重 |
+| 资源索引 | JSON · RSS · Discuz 页面采集，磁链去重与番号匹配；CloudDrive 离线提交 |
 | PT 站点 | M-Team · Rousi · PTT · NicePT · 自定义 BT 源 |
 | 资源站 | JavDB · JavBus · JavLibrary · 厂牌官网（9 家） |
-| 通知 | Telegram · 企业微信（含指令回调） |
+| 通知 | Telegram · 企业微信（含指令回调）· Discord Webhook |
 | 翻译 | OpenAI 兼容接口 · 腾讯 · 百度 · Google（依次降级） |
 | 字幕 | SubtitleCat · GitHub 字幕库，入库自动抓，只认简体中文 |
 | AI 影评 | 按元数据与演员/厂牌历史标签生成看点，写进 NFO 与 Emby 简介 |
-| AI 助手 | 侧边悬浮对话，问情况 · 操作 qb/tr 任务（需确认） |
+| AI 助手 | 查收藏与资源 · 番号/演员订阅提案 · 操作 qb/tr 任务（需确认）· MCP 接入 |
 
 ---
 
@@ -172,8 +176,25 @@ AGENT_API_KEY=sk-xxx
 
 确认项 5 分钟过期，且只能用一次（重复点不会执行两遍）；服务重启即失效。
 
-其余仍然做不到：订阅、下载新资源、改配置都得自己在对应页面操作。
+番号/演员订阅与取消可由助手生成提案，在面板确认后执行；下载新资源、改配置仍在对应页面操作。
 `check_config` 只返回各项是否已配置，不回显密钥内容。
+
+### 收藏管理、条件订阅与工具接入
+
+侧边栏「收藏管理」提供媒体库与片单、收藏分析与体检、条件订阅与方案、资源索引和工具接入。
+播放交给 Emby，cinefold 不提供网页播放器。快捷导航可按 `Ctrl+K` / `⌘K` 打开。
+
+- **条件订阅**：先创建下载方案（完整替代全局过滤和排序），再设置标签、厂牌、系列、演员组合或番号前缀规则。可先预览匹配，启用后随订阅下载任务执行；多条命中时优先最早创建的规则。只处理未订阅条目，不重置下载中或已入库状态。手动取消的影片会排除自动规则，主动重新订阅后解除排除。
+- **媒体库**：展示已入库或已登记文件、或已匹配 Emby 的影片。支持收藏、想看、评分、笔记、手动片单和智能片单。切换排序可查看最近入库、最高评分与播放最多的影片。
+- **Emby 同步**：在「媒体库 → 同步 Emby」选定用户，读取其观看状态、进度、累计播放次数，每 30 分钟更新。只匹配本地已知番号或精确文件路径，不修改 Emby 或订阅状态。完整分页成功才替换本地快照，失败保留旧数据；切换用户后成功同步会替换旧用户的快照。月份分布按条目最后观看时间统计，不是历史播放事件计数。
+- **健康检查**：快速检查登记文件的存在性、空文件、疑似样片和元数据缺项；完整查重对同体积候选文件读取全部内容并计算 SHA-256，相同 inode 硬链接只算一份。分卷单独提示，不自动清理；清理仍需在硬链接管理中预览关联范围。
+- **资源索引**：添加 JSON、RSS 或论坛页面，启用后每小时采集。论坛模式支持 Discuz `thread-` / `viewthread` 链接，单轮最多读取当前页 30 个主题；页面结构变更时需适配。资源按磁链 info hash 去重并关联番号，采集本身不创建订阅；搜索结果归为 BT，仍受 `BT_AUTO_DOWNLOAD` 控制。JSON 格式为资源数组或 `data/items` 数组，字段含 `title`、`magnet`（字符串或数组）或 `download_url`，可选 `size_mb`、`detail_url`。
+- **扩展接入**：Discord Webhook 在通知设置中配置。极影视是可选的入库查询源。CloudDrive 在资源索引页提交离线磁链，沿用设置页 `CLOUDNAS_*` 配置，保存目录需预先存在；此任务由 CloudDrive 管理，不加入本地 qB/TR 做种链路。
+- **MCP**：端点为 `/api/v1/mcp`，支持无会话 Streamable HTTP（2025-11-25 / 2025-06-18 / 2025-03-26），通过 `Authorization: Bearer <账户页长期 token>` 鉴权。复用助手的查询工具，写操作只生成提案，需在「工具接入」页确认，5 分钟过期。
+
+数据库启动时自动创建新增表，保留已有影片、演员与下载记录。新增 CloudDrive 的 gRPC/Protobuf 依赖需先运行 `pip install -r requirements.txt`；Docker 构建会自动安装。
+新增实现参考本地 AVM、AutoLady 和 article 项目的功能设计；CloudDrive 协议生成文件来自参考目录中的 `article-master.zip`。
+Emby 同步接口依据 [Emby Items API](https://dev.emby.media/reference/RestAPI/ItemsService/getUsersByUseridItems.html)，MCP 传输依据 [MCP 2025-11-25 规范](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports)。
 
 ---
 
