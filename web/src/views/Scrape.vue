@@ -159,7 +159,7 @@ async function doRun() {
       </p>
     </div>
 
-    <DownloadSources v-if="sourcesMounted" v-show="workspace === 'videos'" ref="sourcesRef" @preview="previewSource" />
+    <DownloadSources v-if="sourcesMounted" v-show="workspace === 'videos'" ref="sourcesRef" @preview="previewSource" @updated="linksRef?.refresh()" />
     <MediaLinks v-if="linksMounted" v-show="workspace === 'links'" ref="linksRef" />
     <WatchDirectories v-if="workspace === 'watch'" />
     <div v-show="workspace === 'tools'" class="space-y-4">

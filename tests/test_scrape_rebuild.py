@@ -283,6 +283,51 @@ def test_hash_proves_independent_copy_without_same_inode(library):
     assert scraperebuild._PLAN['evidence'][0]['method'] == 'sha256'
 
 
+def test_cleanup_reuses_unchanged_sha_proof(copy_mode, monkeypatch):
+    case = copy_mode
+    content = case['video'].read_bytes()
+    case['video'].unlink()
+    case['video'].write_bytes(content)
+    original = scraperebuild._progress_hash
+    def no_video_rehash(path):
+        assert Path(path) not in (case['video'], case['source']), 'unchanged video proof should be reused'
+        return original(path)
+    monkeypatch.setattr(scraperebuild, '_progress_hash', no_video_rehash)
+    value = preview()
+    scraperebuild.start(value['token'], str(case['output']))
+    result = wait()
+    assert result['phase'] == 'completed', result
+    assert case['source'].read_bytes() == content
+    with case['db']() as session:
+        cached = session.get(ScrapeSourceVideo, scrapeinventory.key(case['source']))
+        assert cached.links and all(Path(path).exists() for path in cached.links)
+        assert cached.artifact_status == 'complete'
+
+
+def test_cleanup_batches_syncs_and_flushes_on_failure(tmp_path, monkeypatch):
+    quarantine = tmp_path / 'backup'
+    quarantine.mkdir()
+    output = tmp_path / 'output'
+    output.mkdir()
+    syncs = []
+    monkeypatch.setattr(scraperebuild, '_fsync_directory', lambda path: syncs.append(path))
+    @scraperebuild._batch_cleanup
+    def interrupted(plan, root, storage, destination, manifest):
+        for index in range(100):
+            path = root / f'{index}.nfo'
+            path.write_text('disposable')
+            path.unlink()
+            scraperebuild._sync_cleanup_directory(root)
+            scraperebuild._append_operation(destination, {'operation': 'unlink_regenerable_sidecar', 'path': path.name})
+        raise ValueError('interrupted')
+    with pytest.raises(ValueError, match='interrupted'):
+        interrupted({}, output, None, quarantine, {})
+    journal = [json.loads(line) for line in (quarantine / 'moves.jsonl').read_text(encoding='utf-8').splitlines()]
+    assert len(journal) == 100
+    assert len(syncs) <= 6
+    assert getattr(scraperebuild._CLEANUP_LOCAL, 'batch', None) is None
+
+
 def test_same_size_different_bytes_is_blocked(library):
     size = library['video'].stat().st_size
     library['video'].unlink()

@@ -7,6 +7,7 @@ independent download sources. No download source is removed by this service.
 from __future__ import annotations
 
 import copy
+from functools import wraps
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 import hashlib
@@ -18,6 +19,7 @@ import re
 import secrets
 import shutil
 import stat
+import sys
 import threading
 from threading import Thread
 import time
@@ -42,6 +44,7 @@ _TOKEN_LIFETIME = 3600
 _STATE_FILE = DATA_DIR / 'scrape-rebuild-state.json'
 _PROGRESS_SAVED = 0.0
 _GENERATED_SIDECARS = {'.nfo', '.json', '.jpg', '.jpeg', '.png', '.webp', '.tbn'}
+_CLEANUP_LOCAL = threading.local()
 
 
 def _progress_start(stage, label, total=0, unit='文件', bytes_total=0):
@@ -112,6 +115,8 @@ def state():
     if progress:
         progress['elapsed_seconds'] = max(0, (progress.get('finished_at') or value.get('finished_at') or now) - progress['started_at'])
         progress['idle_seconds'] = max(0, (value.get('finished_at') or now) - progress['updated_at'])
+    from app.services.scraperecovery import info
+    value['recovery'] = info(sys.modules[__name__], value['running'])
     return value
 
 
@@ -137,6 +142,10 @@ def _persist_state():
             'progress', 'progress_steps', 'started_at', 'finished_at', 'cleanup_note_count', 'cleanup_notes', 'retained_file_count')
     _STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
     _write_manifest(_STATE_FILE, {key: _STATE.get(key) for key in keys})
+    if (Path(_STATE['quarantine_dir']) / 'manifest.json').is_file():
+        from app.services.scraperecovery import reference_path
+        _write_manifest(reference_path(sys.modules[__name__]),
+                        {key: _STATE.get(key) for key in ('job_id', 'quarantine_dir', 'phase', 'running', 'done', 'total', 'ok')})
 
 
 def _stamp(path):
@@ -378,7 +387,7 @@ def _collect(missing_policy='block'):
         preferred = source_map.get(row.get('source_path'))
         possibilities = [preferred] if preferred else []
         possibilities += inode_map.get(tuple(stamp[:2]), []) + size_map.get(stamp[2], [])
-        verified, method = None, ''
+        verified, method, verified_digest = None, '', ''
         tested = set()
         for candidate in possibilities:
             if candidate['path'] in tested:
@@ -390,9 +399,11 @@ def _collect(missing_policy='block'):
                     continue
                 verified, method = candidate, 'inode'
                 break
-            if stamp[2] == candidate['stamp'][2] and stable_digest(video) == stable_digest(source):
-                verified, method = candidate, 'sha256'
-                break
+            if stamp[2] == candidate['stamp'][2]:
+                digest = stable_digest(video)
+                if digest == stable_digest(source):
+                    verified, method, verified_digest = candidate, 'sha256', digest
+                    break
         if verified is None:
             unrecoverable.append(str(video))
             if missing_policy == 'block':
@@ -402,7 +413,8 @@ def _collect(missing_policy='block'):
             raise ValueError('校验时视频发生变化，请下载完成后重新预览')
         code = get_true_code(row.get('code', '')) or verified['code']
         part = mediafile.parse(video).part
-        evidence.append({'video': str(video), 'source': verified['path'], 'method': method, 'code': code, 'part': part})
+        evidence.append({'video': str(video), 'source': verified['path'], 'method': method, 'code': code, 'part': part,
+                         'sha256': verified_digest, 'video_stamp': stamp, 'source_stamp': verified['stamp']})
         detail = local.read_group(code, [video])
         detail.update(_artwork(video))
         if detail:
@@ -657,11 +669,66 @@ def _check_sources(plan, *, owned_inodes=()):
 
 
 def _append_operation(quarantine, operation):
+    batch = getattr(_CLEANUP_LOCAL, 'batch', None)
+    if batch is not None and batch.quarantine == quarantine:
+        batch.append(operation)
+        return
     with (quarantine / 'moves.jsonl').open('a', encoding='utf-8') as stream:
         stream.write(json.dumps(operation, ensure_ascii=False) + '\n')
         stream.flush()
         os.fsync(stream.fileno())
     _fsync_directory(quarantine)
+
+
+class _CleanupJournal:
+    """Bound cleanup syncs; recovery reconciles the original snapshot with disk."""
+    def __init__(self, quarantine):
+        self.quarantine = quarantine
+        self.operations = []
+        self.directories = set()
+        self.updated = time.monotonic()
+
+    def append(self, operation):
+        self.operations.append(operation)
+        if len(self.operations) >= 64 or time.monotonic() - self.updated >= 1:
+            self.flush()
+
+    def flush(self):
+        for directory in self.directories:
+            _fsync_directory(directory)
+        if self.operations:
+            with (self.quarantine / 'moves.jsonl').open('a', encoding='utf-8') as stream:
+                stream.writelines(json.dumps(row, ensure_ascii=False) + '\n' for row in self.operations)
+                stream.flush()
+                os.fsync(stream.fileno())
+            _fsync_directory(self.quarantine)
+        self.operations.clear()
+        self.directories.clear()
+        self.updated = time.monotonic()
+
+
+def _sync_cleanup_directory(path):
+    batch = getattr(_CLEANUP_LOCAL, 'batch', None)
+    if batch is None:
+        _fsync_directory(path)
+    else:
+        batch.directories.add(path)
+
+
+def _batch_cleanup(function):
+    @wraps(function)
+    def run(plan, output, storage, quarantine, manifest):
+        batch = _CleanupJournal(quarantine)
+        previous = getattr(_CLEANUP_LOCAL, 'batch', None)
+        _CLEANUP_LOCAL.batch = batch
+        try:
+            return function(plan, output, storage, quarantine, manifest)
+        finally:
+            try:
+                batch.flush()
+            finally:
+                _CLEANUP_LOCAL.batch = previous
+    return run
 
 
 def _backup_sidecars(plan, storage):
@@ -722,6 +789,7 @@ def _backup_sidecars(plan, storage):
     return backups
 
 
+@_batch_cleanup
 def _clear_copied_output(plan, output, storage, quarantine, manifest):
     """Remove only snapshotted files, with per-video independent-source checks."""
     _check_tree(plan, output, mutable_sidecars=True)
@@ -790,7 +858,9 @@ def _clear_copied_output(plan, output, storage, quarantine, manifest):
                 if not path.samefile(independent) or not _independent_hardlink(independent, path):
                     raise ValueError(f'视频与独立源硬链接身份不符，停止清理: {path}')
             elif proof['method'] == 'sha256':
-                if _progress_hash(path) != _progress_hash(independent):
+                reusable = (bool(proof.get('sha256')) and proof.get('video_stamp') == expected
+                            and proof.get('source_stamp') == source_expected)
+                if not reusable and _progress_hash(path) != _progress_hash(independent):
                     raise ValueError(f'视频与独立源内容校验不符，停止清理: {path}')
             else:
                 raise ValueError(f'未知视频恢复证据，停止清理: {path}')
@@ -801,7 +871,7 @@ def _clear_copied_output(plan, output, storage, quarantine, manifest):
             raise ValueError('文件在最终清理检查时变化，停止操作')
         # Never recurse or remove the root. Newly arrived files are untouched.
         path.unlink()
-        _fsync_directory(path.parent)
+        _sync_cleanup_directory(path.parent)
         _append_operation(quarantine, {'operation': 'unlink_discard_confirmed' if str(path) in discarded else 'unlink_verified', 'path': relative})
         cleared += 1
         _progress(done=cleared, current=str(path))
@@ -814,6 +884,10 @@ def _clear_copied_output(plan, output, storage, quarantine, manifest):
             if _unsafe_links(Path(raw)) or changed[:4] != expected_stamps[raw][:4]:
                 raise ValueError('清理旧链接期间共享文件发生变化，停止操作')
             expected_stamps[raw] = changed
+    # Persist file removals while all their parent directories still exist.
+    batch = getattr(_CLEANUP_LOCAL, 'batch', None)
+    if batch is not None:
+        batch.flush()
     directories = [(output / relative, expected) for relative, expected, kind in plan['manifest'] if kind == 'dir']
     _progress_start('cleanup_dirs', '整理空目录', sum(not any(Path(raw).is_relative_to(directory) for raw in retained)
                                                for directory, _ in directories), unit='目录')
@@ -825,6 +899,7 @@ def _clear_copied_output(plan, output, storage, quarantine, manifest):
             continue
         try:
             directory.rmdir()
+            _fsync_directory(directory.parent)
         except OSError:
             # Emby may create fresh metadata in reaction to video deletions.
             # Never recurse into unexpected children or stop the whole batch.
@@ -860,7 +935,7 @@ def _clear_sidecar(path, relative, storage, quarantine, manifest, backup):
             # NFO/artwork are disposable outputs, not source-video evidence.
             # External metadata edits and timestamp changes must not halt jobs.
             path.unlink()
-            _fsync_directory(path.parent)
+            _sync_cleanup_directory(path.parent)
             _append_operation(quarantine, {'operation': 'unlink_regenerable_sidecar', 'path': relative})
             return 'removed', ''
         saved = storage / relative
@@ -880,7 +955,7 @@ def _clear_sidecar(path, relative, storage, quarantine, manifest, backup):
         if _unsafe_links(path) or _stamp(path) != before:
             raise ValueError('最终检查时文件变化，保留当前文件')
         path.unlink()
-        _fsync_directory(path.parent)
+        _sync_cleanup_directory(path.parent)
         _append_operation(quarantine, {'operation': 'unlink_sidecar_verified', 'path': relative, 'updated_backup': updated})
         return 'removed', ''
     except (OSError, ValueError) as exc:
@@ -924,7 +999,10 @@ def _run(plan, refresh_metadata, force=False):
         if mode == 'rename' and quarantine.stat().st_dev != output.stat().st_dev:
             raise ValueError('隔离目录与输出目录不在同一文件系统')
         _update(phase='quarantine', quarantine_dir=str(quarantine), quarantine_mode=mode, backup_bytes=plan['public']['backup_bytes'])
-        manifest = {'version': 1, 'created_at': datetime.now().isoformat(), 'output_dir': str(output),
+        from app.services.scraperecovery import naming_config
+        manifest = {'version': 2, 'created_at': datetime.now().isoformat(), 'output_dir': str(output),
+                    'checkpoint': 'quarantine', 'naming_config': naming_config(get_settings()),
+                    'options': {'refresh_metadata': refresh_metadata, 'force': force},
                     'job_id': _STATE.get('job_id'),
                     'quarantine_mode': mode, 'backup_bytes': plan['public']['backup_bytes'],
                     'video_storage': 'source_references' if mode == 'copy_sidecars' else 'quarantined_files',
@@ -947,9 +1025,11 @@ def _run(plan, refresh_metadata, force=False):
         if mode == 'copy_sidecars':
             _update(phase='backup')
             manifest['phase'] = 'backup'
+            manifest['checkpoint'] = 'backup'
             _write_manifest(manifest_path, manifest)
             manifest['sidecar_backups'] = _backup_sidecars(plan, storage)
             manifest['phase'] = 'backups_verified'
+            manifest['checkpoint'] = 'clearing'
             _write_manifest(manifest_path, manifest)
             _update(phase='clearing')
             source_stamps = _clear_copied_output(plan, output, storage, quarantine, manifest)
@@ -987,93 +1067,10 @@ def _run(plan, refresh_metadata, force=False):
                 if not cached.links:
                     cached.artifact_status = 'pending'
         manifest['phase'] = 'rebuilding'
+        manifest['checkpoint'] = 'rebuilding'
         _write_manifest(manifest_path, manifest)
         _update(phase='rebuilding')
-        from app.services import scrape, scrapesources
-        groups = scrapesources.group_entries([{'path': item['path'], 'code': item['code']} for item in plan['sources']])
-        preserved = {}
-        for item in plan['metadata']:
-            detail = preserved.setdefault(item.get('target_code', item['code']), {})
-            artwork = detail.setdefault('_local_by_part', {}).setdefault(str(item.get('part', 0)), {})
-            for key, value in item['detail'].items():
-                detail.setdefault(key, _remap(value, output, storage) if key.startswith('_local_') else value)
-                if key in ('_local_cover', '_local_poster', '_local_thumb', '_local_stills'):
-                    artwork.setdefault(key, _remap(value, output, storage))
-        _update(total=len(groups))
-        _progress_start('rebuilding', '重新刮削影片', len(groups), unit='部')
-        attempt_lock = threading.Lock()
-        job_id = _STATE.get('job_id', '')
-        def rebuild(code, items):
-            with _LOCK:
-                active = _STATE.setdefault('active_codes', [])
-                if code not in active:
-                    active.append(code)
-                _progress(current='、'.join(active))
-            with attempt_lock:
-                scrapesources.record_attempt(items, code, status='running', job_id=job_id)
-            try:
-                for item in items:
-                    if _unsafe_links(item.path) or _stamp(item.path) != source_stamps[str(item.path)]:
-                        raise ValueError('源视频已变化，停止此影片的重建')
-                with _maintenance().internal():
-                    result = scrape.scrape_group(code, items, refresh_metadata=refresh_metadata,
-                                                 preserved_meta=preserved.get(code), **({'force': True} if force else {}))
-                row = {'code': code, 'ok': result.ok, 'error': result.error,
-                       'warnings': result.warnings, 'links': [str(path) for path in result.links]}
-            except Exception as exc:
-                logger.exception(f'[{code}] 全量重建失败，下载源保留，请核对隔离目录的恢复清单')
-                row = {'code': code, 'ok': False, 'error': str(exc), 'warnings': [], 'links': []}
-            with attempt_lock:
-                scrapesources.record_attempt(items, code, status='succeeded' if row['ok'] else 'failed',
-                                             job_id=job_id, error=row['error'])
-            return row
-        # Keep the executor's internal queue bounded too; a large library must
-        # not create thousands of futures while only two films can progress.
-        queue = iter(groups.items())
-        with ThreadPoolExecutor(max_workers=2, thread_name_prefix='rebuild-film') as pool:
-            pending = set()
-            for _ in range(2):
-                entry = next(queue, None)
-                if entry:
-                    pending.add(pool.submit(rebuild, *entry))
-            while pending:
-                future = next(as_completed(pending))
-                pending.remove(future)
-                row = future.result()
-                manifest['results'].append(row)
-                with (quarantine / 'results.jsonl').open('a', encoding='utf-8') as stream:
-                    stream.write(json.dumps(row, ensure_ascii=False) + '\n')
-                    stream.flush()
-                with _LOCK:
-                    _STATE['done'] += 1
-                    _STATE['ok'] += int(row['ok'])
-                    _STATE['results'] = manifest['results'][-200:]
-                    active = _STATE.get('active_codes', [])
-                    if row['code'] in active:
-                        active.remove(row['code'])
-                    _progress(done=_STATE['done'], current='、'.join(active))
-                    _persist_state()
-                entry = next(queue, None)
-                if entry:
-                    pending.add(pool.submit(rebuild, *entry))
-        failed = sum(not row['ok'] for row in manifest['results'])
-        # Successful new hard links legitimately change ctime once more.
-        # Record their final signatures for later manual recovery checks.
-        for raw, expected in source_stamps.items():
-            try:
-                current = _stamp(raw)
-                if current[:4] == expected[:4] and not _unsafe_links(Path(raw)):
-                    manifest['recovery_source_stamps'][raw] = current
-                else:
-                    manifest.setdefault('recovery_source_changes', []).append(raw)
-            except OSError:
-                manifest.setdefault('recovery_source_changes', []).append(raw)
-        manifest['phase'] = 'completed' if not failed else 'partial'
-        _write_manifest(manifest_path, manifest)
-        recovery = '非视频备份在隔离目录，旧视频可按清单从下载源恢复' if mode == 'copy_sidecars' else '旧产物保留在隔离目录，可手动恢复'
-        _update(phase=manifest['phase'], cleanup_note_count=len(manifest.get('cleanup_notes', [])),
-                cleanup_notes=manifest.get('cleanup_notes', [])[-100:], retained_file_count=len(plan.get('retained', [])),
-                error=f'{failed} 部重建失败，{recovery}' if failed else '')
+        _run_films(plan, manifest, quarantine, storage, source_stamps, refresh_metadata, force)
     except Exception as exc:
         logger.exception('全量重建未完成；下载源保留，请核对隔离目录备份和恢复清单')
         if manifest is not None and quarantine is not None:
@@ -1088,3 +1085,107 @@ def _run(plan, refresh_metadata, force=False):
             _update(running=False, finished_at=time.time())
         finally:
             _maintenance().release()
+
+
+def _run_films(plan, manifest, quarantine, storage, source_stamps, refresh_metadata, force, selected_codes=None):
+    manifest_path = quarantine / "manifest.json"
+    output = Path(plan['public']['output_dir'])
+    mode = plan["quarantine_mode"]
+    from app.services import scrape, scrapesources
+    groups = scrapesources.group_entries([{'path': item['path'], 'code': item['code']} for item in plan['sources']])
+    preserved = {}
+    for item in plan['metadata']:
+        detail = preserved.setdefault(item.get('target_code', item['code']), {})
+        artwork = detail.setdefault('_local_by_part', {}).setdefault(str(item.get('part', 0)), {})
+        for key, value in item['detail'].items():
+            detail.setdefault(key, _remap(value, output, storage) if key.startswith('_local_') else value)
+            if key in ('_local_cover', '_local_poster', '_local_thumb', '_local_stills'):
+                artwork.setdefault(key, _remap(value, output, storage))
+    latest = {row['code']: row for row in manifest.get('results', [])}
+    selected = set(groups) if selected_codes is None else set(selected_codes)
+    # Retried failures are replaced, not added to the historical failure count.
+    for code in selected:
+        latest.pop(code, None)
+    _update(total=len(groups), done=len(latest), ok=sum(bool(row['ok']) for row in latest.values()), results=list(latest.values())[-200:], active_codes=[])
+    _progress_start('rebuilding', '重新刮削影片', len(groups), unit='部')
+    _progress(done=len(latest))
+    attempt_lock = threading.Lock()
+    job_id = _STATE.get('job_id', '')
+    def rebuild(code, items):
+        with _LOCK:
+            active = _STATE.setdefault('active_codes', [])
+            if code not in active:
+                active.append(code)
+            _progress(current='、'.join(active))
+        with attempt_lock:
+            scrapesources.record_attempt(items, code, status='running', job_id=job_id)
+        try:
+            for item in items:
+                expected = source_stamps.get(str(item.path))
+                if not expected or _unsafe_links(item.path) or _stamp(item.path) != expected:
+                    raise ValueError('源视频已变化或缺失，停止此影片的重建')
+            with _maintenance().internal():
+                result = scrape.scrape_group(code, items, refresh_metadata=refresh_metadata,
+                                             preserved_meta=preserved.get(code), **({'force': True} if force else {}))
+            row = {'code': code, 'ok': result.ok, 'error': result.error,
+                   'warnings': result.warnings, 'links': [str(path) for path in result.links]}
+        except Exception as exc:
+            logger.exception(f'[{code}] 全量重建失败，下载源保留，请核对隔离目录的恢复清单')
+            row = {'code': code, 'ok': False, 'error': str(exc), 'warnings': [], 'links': []}
+        with attempt_lock:
+            scrapesources.record_attempt(items, code, status='succeeded' if row['ok'] else 'failed',
+                                         job_id=job_id, error=row['error'])
+        return row
+    # Keep the executor's internal queue bounded too; a large library must
+    # not create thousands of futures while only two films can progress.
+    queue = iter((code, items) for code, items in groups.items() if code in selected)
+    with ThreadPoolExecutor(max_workers=2, thread_name_prefix='rebuild-film') as pool:
+        pending = set()
+        for _ in range(2):
+            entry = next(queue, None)
+            if entry:
+                pending.add(pool.submit(rebuild, *entry))
+        while pending:
+            future = next(as_completed(pending))
+            pending.remove(future)
+            row = future.result()
+            latest[row['code']] = row
+            manifest['results'] = list(latest.values())
+            with (quarantine / 'results.jsonl').open('a', encoding='utf-8') as stream:
+                stream.write(json.dumps(row, ensure_ascii=False) + '\n')
+                stream.flush()
+                os.fsync(stream.fileno())
+            _fsync_directory(quarantine)
+            with _LOCK:
+                _STATE['done'] += 1
+                _STATE['ok'] += int(row['ok'])
+                _STATE['results'] = manifest['results'][-200:]
+                active = _STATE.get('active_codes', [])
+                if row['code'] in active:
+                    active.remove(row['code'])
+                _progress(done=_STATE['done'], current='、'.join(active))
+                _persist_state()
+            entry = next(queue, None)
+            if entry:
+                pending.add(pool.submit(rebuild, *entry))
+    manifest['results'] = list(latest.values())
+    failed = sum(not row['ok'] for row in manifest['results'])
+    unfinished = len(set(groups) - set(latest))
+    # Successful new hard links legitimately change ctime once more.
+    # Record their final signatures for later manual recovery checks.
+    for raw, expected in source_stamps.items():
+        try:
+            current = _stamp(raw)
+            if current[:4] == expected[:4] and not _unsafe_links(Path(raw)):
+                manifest['recovery_source_stamps'][raw] = current
+            else:
+                manifest.setdefault('recovery_source_changes', []).append(raw)
+        except OSError:
+            manifest.setdefault('recovery_source_changes', []).append(raw)
+    manifest['phase'] = 'completed' if not failed and not unfinished else 'partial'
+    manifest['checkpoint'] = 'rebuilding'
+    _write_manifest(manifest_path, manifest)
+    recovery = '非视频备份在隔离目录，旧视频可按清单从下载源恢复' if mode == 'copy_sidecars' else '旧产物保留在隔离目录，可手动恢复'
+    _update(phase=manifest['phase'], cleanup_note_count=len(manifest.get('cleanup_notes', [])),
+            cleanup_notes=manifest.get('cleanup_notes', [])[-100:], retained_file_count=len(plan.get('retained', [])),
+            error=f'{failed} 部重建失败，{unfinished} 部未处理；{recovery}' if failed or unfinished else '')

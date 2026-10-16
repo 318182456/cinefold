@@ -59,6 +59,11 @@ class RebuildPreviewRequest(BaseModel):
     missing_policy: Literal['block', 'keep', 'discard'] = 'block'
 
 
+class RebuildResumeRequest(BaseModel):
+    job_id: str = Field(min_length=1, max_length=128)
+    mode: Literal['unfinished', 'failed'] = 'unfinished'
+
+
 class RebuildProtectionRequest(BaseModel):
     confirmation: str = Field(min_length=1, max_length=4000)
 
@@ -94,6 +99,15 @@ def release_rebuild_protection(body: RebuildProtectionRequest, current_user: str
     from app.services.scrapemaintenance import release_protection
     try:
         return ResponseEntity.ok(release_protection(body.confirmation))
+    except (ValueError, OSError) as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@router.post('/rebuild/resume')
+def resume_rebuild(body: RebuildResumeRequest, current_user: str = Depends(get_current_user)):
+    from app.services.scraperecovery import start
+    try:
+        return ResponseEntity.ok(start(body.job_id, body.mode))
     except (ValueError, OSError) as exc:
         raise HTTPException(409, str(exc)) from exc
 
