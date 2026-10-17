@@ -136,6 +136,9 @@ def _update(**values):
 
 
 def _persist_state():
+    if _STATE.get('job_id') and _STATE.get('phase') not in ('idle', 'preview', 'ready', 'previewing', 'planning'):
+        from app.services import scrapehistory
+        scrapehistory.sync(_STATE)
     if not _STATE.get('quarantine_dir'):
         return
     keys = ('running', 'phase', 'done', 'total', 'ok', 'error', 'quarantine_dir', 'job_id', 'output_dir', 'quarantine_mode', 'backup_bytes',
@@ -146,6 +149,21 @@ def _persist_state():
         from app.services.scraperecovery import reference_path
         _write_manifest(reference_path(sys.modules[__name__]),
                         {key: _STATE.get(key) for key in ('job_id', 'quarantine_dir', 'phase', 'running', 'done', 'total', 'ok')})
+
+
+def dismiss(job_id):
+    """Clear only the matching finished banner; keep recovery backups and protection."""
+    global _PLAN
+    with _LOCK:
+        if _STATE.get('job_id') != job_id:
+            return
+        if _STATE['running']:
+            raise ValueError('任务运行中，不能删除记录')
+        _STATE.update(running=False, phase='idle', job_id='', quarantine_dir='', done=0,
+                      total=0, ok=0, error='', results=[], plan=None, token='', progress=None,
+                      progress_steps={}, active_codes=[], started_at=None, finished_at=None)
+        _PLAN = None
+        _write_manifest(_STATE_FILE, dict(_STATE))
 
 
 def _stamp(path):
@@ -506,7 +524,7 @@ def preview(missing_policy='block'):
             raise ValueError('已有预览或重建任务运行中')
         _PLAN = None
         settings = get_settings()
-        _STATE.update(running=True, phase='preview', done=0, total=0, ok=0, error='', token='', plan=None, quarantine_dir='', results=[],
+        _STATE.update(running=True, phase='preview', job_id='', done=0, total=0, ok=0, error='', token='', plan=None, quarantine_dir='', results=[],
                       progress=None, progress_steps={}, active_codes=[], cleanup_note_count=0, cleanup_notes=[], retained_file_count=0, started_at=time.time(), finished_at=None,
                       output_dir=settings.medialink_scrape_dir or settings.medialink_library_path or '', quarantine_mode='', backup_bytes=0)
     def work():
@@ -562,6 +580,10 @@ def start(token: str, confirmation: str, *, refresh_metadata: bool = False, forc
         _STATE.update(running=True, phase='checking', done=0, total=plan['public']['source_count'], ok=0, error='', results=[],
                       progress=None, progress_steps={}, active_codes=[], cleanup_note_count=0, cleanup_notes=[], retained_file_count=0, started_at=time.time(), finished_at=None,
                       job_id=uuid.uuid4().hex, output_dir=plan['public']['output_dir'])
+        from app.services import scrapehistory
+        scrapehistory.begin(_STATE['job_id'], 'rebuild',
+            [{'path': row['path'], 'code':row['code']} for row in plan['sources']],
+            dict(refresh_metadata=refresh_metadata, force=force), len({row['code'] for row in plan['sources']}))
     try:
         Thread(target=_run, args=(plan, refresh_metadata, force), daemon=True, name='library-rebuild').start()
     except Exception:
@@ -1166,6 +1188,8 @@ def _run_films(plan, manifest, quarantine, storage, source_stamps, refresh_metad
                 stream.flush()
                 os.fsync(stream.fileno())
             _fsync_directory(quarantine)
+            from app.services import scrapehistory
+            scrapehistory.record(job_id, row)
             with _LOCK:
                 _STATE['done'] += 1
                 _STATE['ok'] += int(row['ok'])

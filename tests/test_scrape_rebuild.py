@@ -9,7 +9,6 @@ import pytest
 from PIL import Image
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
 
 from app.core.config import Settings
 from app.database.base import DBBase
@@ -20,9 +19,10 @@ from app.services import scrape, scrapeinventory, scrapemaintenance, scraperebui
 @pytest.fixture
 def library(tmp_path, monkeypatch):
     import app.database.session as database
-    engine = create_engine('sqlite://', connect_args={'check_same_thread': False}, poolclass=StaticPool)
+    # Concurrent film workers need separate connections, as in production.
+    engine = create_engine('sqlite:///' + str(tmp_path / 'rebuild.db'), connect_args={'check_same_thread': False})
     DBBase.metadata.create_all(engine)
-    factory = sessionmaker(bind=engine, expire_on_commit=False)
+    factory = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
     monkeypatch.setattr(database, 'SessionLocal', factory)
     root, output = tmp_path / 'downloads', tmp_path / 'library'
     root.mkdir(); output.mkdir()

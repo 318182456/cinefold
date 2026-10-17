@@ -69,6 +69,44 @@ class RebuildProtectionRequest(BaseModel):
     confirmation: str = Field(min_length=1, max_length=4000)
 
 
+class HistoryResumeRequest(BaseModel):
+    mode: Literal['unfinished', 'failed'] = 'unfinished'
+
+
+@router.get('/history')
+def scrape_history(page: int = Query(1, ge=1), size: int = Query(20, ge=1, le=100), current_user: str = Depends(get_current_user)):
+    from app.services import scrapehistory
+    return ResponseEntity.ok(scrapehistory.listing(page, size))
+
+
+@router.get('/history/{job_id}')
+def scrape_history_detail(job_id: str, page: int = Query(1, ge=1), size: int = Query(30, ge=1, le=100),
+                          status: Literal['', 'failed', 'succeeded'] = '', current_user: str = Depends(get_current_user)):
+    from app.services import scrapehistory
+    try:
+        return ResponseEntity.ok(scrapehistory.detail(job_id, page, size, status))
+    except (ValueError, OSError) as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@router.post('/history/{job_id}/resume')
+def resume_history(job_id: str, body: HistoryResumeRequest, current_user: str = Depends(get_current_user)):
+    from app.services import scrapehistory
+    try:
+        return ResponseEntity.ok(scrapehistory.resume(job_id, body.mode))
+    except (ValueError, OSError) as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@router.delete('/history/{job_id}')
+def delete_history(job_id: str, current_user: str = Depends(get_current_user)):
+    from app.services import scrapehistory
+    try:
+        return ResponseEntity.ok(scrapehistory.remove(job_id))
+    except (ValueError, OSError) as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
 @router.post('/rebuild/preview')
 def preview_rebuild(body: RebuildPreviewRequest | None = None, current_user: str = Depends(get_current_user)):
     from app.services import scraperebuild

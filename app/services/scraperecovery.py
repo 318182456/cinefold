@@ -25,6 +25,9 @@ def reference(rebuild):
 def info(rebuild, running):
     try:
         ref = reference(rebuild)
+        from app.services.scrapehistory import hidden
+        if hidden(ref.get('job_id')):
+            return {'can_resume': False, 'can_retry_failed': False, 'job_id': ''}
         directory = ref.get('quarantine_dir')
         available = bool(directory and not rebuild._unsafe_links(Path(directory)) and (Path(directory) / 'manifest.json').is_file())
         resumable = available and not running and (ref.get('phase') != 'completed' or ref.get('running'))
@@ -50,6 +53,8 @@ def history(rebuild):
     if ref.get('quarantine_dir'):
         parents.add(Path(ref['quarantine_dir']).parent)
     rows = {}
+    from app.services.scrapehistory import hidden_ids
+    deleted = hidden_ids()
     keys = ('job_id', 'phase', 'checkpoint', 'created_at', 'output_dir', 'quarantine_mode', 'backup_bytes', 'source_count', 'done', 'ok')
     decoder = json.JSONDecoder()
     for folder in parents:
@@ -67,7 +72,7 @@ def history(rebuild):
                     match = re.search(r'^  "' + key + r'":\s*', header, re.MULTILINE)
                     if match:
                         row[key] = decoder.raw_decode(header[match.end():])[0]
-                if not row.get('job_id') or row.get('output_dir') != str(output):
+                if not row.get('job_id') or row['job_id'] in deleted or row.get('output_dir') != str(output):
                     continue
                 if row.get('quarantine_mode') not in ('copy_sidecars', 'rename'):
                     continue

@@ -16,6 +16,7 @@ from app.database.models.watchdir import WatchDir
 from app.database.models.playback import PlaybackSession, PlaybackSpan
 from app.database.models.scrapeattempt import ScrapeAttempt
 from app.database.models.scrapeduplicate import ScrapeDuplicateDecision
+from app.database.models.scrapehistory import ScrapeTask, ScrapeTaskResult
 from app.database.models.scrapeinventory import ScrapeSourceRoot, ScrapeSourceVideo, ScrapeSourceMembership
 from app.database.models.curation import (
     CodeProfile, Collection, CollectionItem, DownloadProfile, EmbyWatch,
@@ -30,5 +31,6 @@ __all__ = [
     "PlaybackSession", "PlaybackSpan",
     "ScrapeAttempt",
     "ScrapeDuplicateDecision",
+    "ScrapeTask", "ScrapeTaskResult",
     "ScrapeSourceRoot", "ScrapeSourceVideo", "ScrapeSourceMembership",
 ]

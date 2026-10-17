@@ -303,7 +303,7 @@ async function cancel() {
   try { job.value = await http.post('/scrape/jobs/current/cancel') } catch (e) { toast.error(e.message) }
 }
 function changePage(step) { page.value += step; selected.value = []; load() }
-defineExpose({ refresh: load })
+defineExpose({ refresh: async () => { await Promise.all([load(), poll(), pollRebuild()]) } })
 onMounted(async () => { await pollRebuild(); if (!disposed) { load(); poll() } })
 onUnmounted(() => { disposed = true; request++; rebuildRequest++; clearTimeout(timer); clearTimeout(indexTimer); clearTimeout(rebuildTimer) })
 </script>
@@ -315,12 +315,12 @@ onUnmounted(() => { disposed = true; request++; rebuildRequest++; clearTimeout(t
         <p class="text-xs text-gray-500">{{ item.label }}</p><p class="mt-2 text-2xl font-semibold tabular-nums" :class="item.color">{{ item.value }}</p>
       </button>
     </div>
-    <div v-if="rebuild.phase !== 'idle' || rebuild.deletion_protected || rebuildStatusError" class="space-y-3 rounded-xl border border-amber-600/30 bg-amber-500/5 p-4">
+    <div v-if="rebuild.running || rebuild.deletion_protected || rebuild.protection_error || rebuildStatusError" class="space-y-3 rounded-xl border border-amber-600/30 bg-amber-500/5 p-4">
       <div class="flex flex-wrap items-center justify-between gap-3">
-        <p class="text-sm text-gray-300">全部重新刮削 · {{ rebuildPhase }}</p>
+        <p class="text-sm text-gray-300">{{ rebuild.running ? `全部重新刮削 · ${rebuildPhase}` : '重建已结束 · 删除保护与状态提示' }}</p>
         <button class="text-xs text-brand" @click="openRebuild">查看范围与进度</button>
       </div>
-      <RebuildProgress :state="rebuild" :phase="rebuildPhase" />
+      <RebuildProgress v-if="rebuild.running" :state="rebuild" :phase="rebuildPhase" />
       <div v-if="rebuild.recovery?.can_resume" class="flex flex-wrap items-center gap-2">
         <button class="btn-primary !text-xs" :disabled="rebuildLocked || job.running || inventory.running" @click="resumeRebuild('unfinished')">继续未完成任务</button>
         <button v-if="rebuild.recovery.can_retry_failed" class="btn-ghost !text-xs" :disabled="rebuildLocked || job.running || inventory.running" @click="resumeRebuild('failed')">仅重试失败项</button>
@@ -335,13 +335,14 @@ onUnmounted(() => { disposed = true; request++; rebuildRequest++; clearTimeout(t
         <button class="btn-ghost !text-xs" :disabled="!rebuildKnown || rebuild.running || rebuild.protection_error || releaseBusy || !protectedOutputs.length" @click="openReleaseProtection">解除删除保护</button>
       </div>
     </div>
-    <div v-if="job.job_id" class="space-y-3 rounded-xl border border-gray-700 bg-gray-900/50 p-4">
+    <div v-if="job.running" class="space-y-3 rounded-xl border border-gray-700 bg-gray-900/50 p-4">
       <div class="flex flex-wrap items-center gap-3"><p class="text-sm text-gray-300">{{ job.running ? '后台刮削中' : job.cancel_requested ? '后续任务已停止' : '最近一次手动刮削' }} · {{ job.done }} / {{ job.total }} 个番号 · 成功 {{ job.ok }} 个</p><button v-if="job.running" class="text-xs text-amber-400 disabled:opacity-40" :disabled="job.cancel_requested" @click="cancel">{{ job.cancel_requested ? '当前番号完成后停止' : '停止后续任务' }}</button></div>
       <div class="h-1.5 overflow-hidden rounded-full bg-gray-800" role="progressbar" aria-label="刮削任务进度" :aria-valuenow="job.done" :aria-valuemin="0" :aria-valuemax="Math.max(job.total, 1)"><div class="h-full rounded-full bg-brand transition-all" :style="{ width: `${Math.min(100, job.total ? job.done / job.total * 100 : 0)}%` }"></div></div>
       <p v-if="job.current" class="text-xs text-brand">当前处理 {{ job.current }}，可离开页面，任务会继续执行。</p><p v-if="job.error" class="text-xs text-red-400">{{ job.error }}</p>
       <details v-if="job.results.length"><summary class="cursor-pointer text-xs text-gray-400">查看逐项结果</summary><div v-for="(row, i) in job.results" :key="i" class="mt-2 border-t border-gray-800 pt-2 text-xs"><p :class="row.ok ? 'text-emerald-400' : 'text-red-400'">{{ row.code }} · {{ row.ok ? '完成' : '失败' }} · NFO {{ row.nfo_written }} · 图片 {{ row.images_written }}</p><p v-if="row.error" class="mt-1 break-all text-red-400">{{ row.error }}</p><p v-for="(warning, n) in row.warnings" :key="n" class="mt-1 text-amber-400">{{ warning }}</p><p v-for="path in row.links" :key="path" class="mt-1 break-all text-gray-500">{{ path }}</p></div></details>
     </div>
-    <div class="card space-y-4">
+    <RouterLink :to="{ name: 'Scrape', query: { tab: 'history' } }" class="block text-xs text-brand">查看刮削记录 · 任务明细、继续与失败重试 →</RouterLink>
+        <div class="card space-y-4">
     <div class="flex flex-wrap items-start justify-between gap-3">
       <div><h2 class="text-sm font-medium text-gray-300">视频清单</h2><p class="mt-1 text-xs text-gray-500">点击视频查看刮削资料。新增或移动文件后，扫描目录更新清单。</p></div>
       <RouterLink :to="{ name: 'Config', query: { section: 'scrape' } }" class="text-xs text-brand">管理目录与刮削规则 ↗</RouterLink>

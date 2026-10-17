@@ -7,7 +7,6 @@ from pathlib import Path
 import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
 
 from app.core.config import Settings
 from app.database.base import DBBase
@@ -19,9 +18,9 @@ from app.services import scrape, scrapesources as sources, scrapewatch, scrapein
 @pytest.fixture
 def env(tmp_path, monkeypatch):
     import app.database.session as database
-    engine = create_engine('sqlite://', connect_args={'check_same_thread': False}, poolclass=StaticPool)
+    engine = create_engine('sqlite:///' + str(tmp_path / 'sources.db'), connect_args={'check_same_thread': False})
     DBBase.metadata.create_all(engine)
-    factory = sessionmaker(bind=engine, expire_on_commit=False)
+    factory = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
     monkeypatch.setattr(database, 'SessionLocal', factory)
     root = tmp_path / 'downloads'; root.mkdir()
     settings = Settings(scrape_source_dirs=str(root), medialink_scrape_dir=str(tmp_path / 'library'),

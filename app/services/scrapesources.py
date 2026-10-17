@@ -6,6 +6,7 @@ from app.services.scrapemaintenance import guarded as maintenance_guarded
 import copy
 import os
 import threading
+import time
 import uuid
 from collections import defaultdict
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
@@ -221,7 +222,7 @@ def list_videos(*, root: str = '', keyword: str = '', status: str = '', page: in
 
 
 @maintenance_guarded
-def start(entries: list[dict], *, overwrite: bool = False, refresh_metadata: bool = False, fetch_meta: bool = True, force: bool = False) -> dict:
+def start(entries: list[dict], *, overwrite: bool = False, refresh_metadata: bool = False, fetch_meta: bool = True, force: bool = False, parent_job_id: str = '') -> dict:
     if force:
         overwrite, refresh_metadata, fetch_meta = True, True, True
     if refresh_metadata and not fetch_meta:
@@ -264,12 +265,16 @@ def start(entries: list[dict], *, overwrite: bool = False, refresh_metadata: boo
         job_id = uuid.uuid4().hex
         _STATE.update(running=True, job_id=job_id, total=len(groups), done=0, ok=0, current='',
                       results=[], error='', cancel_requested=False)
+        from app.services import scrapehistory
+        scrapehistory.begin(job_id, 'manual', normalized,
+            dict(overwrite=overwrite, refresh_metadata=refresh_metadata, fetch_meta=fetch_meta, force=force), len(groups), parent_job_id)
         for code, items in groups.items():
             record_attempt(items, code, status='queued', job_id=job_id)
         try:
             Thread(target=_run, args=(groups, job_id, overwrite, refresh_metadata, fetch_meta, force), daemon=True, name='manual-scrape').start()
         except Exception:
             _STATE.update(running=False, error='启动刮削任务失败')
+            scrapehistory.sync({**_STATE, 'phase':'failed', 'finished_at':time.time()}, 'manual')
             raise
         return state()
 
@@ -332,10 +337,13 @@ def _run(groups, job_id, overwrite, refresh_metadata, fetch_meta, force=False):
                     row = {'code': result.code, 'ok': result.ok, 'paths': [str(i.path) for i in items],
                            'links': [str(p) for p in result.links], 'error': result.error, 'warnings': result.warnings,
                            'sources': result.sources, 'nfo_written': result.nfo_written, 'images_written': result.images_written}
+                    from app.services import scrapehistory
+                    scrapehistory.record(job_id, row)
                     with _LOCK:
                         _STATE['results'].append(row)
                         _STATE['done'] += 1
                         _STATE['ok'] += int(result.ok)
+                        scrapehistory.sync({**_STATE, 'phase':'running'}, 'manual')
                 schedule()
             # 取消时不再提交后续影片，保留源视频和持久化取消状态。
             for code, items in queue:
@@ -347,3 +355,6 @@ def _run(groups, job_id, overwrite, refresh_metadata, fetch_meta, force=False):
     finally:
         with _LOCK:
             _STATE.update(running=False, current='')
+            from app.services import scrapehistory
+            phase = 'failed' if _STATE['error'] else 'cancelled' if _STATE['cancel_requested'] else 'completed' if _STATE['done']==_STATE['ok']==_STATE['total'] else 'partial'
+            scrapehistory.sync({**_STATE, 'phase':phase, 'finished_at':time.time()}, 'manual')

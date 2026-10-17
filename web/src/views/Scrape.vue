@@ -9,6 +9,7 @@ import PrivateImage from '@/components/PrivateImage.vue'
 import DownloadSources from '@/components/DownloadSources.vue'
 import { useRoute, useRouter } from 'vue-router'
 
+const ScrapeHistory = defineAsyncComponent(() => import('@/views/ScrapeHistory.vue'))
 const MediaLinks = defineAsyncComponent(() => import('@/views/MediaLink.vue'))
 const WatchDirectories = defineAsyncComponent(() => import('@/views/WatchDir.vue'))
 const toast = useToast()
@@ -41,7 +42,7 @@ const jinjaAvailable = ref(true)
 const mode = ref('')
 const route = useRoute(), router = useRouter()
 const workspace = computed({
-  get: () => ['videos', 'links', 'watch', 'tools'].includes(route.query.tab) ? route.query.tab : 'videos',
+  get: () => ['videos', 'links', 'history', 'watch', 'tools'].includes(route.query.tab) ? route.query.tab : 'videos',
   set: tab => router.replace({ query: { ...route.query, tab } }),
 })
 const sourcesMounted = ref(workspace.value === 'videos'), linksMounted = ref(workspace.value === 'links')
@@ -149,7 +150,7 @@ async function doRun() {
 <template>
   <div class="space-y-4">
     <div class="flex flex-wrap items-center justify-between gap-3"><div><h1 class="text-xl font-semibold">入库管理</h1><p class="mt-1 text-sm text-gray-500">从下载源到 Emby 媒体库，查看资料、补全元数据和管理入库任务。</p></div><RouterLink :to="{ name: 'Config', query: { section: 'scrape' } }" class="btn-ghost">刮削设置 ↗</RouterLink></div>
-    <div class="flex gap-5 overflow-x-auto border-b border-gray-800" role="tablist" aria-label="刮削工作区"><button v-for="[value, label] in [['videos', '源视频'], ['links', '媒体库关联'], ['watch', '目录监控'], ['tools', '路径试算']]" :key="value" class="shrink-0 border-b-2 px-1 py-3 text-sm transition" :class="workspace === value ? 'border-brand text-brand' : 'border-transparent text-gray-500 hover:text-gray-300'" role="tab" :aria-selected="workspace === value" @click="workspace = value">{{ label }}</button></div>
+    <div class="flex gap-5 overflow-x-auto border-b border-gray-800" role="tablist" aria-label="刮削工作区"><button v-for="[value, label] in [['videos', '源视频'], ['links', '媒体库关联'], ['history', '刮削记录'], ['watch', '目录监控'], ['tools', '路径试算']]" :key="value" class="shrink-0 border-b-2 px-1 py-3 text-sm transition" :class="workspace === value ? 'border-brand text-brand' : 'border-transparent text-gray-500 hover:text-gray-300'" role="tab" :aria-selected="workspace === value" @click="workspace = value">{{ label }}</button></div>
     <!-- 当前刮削方式。走 external 时这个页面只能手动刮，说清楚免得白等 -->
     <div v-if="workspace === 'videos' && mode && mode !== 'builtin'" class="card">
       <p class="text-[11px] text-amber-400">
@@ -161,6 +162,7 @@ async function doRun() {
 
     <DownloadSources v-if="sourcesMounted" v-show="workspace === 'videos'" ref="sourcesRef" @preview="previewSource" @updated="linksRef?.refresh()" />
     <MediaLinks v-if="linksMounted" v-show="workspace === 'links'" ref="linksRef" />
+    <ScrapeHistory v-if="workspace === 'history'" />
     <WatchDirectories v-if="workspace === 'watch'" />
     <div v-show="workspace === 'tools'" class="space-y-4">
     <!-- 输入 -->
