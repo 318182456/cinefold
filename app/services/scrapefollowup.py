@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from html import escape
+import copy
 import threading
 import time
 
@@ -15,7 +15,7 @@ _PENDING: set[str] = set()
 
 
 def schedule(code: str, title: str, count: int, *, subtitles: bool = False,
-             review: bool = False, notify: bool = False) -> str:
+             review: bool = False, notify: bool = False, notification: dict | None = None) -> str:
     """Return queued, pending, full, disabled or error without blocking import."""
     if not (subtitles or review or notify):
         return "disabled"
@@ -39,7 +39,8 @@ def schedule(code: str, title: str, count: int, *, subtitles: bool = False,
                 logger.exception(f"[{code}] 入库后后台补全任务异常")
 
     try:
-        future = _POOL.submit(_run, code, title, count, subtitles, review, notify)
+        args = (code, title, count, subtitles, review, notify)
+        future = _POOL.submit(_run, *args, *([copy.deepcopy(notification)] if notification is not None else []))
     except Exception:
         with _LOCK:
             _PENDING.discard(identity)
@@ -51,11 +52,11 @@ def schedule(code: str, title: str, count: int, *, subtitles: bool = False,
     return "queued"
 
 
-def _run(code, title, count, subtitles, review, notify):
+def _run(code, title, count, subtitles, review, notify, notification=None):
     from app.services import medialink
     actions = []
     if notify:
-        actions.append(("通知", lambda: _notify(code, title, count)))
+        actions.append(("通知", lambda: _notify(code, title, count, notification) if notification is not None else _notify(code, title, count)))
     if subtitles:
         actions.append(("字幕", lambda: medialink._fetch_subtitle_quietly(code)))
     if review:
@@ -71,12 +72,28 @@ def _run(code, title, count, subtitles, review, notify):
             logger.info(f"[{code}] 后台{name}结束，耗时 {time.perf_counter() - started:.2f}s")
 
 
-def _notify(code, title, count):
+def _notify(code, title, count, detail=None):
     from app.modules.notify import get_notifiers
-    text = f"刮削入库完成：{escape(code)}\n{escape(title)}\n{count} 个影片文件"
-    for notifier in get_notifiers():
+    from app.modules.notify.scrape import caption, local_photo
+    from app.modules.notify.telegram import TelegramNotifier
+    detail = detail or {}
+    plain, html = caption(code,title,count,detail)
+    notifiers = get_notifiers()
+    photo = local_photo(detail.get('links',[])) if any(hasattr(n,'send_photo_bytes') for n in notifiers) else b''
+    remote = next((str(detail.get(key) or '') for key in ('poster','banner') if str(detail.get(key) or '').startswith(('https://','http://'))),'')
+    for notifier in notifiers:
         try:
-            if not notifier.send_text_message(text):
+            if photo and hasattr(notifier,'send_photo_bytes'):
+                ok = notifier.send_photo_bytes(photo,html)
+            elif remote and isinstance(notifier,TelegramNotifier):
+                ok = notifier.send_photo_message(remote,html)
+            elif remote and hasattr(notifier,'send_photo_message'):
+                ok = notifier.send_photo_message(remote,f'刮削完成 · {code}',plain)
+                if not ok:
+                    ok = notifier.send_text_message(plain)
+            else:
+                ok = notifier.send_text_message(html if isinstance(notifier,TelegramNotifier) else plain)
+            if not ok:
                 logger.warning(f"[{code}] 后台通知发送失败: {type(notifier).__name__}")
         except Exception:
             logger.exception(f"[{code}] 后台通知异常: {type(notifier).__name__}")

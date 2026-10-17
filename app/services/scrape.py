@@ -25,6 +25,7 @@ from app.services.scrapemaintenance import guarded as maintenance_guarded
 import os
 import re
 import threading
+import time
 from contextlib import contextmanager
 from functools import wraps
 from concurrent.futures import ThreadPoolExecutor
@@ -560,6 +561,7 @@ def scrape_group(
     元数据只抓一次，产物按分集各出一份。这是本模块的核心 ——
     issue #503 的症结就是把分集当成了不同番号。
     """
+    started = time.perf_counter()
     result = ScrapeResult(code=code)
     settings = get_settings()
     overwrite = settings.scrape_overwrite if overwrite is None else overwrite
@@ -690,12 +692,14 @@ def scrape_group(
         # 影片已提交；慢的附加任务使用独立有界队列，不占刮削工作线程。
         try:
             from app.services.scrapefollowup import schedule
+            from app.modules.notify.scrape import snapshot
+            should_notify = bool(result.ok and (result.nfo_written or registered_new) and getattr(settings, 'scrape_notify', False))
             followup = schedule(
                 code, str(meta.get('cn_title') or meta.get('title') or ''), len(result.links),
                 subtitles=bool(getattr(settings, 'subtitle_enabled', False)),
                 review=bool(getattr(settings, 'review_enabled', False)),
-                notify=bool(result.ok and (result.nfo_written or registered_new)
-                            and getattr(settings, 'scrape_notify', False)),
+                notify=should_notify,
+                notification=snapshot(meta,playable,result.links,time.perf_counter()-started) if should_notify else None,
             )
             if followup in ('full', 'error'):
                 result.warnings.append("入库完成，后台补全队列已满或不可用；字幕、看点和通知可稍后补全")

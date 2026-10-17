@@ -92,3 +92,35 @@ def test_long_poll_error_redacts_token_before_upper_layer_logging(notifier, monk
     with pytest.raises(RuntimeError) as caught:
         notifier.get_updates()
     assert notifier.token not in str(caught.value)
+
+
+def test_local_photo_uses_multipart_upload_and_spoiler(notifier, monkeypatch):
+    requests=[]
+    notifier.spoiler=True
+    install_transport(monkeypatch,lambda request:(requests.append(request) or httpx.Response(200,json={'ok':True})))
+    assert notifier.send_photo_bytes(b'image-data','<b>caption</b>')
+    assert len(requests)==1 and requests[0].url.path.endswith('/sendPhoto')
+    assert 'multipart/form-data' in requests[0].headers['content-type']
+    assert b'filename="cover.jpg"' in requests[0].content
+    assert b'image-data' in requests[0].content and b'<b>caption</b>' in requests[0].content
+    assert b'name="has_spoiler"' in requests[0].content and b'true' in requests[0].content
+
+
+def test_rejected_photo_upload_falls_back_to_one_text_message(notifier, monkeypatch):
+    requests=[]
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(400,json={'ok':False}) if request.url.path.endswith('/sendPhoto') else httpx.Response(200,json={'ok':True})
+    install_transport(monkeypatch,handler)
+    assert notifier.send_photo_bytes(b'image-data','caption')
+    assert [request.url.path.rsplit('/',1)[-1] for request in requests]==['sendPhoto','sendMessage']
+
+
+def test_photo_response_timeout_does_not_duplicate_unknown_delivery(notifier, monkeypatch):
+    requests=[]
+    def handler(request):
+        requests.append(request)
+        raise httpx.ReadTimeout('response lost',request=request)
+    install_transport(monkeypatch,handler)
+    assert not notifier.send_photo_bytes(b'image-data','caption')
+    assert len(requests)==1

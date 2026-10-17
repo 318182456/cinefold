@@ -114,6 +114,29 @@ class TelegramNotifier:
             logger.error(f"Telegram 发图异常: {self._safe_error(exc)}，降级为文本")
             return self.send_text_message(caption, chat_id)
 
+    def send_photo_bytes(self, photo: bytes, caption: str = '', chat_id: str = '') -> bool:
+        """Upload saved artwork directly, without a publicly accessible media URL."""
+        if not self.enabled:
+            return False
+        payload = {'chat_id':chat_id or self.chat_id,'caption':caption,'parse_mode':'HTML'}
+        if self.spoiler:
+            payload['has_spoiler'] = 'true'
+        try:
+            with self._client() as client:
+                response = client.post(self._api('sendPhoto'), data=payload,
+                    files={'photo':('cover.jpg',photo,'image/jpeg')})
+                response.raise_for_status()
+                if not response.json().get('ok',False):
+                    raise ValueError('Telegram 未接受图片消息')
+            return True
+        except (httpx.ReadTimeout,httpx.ReadError,httpx.WriteTimeout,httpx.WriteError):
+            # The upload may already have been delivered; do not duplicate it.
+            logger.warning('Telegram 图片发送结果不确定，未自动重发，请查看聊天记录')
+            return False
+        except Exception as exc:
+            logger.error(f'Telegram 图片上传失败: {self._safe_error(exc)}，降级为文本')
+            return self.send_text_message(caption,chat_id)
+
     def reply_text_message(self, text: str, message_id: int, chat_id: str = "") -> bool:
         if not self.enabled:
             return False
