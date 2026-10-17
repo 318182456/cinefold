@@ -402,3 +402,12 @@ def test_titled_numeric_parts_group_in_numeric_order():
     paths = ['STARS-043 小倉由菜_2.mp4', 'STARS-043 小倉由菜 1.mp4', 'STARS-043 小倉由菜 3.mp4']
     group = mediafile.group_parts(paths)['STARS-043']
     assert [info.part for info in group] == [1, 2, 3]
+
+
+@pytest.mark.parametrize('name,expected', [
+    ('1rct00828.mp4', 'RCT-828'), ('1nhdta00565.mp4', 'NHDTA-565'),
+    ('1nhdta00664-C.mp4', 'NHDTA-664-C'), ('300MIUM-001.mp4', '300MIUM-001'),
+    ('259LUXU-1234.mp4', '259LUXU-1234'), ('483DAM-001.mp4', '483DAM-001'),
+])
+def test_vendor_product_names_and_genuine_numeric_labels(name, expected):
+    assert mediafile.parse(name).code == expected

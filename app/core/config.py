@@ -331,6 +331,7 @@ class Settings:
     # 重新刮削时是否覆盖已有的 NFO 与图片。
     # 关掉则只补缺失的 —— 用户手改过的元数据不会被自动任务冲掉
     scrape_overwrite: bool = False
+    scrape_duplicate_policy: str = 'versions'
     # 落几张剧照到 extrafanart。0 表示不下剧照（每张都要跨境下载）
     scrape_still_limit: int = 5
     scrape_metadata_timeout: int = 25
@@ -651,6 +652,7 @@ def load_settings() -> Settings:
         scrape_file_template=_env("SCRAPE_FILE_TEMPLATE", "{number}").strip("'\""),
         scrape_category=_env("SCRAPE_CATEGORY", "日本AV").strip("'\""),
         scrape_overwrite=_env_bool("SCRAPE_OVERWRITE", False),
+        scrape_duplicate_policy=os.getenv('SCRAPE_DUPLICATE_POLICY', 'versions'),
         scrape_still_limit=_env_int("SCRAPE_STILL_LIMIT", 5),
         scrape_metadata_timeout=_env_int("SCRAPE_METADATA_TIMEOUT", 25),
         scrape_merge_grace=_env_int("SCRAPE_MERGE_GRACE", 3),

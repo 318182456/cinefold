@@ -32,9 +32,19 @@ def _complete(source: Path, code: str, links: list[str], require_images: bool = 
         target = Path(raw)
         try:
             if not target.samefile(source):
-                continue
+                from app.services.mediaduplicate import verified_existing
+                from app.services.duplicatepolicy import retained
+                # Explicitly keeping the old video is a completed disposition,
+                # even when its artwork needs a separate metadata repair.
+                if retained(source, target):
+                    return True
+                if not verified_existing(source, target):
+                    continue
             if not local.read(target.with_suffix(".nfo"), code).get("title"):
-                continue
+                from app.modules.scrape.merge import product_alias
+                alias = product_alias(code)
+                if not alias or not local.read(target.with_suffix('.nfo'), alias).get('title'):
+                    continue
             if not require_images or all(scrape.scrape_images.valid_file(target.with_name(f"{target.stem}-{kind}.jpg")) for kind in ("poster", "fanart", "thumb")):
                 return True
         except OSError:
@@ -87,6 +97,14 @@ def _scan(settings) -> int:
         registered: dict[str, list[str]] = {}
         for source, link in session.execute(select(MediaLink.source_path, MediaLink.link_path)):
             registered.setdefault(source, []).append(link)
+        from app.services.mediaduplicate import source_aliases
+        for source, link in source_aliases(session):
+            if link not in registered.setdefault(source, []):
+                registered[source].append(link)
+        from app.services.duplicatepolicy import links as decision_links
+        for source, link in decision_links(session):
+            if link not in registered.setdefault(source, []):
+                registered[source].append(link)
         downloading = set(session.scalars(select(Code.code).where(Code.status == CodeStatus.DOWNLOADING)))
         attempts = list(session.scalars(select(ScrapeAttempt)))
         overrides = {a.source_key: a.code for a in attempts if a.code}

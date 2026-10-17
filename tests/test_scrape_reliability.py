@@ -141,7 +141,34 @@ def test_failed_examples_lookup_base_number_without_changing_numeric_prefix(monk
     calls = []
     monkeypatch.setattr(merge, '_fetch_one', lambda value, timeout: calls.append(value) or {})
     merge.fetch_merged(code)
-    assert calls == [lookup]
+    assert calls == ([lookup, 'DAM-001'] if code == '483DAM-001' else [lookup])
+
+
+@pytest.mark.parametrize('code,alias', [('420ERK-084','ERK-084'), ('476MLA-197','MLA-197'),
+                                      ('277DCV-177-C','DCV-177'), ('483DAM-001','DAM-001')])
+def test_product_alias_only_used_after_primary_fails_and_is_validated(monkeypatch, code, alias):
+    calls = []
+    def fetch(query, timeout):
+        calls.append(query)
+        return {'code': alias, 'title': 'verified alternative'} if query == alias else {}
+    monkeypatch.setattr(merge, '_fetch_one', fetch)
+    result = merge.fetch_merged(code, timeout=0.1)
+    assert calls == [merge.base_code(code) or code, alias]
+    assert result['code'] == code and result['_lookup_code'] == alias
+    assert result['title'] == 'verified alternative'
+
+
+def test_product_alias_rejects_unrelated_result_and_keeps_numeric_label(monkeypatch):
+    calls = []
+    def fetch(query, timeout):
+        calls.append(query)
+        return {'code':'SONE-725', 'title':'wrong film'} if query == 'DAM-001' else {}
+    monkeypatch.setattr(merge, '_fetch_one', fetch)
+    assert not merge.fetch_merged('483DAM-001', timeout=0.1)
+    assert calls == ['483DAM-001', 'DAM-001']
+    calls.clear()
+    assert not merge.fetch_merged('300MIUM-001', timeout=0.1)
+    assert calls == ['300MIUM-001']
 
 
 def test_cover_only_hit_does_not_end_window_before_title(monkeypatch):

@@ -302,6 +302,15 @@ const GROUPS = [
         ],
       },
       {
+        title: '重复影片处理',
+        tab: 'basic',
+        fields: [
+          { k: 'scrape_duplicate_policy', label: '重复影片处理', t: 'select', options: ['versions', 'overwrite', 'highest_quality', 'keep_existing'],
+            optionLabels: { versions: '保留两个版本', overwrite: '覆盖已有视频', highest_quality: '保留高清版本', keep_existing: '保留旧的，跳过本次文件' },
+            hint: '手动、自动和重建刮削统一生效。完全相同的内容自动复用；不同字幕、破解版本及分集分别保留。高清按实际分辨率、码率比较，无法检测或片长明显不同时保留两个版本。覆盖只替换播放文件，下载源保留；保留旧的会记录处理结果，避免重复失败。' },
+        ],
+      },
+      {
         title: '源目录与输出目录',
         tab: 'basic',
         hint: '目录配置统一在此管理；刮削工作台负责查询与执行任务。',
@@ -867,6 +876,7 @@ async function load() {
   try {
     const data = await getConfig()
     Object.assign(form, data || {})
+    form.scrape_duplicate_policy = data?.scrape_duplicate_policy || 'versions'
     form.scrape_watermark = {
       enabled: false, targets: 'poster,thumb', types: 'sub,crack,leak,uncensored,censored,resolution',
       layout: 'stack', corner: 'top_left', scale: 0.07, offset_x: 0.015, offset_y: 0.015, gap: 0.01,

@@ -272,7 +272,9 @@ def rows_for(code):
     if not code:
         raise ValueError('请填写有效番号')
     core = base_code(code) or code
-    variants = [core] + [core + suffix for suffix in ('-C', '-CH', '-U', '-UC', '-UCH')]
+    from app.modules.scrape.merge import product_alias
+    cores = [core] + ([product_alias(core)] if product_alias(core) else [])
+    variants = [value + suffix for value in cores for suffix in ('', '-C', '-CH', '-U', '-UC', '-UCH')]
     with session_scope() as session:
         return list(session.scalars(select(MediaLink).where(MediaLink.code.in_(variants))
                                    .order_by(MediaLink.create_time, MediaLink.link_path)))
@@ -286,14 +288,21 @@ def _file_info(path):
     return info
 
 
+class DuplicateTargets(dict):
+    def __init__(self):
+        super().__init__()
+        self.actions = {}
+
+
 def check_existing(code, items, provided=None):
-    """仅探测同番号登记项；同文件复用，不同文件暂停，不按大小猜内容。"""
+    """Reuse proven identical copies; keep subtitle/uncensored versions distinct."""
     rows = rows_for(code)
-    targets, conflicts = {}, []
+    from app.services import duplicatepolicy
+    targets, conflicts = DuplicateTargets(), []
     for info in items:
         if info.trailer or info.ignored:
             continue
-        candidates, identical = [], []
+        candidates, versions, identical, retained = [], [], [], []
         for row in rows:
             target = Path(row.link_path)
             if not target.is_file():
@@ -303,21 +312,77 @@ def check_existing(code, items, provided=None):
             if target.samefile(info.path) or verified_existing(info.path, target):
                 identical.append(target)
                 continue
-            other = _file_info(target)
-            if other.part != info.part or other.uncensored != info.uncensored:
+            if duplicatepolicy.retained(info.path, target):
+                retained.append(target)
                 continue
-            candidates.append(target)
+            other = _file_info(target)
+            if other.part != info.part:
+                continue
+            if target.stat().st_size == info.path.stat().st_size and _digest(target) == _digest(info.path):
+                identical.append(target)
+                continue
+            from app.services.subtitle import _has_sidecar
+            other.subbed |= _has_sidecar(target)
+            (versions if other.subbed != info.subbed or other.uncensored != info.uncensored else candidates).append(target)
         if identical:
             preferred = (provided or {}).get(str(info.path))
-            targets[str(info.path)] = preferred if preferred in identical else identical[0]
-        elif candidates:
-            conflicts.append(f'媒体库已存在同番号、同分段文件，请先检查重复影片并合并或确认版本: {candidates[0]}')
+            chosen = preferred if preferred in identical else identical[0]
+            if not chosen.samefile(info.path) and not verified_existing(info.path, chosen):
+                _remember_copy(info.path, chosen)
+            targets[str(info.path)] = chosen
+        elif retained:
+            targets[str(info.path)] = retained[0]
+            targets.actions[str(info.path)] = {'action':'keep', 'reason':'沿用已确认的重复处理结果', 'remember':False}
+        elif candidates or versions:
+            # Different encodes/edits are not interchangeable. Retain both,
+            # using a deterministic source label rather than a destructive merge.
+            choice = duplicatepolicy.policy() if candidates else 'versions'
+            action, selected, reason = duplicatepolicy.prefer(info.path, candidates or versions, choice)
+            existing = _library_file(selected)
+            targets.actions[str(info.path)] = {'action':action, 'reason':reason, 'remember':True,
+                                              'signature':_signature(existing), 'policy':choice}
+            if action == 'variant':
+                label = hashlib.sha256(str(info.path).encode()).hexdigest()[:10]
+                stem = info.code + (f'-CD{info.part}' if info.part else '')
+                targets[str(info.path)] = existing.with_name(f'{stem} - version-{label}{info.path.suffix}')
+            else:
+                targets[str(info.path)] = existing
         elif (provided or {}).get(str(info.path)):
             # 保留同一源文件原有位置；不同编号的旧关联不能复用。
             preferred = Path(provided[str(info.path)])
             if preferred.is_file() and preferred.samefile(info.path) and any(r.link_path == str(preferred) for r in rows):
                 targets[str(info.path)] = preferred
     return targets, conflicts
+
+
+def _remember_copy(source, target):
+    """Record a verified source alias without changing/deleting either video."""
+    source, target = Path(source), _library_file(target)
+    if source.is_symlink():
+        raise ValueError('重复下载源不能是符号链接')
+    before, kept = _signature(source), _signature(target)
+    if before[2] != kept[2] or _digest(source) != _digest(target):
+        raise ValueError('视频内容变化，无法复用已有影片')
+    _copy_subtitles(source, target)
+    if _signature(source) != before or _signature(target) != kept:
+        raise ValueError('视频校验期间发生变化，停止自动合并')
+    with session_scope() as session:
+        row = session.get(MediaMerge, str(source))
+        if row is None:
+            row = MediaMerge(old_path=str(source), keep_path=str(target))
+            session.add(row)
+        row.keep_path, row.source_path = str(target), str(source)
+        row.source_signature, row.keep_signature = before, kept
+    logger.info(f'内容完全相同，自动复用已有影片: {source} → {target}；下载源保留')
+
+
+def source_aliases(session, source=None):
+    """Snapshot for inventory/watch scans; signatures are checked by _complete."""
+    query = select(MediaMerge)
+    if source is not None:
+        query = query.where(MediaMerge.source_path == str(source))
+    return [(row.source_path, row.keep_path) for row in session.scalars(query)
+            if row.source_path and row.source_signature and row.keep_signature]
 
 
 def verified_existing(source, target):

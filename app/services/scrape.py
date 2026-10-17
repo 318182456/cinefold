@@ -145,6 +145,8 @@ def _load_meta(code: str, fetch: bool = True, refresh: bool = False) -> dict:
         meta["_sources"] = sources
     if detail.get('_image_candidates'):
         meta['_image_candidates'] = detail['_image_candidates']
+    if detail.get('_lookup_code'):
+        meta['_lookup_code'] = detail['_lookup_code']
     if refresh and not detail:
         meta["_refresh_failed"] = True
     return meta
@@ -579,6 +581,26 @@ def scrape_group(
     if duplicates:
         result.error = '；'.join(duplicates)
         return result
+    actions = getattr(existing_targets, 'actions', {})
+    for item in playable:
+        destination = existing_targets.get(str(item.path))
+        if destination and ' - version-' in destination.stem:
+            reason = actions.get(str(item.path), {}).get('reason') or '同番号存在不同内容，自动另存版本'
+            result.warnings.append(f'{reason}，已有影片保留: {destination.name}')
+    if playable and all(actions.get(str(item.path), {}).get('action') == 'keep' for item in playable):
+        from app.services import duplicatepolicy, scrapeinventory
+        for item in playable:
+            action = actions[str(item.path)]
+            target = existing_targets[str(item.path)]
+            if action.get('remember'):
+                if duplicatepolicy.signature(target) != action['signature']:
+                    result.error = '保留影片已变化，请重试'
+                    return result
+                duplicatepolicy.remember(item.path, target, action['policy'])
+            result.links.append(target)
+            result.skipped.append(action['reason'] + ': ' + item.path.name)
+        scrapeinventory.update_result(playable, code)
+        return result
 
     if force:
         # Force requires a fresh, identity-checked network result. Never turn a
@@ -601,6 +623,8 @@ def scrape_group(
     if preserved_meta and not force:
         meta = {**{k: v for k, v in preserved_meta.items() if v}, **meta,
                 **{k: v for k, v in preserved_meta.items() if k.startswith('_local_') and v}}
+    if meta.get('_lookup_code'):
+        result.warnings.append(f'商品编号 {code} 使用已验证候选 {meta["_lookup_code"]} 获取元数据')
     result.sources = meta.get("_sources", [])
     if meta.get("_refresh_failed"):
         result.warnings.append("本轮未取得新的网络元数据，沿用现有资料；请检查数据源后重试")
@@ -702,13 +726,26 @@ def _commit_group(code, playable, meta, settings, overwrite, target_dir,
     for info in playable:
         info_total = total
         target = (existing_targets or {}).get(str(info.path)) or _target_path(meta, info, target_dir)
+        from app.services import duplicatepolicy
+        action = getattr(existing_targets, 'actions', {}).get(str(info.path), {})
+        if action.get('action') == 'keep':
+            if action.get('remember'):
+                if duplicatepolicy.signature(target) != action['signature']:
+                    failures.append('保留影片已变化，请重试')
+                    continue
+                duplicatepolicy.remember(info.path, target, action['policy'])
+            result.links.append(target)
+            result.skipped.append(action['reason'] + ': ' + info.path.name)
+            linked_items.append(info)
+            continue
+        replacing = action.get('action') == 'replace'
 
         # 先检查冲突，不能先覆盖另一份视频的图片/NFO。
         try:
             from app.services.mediaduplicate import verified_existing
             reused_copy = (existing_targets.get(str(info.path)) == target and target.exists()
                            and not target.samefile(info.path) and verified_existing(info.path, target))
-            conflict = target.exists() and not target.samefile(info.path) and not reused_copy
+            conflict = target.exists() and not target.samefile(info.path) and not reused_copy and not replacing
         except OSError as exc:
             failures.append(f'无法检查目标文件: {exc}')
             continue
@@ -757,7 +794,16 @@ def _commit_group(code, playable, meta, settings, overwrite, target_dir,
         if reused_copy and not verified_existing(info.path, target):
             failures.append(f'已合并文件发生变化，请重新检查: {target}')
             continue
-        ok, note = _make_link(target if reused_copy else info.path, target)
+        if replacing:
+            try:
+                duplicatepolicy.replace_video(info.path, target, action['signature'])
+                ok, note = True, ''
+                result.warnings.append(action['reason'] + ': ' + target.name)
+                result.warnings.append('替换已启用删除联动保护；请在 Emby 扫描完成后解除保护')
+            except (OSError, ValueError) as exc:
+                ok, note = False, str(exc)
+        else:
+            ok, note = _make_link(target if reused_copy else info.path, target)
         if not ok:
             result.skipped.append(note)
             failures.append(note)
@@ -865,7 +911,18 @@ def _register(code: str, items: list[MediaFileInfo], result: ScrapeResult) -> bo
     registered_new = False
     with session_scope() as session:
         for info, link in linked:
-            registered_new |= session.scalar(select(MediaLink.link_path).where(MediaLink.link_path == str(link))) is None
+            existing = session.get(MediaLink, str(link))
+            registered_new |= existing is None
+            from app.services.mediaduplicate import verified_existing
+            from app.services.duplicatepolicy import retained
+            if existing is not None and retained(info.path, link):
+                continue
+            if existing is not None and link.exists() and (
+                not link.samefile(info.path) and verified_existing(info.path, link)
+                or existing.code != code and link.samefile(info.path)
+            ):
+                # Retain the canonical source; the second source is a verified alias.
+                continue
             write_link(code, str(info.path), str(link), session=session)
         if not result.error:
             medialink.mark_completed(code, session=session)

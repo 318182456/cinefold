@@ -329,3 +329,30 @@ def test_history_api_authenticated_read_only(copy_mode, monkeypatch):
     assert row['job_id'] == result['job_id'] and row['done'] == 2 and row['ok'] == 1
     assert row['can_retry_failed']
     assert not scraperebuild.state()['running']
+
+
+@pytest.mark.parametrize('old_code,new_code', [('1NHDTA-00565','NHDTA-565'), ('1RCT-00828','RCT-828')])
+def test_retry_failed_normalizes_old_vendor_code_in_manifest_and_journal(copy_mode, monkeypatch, old_code, new_code):
+    case = copy_mode
+    result, _ = partial(case, monkeypatch)
+    directory = Path(result['quarantine_dir'])
+    manifest_path = directory / 'manifest.json'
+    manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
+    for source in manifest['sources']:
+        if source['code'] == 'SONE-726':
+            source['code'] = old_code
+    for row in manifest['results']:
+        if row['code'] == 'SONE-726':
+            row['code'] = old_code
+    scraperebuild._write_manifest(manifest_path, manifest)
+    (directory / 'results.jsonl').write_text(''.join(json.dumps(row)+'\n' for row in manifest['results']), encoding='utf-8')
+    good = case['output'] / 'rebuilt' / 'SONE-725.mp4'
+    before = good.stat().st_ino
+    calls = []
+    monkeypatch.setattr(scrape, 'scrape_group', writer(case, calls))
+    scraperecovery.start(result['job_id'], 'failed')
+    recovered = wait()
+    assert recovered['phase'] == 'completed', recovered
+    assert recovered['done'] == recovered['ok'] == recovered['total'] == 2
+    assert [code for code, _ in calls] == [new_code]
+    assert good.stat().st_ino == before

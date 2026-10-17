@@ -94,6 +94,9 @@ def normalize_serial_text(text: str) -> str:
             return f'{core}-CD{int(match[4]) + 1}'
         return core
     text = _DMM_FILENAME.sub(dmm, strip_site_domains(text))
+    # Known SOD vendor 1 + five-digit product ID; retain genuine numeric labels.
+    text = re.sub(r'(?<![A-Za-z0-9])1(RCT|NHDTA)[-_]?(0\d{4})(?!\d)',
+                  lambda m: f'{m[1].upper()}-{int(m[2]):03d}', text, flags=re.IGNORECASE)
     # DMM 发行文件使用五位补零序号；只规整明确的 00xxx，不动正常 001/035。
     text = re.sub(r'(?<![A-Za-z0-9])([A-Za-z]{2,7})[-_]?(00\d{3})(?!\d)',
                   lambda m: f'{m[1]}-{int(m[2]):03d}', text)
@@ -243,6 +246,9 @@ def get_true_code(code: str) -> str:
         return f"{date_match.group(1)}_{date_match.group(2)}"
 
     normalized = code.strip().upper().replace("_", "-").replace(" ", "-")
+    vendor_id = re.match(r'^1(RCT|NHDTA)-?(0\d{4})(?![A-Z0-9])', normalized)
+    if vendor_id:
+        return _with_suffix(f'{vendor_id[1]}-{int(vendor_id[2]):03d}', normalized[vendor_id.end():])
     special = re.match(r'^(HEYDOUGA-\d{4}-(?:PPV-?)?\d{2,6}|(?:H4610|H0930|C0930)-[A-Z]+\d{2,6}|MKBD-S\d{2,5})(?![A-Z0-9])', normalized)
     if special:
         core = special[1].replace('-PPV-', '-').replace('-PPV', '-')

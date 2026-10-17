@@ -145,7 +145,13 @@ def _load(rebuild, candidate):
         raise ValueError('视频恢复证据不属于原任务')
     if any(not rebuild._under(raw, output) for raw in manifest.get('retained', [])):
         raise ValueError('原任务保留路径越界')
-    latest = {row['code']: row for row in manifest.get('results', [])}
+    from app.utils import get_true_code
+    def normalized_result(row):
+        return {**row, 'code': get_true_code(row['code']) or row['code']}
+    latest = {}
+    for row in manifest.get('results', []):
+        row = normalized_result(row)
+        latest[row['code']] = row
     journal = quarantine / 'results.jsonl'
     if rebuild._unsafe_links(journal):
         raise ValueError('结果日志路径不安全')
@@ -153,7 +159,7 @@ def _load(rebuild, candidate):
         lines = journal.read_bytes().splitlines(keepends=True)
         for index, line in enumerate(lines):
             try:
-                row = json.loads(line)
+                row = normalized_result(json.loads(line))
                 latest[row['code']] = row
             except (ValueError, KeyError, TypeError):
                 if index == len(lines) - 1 and not line.endswith(b'\n'):

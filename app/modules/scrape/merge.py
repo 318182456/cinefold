@@ -256,6 +256,13 @@ def base_code(code: str) -> str:
     return ""
 
 
+def product_alias(code: str) -> str:
+    """Candidate catalogue IDs for explicitly known retailer prefixes."""
+    aliases = {'420ERK': 'ERK', '476MLA': 'MLA', '277DCV': 'DCV', '483DAM': 'DAM'}
+    prefix, separator, serial = (base_code(code) or code).partition('-')
+    return f'{aliases[prefix]}-{serial}' if separator and prefix in aliases else ''
+
+
 def fetch_merged(code: str, timeout: float | None = None) -> dict:
     """抓全部可用站点并合并。抓不到返回空字典。
 
@@ -273,7 +280,25 @@ def fetch_merged(code: str, timeout: float | None = None) -> dict:
     lookup = base_code(code) or code
     if lookup != code:
         logger.info(f"[{code}] 使用基础番号 {lookup} 获取元数据，保留本地版本标记")
-    return _fetch_one(lookup, timeout)
+    # A few known retailer prefixes differ from the catalogue number. Keep the
+    # original query first; never strip genuine labels such as 300MIUM/259LUXU.
+    alternative = product_alias(lookup)
+    started = time.monotonic()
+    result = _fetch_one(lookup, timeout * 0.6 if alternative else timeout)
+    if not alternative or result.get('title') or result.get('cn_title'):
+        return result
+    remaining = timeout - (time.monotonic() - started)
+    if remaining <= 0:
+        return result
+    logger.info(f'[{code}] 原编号未取得标题，验证商品编号候选 {alternative}')
+    fallback = _fetch_one(alternative, remaining)
+    if not fallback.get('title') and not fallback.get('cn_title'):
+        return result or fallback
+    # _fetch_one validates each response against the alternative's exact ID.
+    detail = clean_detail(fallback, alternative)
+    if not detail.get('title') and not detail.get('cn_title'):
+        return result
+    return {**fallback, **detail, 'code': code, '_lookup_code': alternative}
 
 
 def _fetch_one(code: str, timeout: float) -> dict:

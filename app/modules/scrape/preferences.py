@@ -33,6 +33,8 @@ def ordered(code: str, available, preferences: dict) -> list[str]:
 
 
 def validate(config: dict) -> str:
+    if 'scrape_duplicate_policy' in config and config['scrape_duplicate_policy'] not in ('versions', 'overwrite', 'highest_quality', 'keep_existing'):
+        return '重复影片处理方式必须为覆盖、保留高清、保留旧的或保留两个版本'
     from app.modules.ladysite import DETAIL_SITES, SPECIAL_SITES
     supported = set(DETAIL_SITES + SPECIAL_SITES)
     from app.modules.ladysite.sources import enabled_parser_sources

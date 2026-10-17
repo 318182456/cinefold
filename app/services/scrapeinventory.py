@@ -189,6 +189,14 @@ def _run_active(paths):
             links = defaultdict(list)
             for source, target in session.execute(select(MediaLink.source_path, MediaLink.link_path)):
                 links[key(source)].append(target)
+            from app.services.mediaduplicate import source_aliases
+            for source, target in source_aliases(session):
+                if target not in links[key(source)]:
+                    links[key(source)].append(target)
+            from app.services.duplicatepolicy import links as decision_links
+            for source, target in decision_links(session):
+                if target not in links[key(source)]:
+                    links[key(source)].append(target)
             overrides = {a.source_key: a.code for a in session.scalars(select(ScrapeAttempt)) if a.code}
         for raw in paths:
             started = datetime.now()
@@ -228,6 +236,9 @@ def _run_active(paths):
                                 status = 'ignored'
                             elif target_links:
                                 status = 'complete' if scrapewatch._complete(path, code, target_links) else 'incomplete'
+                                if status == 'complete':
+                                    from app.services.duplicatepolicy import disposition
+                                    status = disposition(path, target_links)
                             batch.append({'source_key': source_key, 'path': str(path), 'name': name,
                                 'detected_code': info.code, 'part': info.part, 'size': stat.st_size, 'mtime': stat.st_mtime,
                                 'artifact_status': status, 'links': target_links, 'indexed_at': started})
@@ -280,6 +291,14 @@ def update_result(items, code: str):
             if row is None:
                 continue
             target_links = session.scalars(select(MediaLink.link_path).where(MediaLink.source_path == str(path))).all()
+            from app.services.mediaduplicate import source_aliases, verified_existing
+            target_links = list(dict.fromkeys([*target_links, *(target for source, target in source_aliases(session, path)
+                if source == str(path) and Path(target).is_file() and verified_existing(path, target))]))
+            from app.services.duplicatepolicy import links as decision_links, retained, disposition
+            target_links = list(dict.fromkeys([*target_links, *(target for source, target in decision_links(session, path)
+                if source == str(path) and retained(path, target))]))
             row.links = list(target_links)
             row.artifact_status = ('complete' if _complete(path, code, target_links) else 'incomplete') if target_links else 'pending'
+            if row.artifact_status == 'complete':
+                row.artifact_status = disposition(path, target_links)
             row.indexed_at = datetime.now()

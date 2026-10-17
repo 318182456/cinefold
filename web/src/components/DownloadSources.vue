@@ -218,7 +218,7 @@ const stats = computed(() => {
 function showDetail(row) { detailRow.value = row; detailOpen.value = true }
 function processDetail(detail) { detailOpen.value = false; open([{ ...detailRow.value, code: detail.code, links: detail.links }], !!detail.links.length) }
 function filterStatus(value) { status.value = value; search() }
-const LABELS = { pending: '未刮削', complete: '已刮削', incomplete: '产物缺失', failed: '刮削失败', unrecognized: '需指定番号', downloading: '下载中', queued: '排队中', running: '刮削中', interrupted: '上次中断', cancelled: '已停止', empty: '空文件', ignored: '已跳过广告' }
+const LABELS = { pending: '未刮削', complete: '已刮削', kept_existing: '已保留已有版本', incomplete: '产物缺失', failed: '刮削失败', unrecognized: '需指定番号', downloading: '下载中', queued: '排队中', running: '刮削中', interrupted: '上次中断', cancelled: '已停止', empty: '空文件', ignored: '已跳过广告' }
 let request = 0, timer, indexTimer, disposed = false, initialIndexRequested = false
 const selectable = row => !rebuildLocked.value && !['downloading', 'queued', 'running', 'empty', 'ignored'].includes(row.status)
 const allSelected = computed(() => data.value.items.filter(selectable).length > 0 && data.value.items.filter(selectable).every(r => selected.value.includes(r.path)))
@@ -282,6 +282,7 @@ async function poll() {
     if (result.running) timer = setTimeout(poll, 2000)
     else if (wasRunning) {
       await load()
+      await pollRebuild()
       if (result.error) toast.error(result.error)
       else if (result.cancel_requested) toast.success('已停止后续刮削')
       else if (result.done > result.ok) toast.error(`${result.done - result.ok} 个番号未完成，可在列表中重试`)

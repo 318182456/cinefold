@@ -31,14 +31,14 @@ def register(db, target, source=None, code='MEYD-568'):
         session.commit()
 
 
-def test_scrape_blocks_existing_other_file_before_fetch_or_write(library, db, monkeypatch):
+def test_subtitle_version_does_not_block_distinct_original(library, db, monkeypatch):
     root, download = library
     old, source = root / 'MEYD-568-C.mp4', download / 'MEYD-568.mp4'
     old.write_bytes(b'original'); source.write_bytes(b'new copy')
     register(db, old)
-    monkeypatch.setattr(scrape, 'load_group_meta', lambda *a, **kw: pytest.fail('查重必须早于获取元数据'))
-    result = scrape.scrape_group('MEYD-568', [parse(source)])
-    assert not result.ok and '已存在' in result.error
+    targets, conflicts = mediaduplicate.check_existing('MEYD-568', [parse(source)])
+    assert not conflicts and targets[str(source)] != old
+    assert targets[str(source)].name.startswith('MEYD-568 - version-')
     assert old.read_bytes() == b'original' and source.exists()
     assert len(list(root.iterdir())) == 1
 
@@ -88,14 +88,15 @@ def test_verified_same_source_reuses_existing_target_despite_old_part_inference(
     assert mediaduplicate.check_existing('STARS-043', [parse(source)]) == ({str(source): target}, [])
 
 
-def test_different_titled_file_with_existing_part_is_still_blocked(library, db):
+def test_different_titled_file_with_existing_part_gets_separate_version(library, db):
     root, download = library
     source, target = download / 'STARS-043 小倉由菜_2.mp4', root / 'STARS-043-CD2.mp4'
     source.write_bytes(b'different copy')
     target.write_bytes(b'existing part two')
     register(db, target, code='STARS-043')
     targets, conflicts = mediaduplicate.check_existing('STARS-043', [parse(source)])
-    assert not targets and conflicts
+    assert not conflicts and ' - version-' in targets[str(source)].stem
+    assert not targets[str(source)].exists()
     assert source.exists() and target.exists()
 
 
@@ -133,7 +134,91 @@ def test_merge_preserves_download_history_subtitles_and_late_delete_callback(lib
     assert medialink._lookup_links(link_path=str(first))[0].link_path == str(first)
     assert mediaduplicate.check_existing('MEYD-568', [parse(source)]) == ({str(source): first}, [])
     source.write_bytes(b'changed download')
-    assert mediaduplicate.check_existing('MEYD-568', [parse(source)])[1]
+    targets, conflicts = mediaduplicate.check_existing('MEYD-568', [scrape.inspect_source(source)])
+    assert not conflicts and targets.get(str(source)) != first
+    assert first.read_bytes() == b'video'
+
+
+@pytest.mark.parametrize('autoflush', [False, True])
+def test_equal_independent_copy_auto_reuses_and_survives_inventory_scan(library, db, monkeypatch, autoflush):
+    from PIL import Image
+    from app.database.models import Code, CodeStatus
+    from app.services import scrapewatch
+    db.configure(autoflush=autoflush)
+    root, download = library
+    source, canonical, target = download / 'MEYD-568.mp4', download / 'original.mp4', root / 'MEYD-568-C.mp4'
+    source.write_bytes(b'exact identical content')
+    canonical.write_bytes(source.read_bytes())
+    os.link(canonical, target)
+    register(db, target, canonical, code='MEYD-568-C')
+    target.with_suffix('.nfo').write_text('<movie><num>MEYD-568-C</num><title>existing title</title></movie>')
+    for kind in ('poster', 'thumb', 'fanart'):
+        Image.new('RGB', (30, 40), 'blue').save(target.with_name(f'{target.stem}-{kind}.jpg'))
+    source.with_suffix('.chs.srt').write_text('keep subtitle')
+    before = target.with_suffix('.nfo').read_bytes()
+    settings = Settings(medialink_scrape_dir=str(root), medialink_library_path=str(root),
+                        scrape_source_dirs=str(download), scrape_still_limit=0, scrape_notify=False)
+    monkeypatch.setattr(scrape, 'get_settings', lambda: settings)
+    monkeypatch.setattr(scrapeinventory, 'get_settings', lambda: settings)
+    monkeypatch.setattr(scrape, 'load_group_meta', lambda *a, **kw: {'code':'MEYD-568', 'title':'existing title'})
+    with db() as session:
+        session.add(Code(code='MEYD-568', title='existing title', status=CodeStatus.DOWNLOADED))
+        session.add(ScrapeSourceVideo(source_key=scrapeinventory.key(source), path=str(source), name=source.name,
+                    detected_code='MEYD-568', size=source.stat().st_size, mtime=source.stat().st_mtime,
+                    artifact_status='pending', links=[], indexed_at=datetime.now()))
+        session.commit()
+    result = scrape.scrape_group('MEYD-568', [scrape.inspect_source(source)])
+    assert result.ok and result.links == [target], result
+    assert target.with_suffix('.nfo').read_bytes() == before
+    assert target.with_suffix('.chs.srt').read_text() == 'keep subtitle'
+    assert source.exists() and canonical.exists()
+    assert len(list(root.glob('*.mp4'))) == 1
+    with db() as session:
+        assert session.get(MediaLink, str(target)).source_path == str(canonical)
+        cached = session.get(ScrapeSourceVideo, scrapeinventory.key(source))
+        assert cached.links == [str(target)] and cached.artifact_status == 'complete'
+    scrapeinventory.refresh_now(str(download))
+    with db() as session:
+        cached = session.get(ScrapeSourceVideo, scrapeinventory.key(source))
+        assert cached.links == [str(target)] and cached.artifact_status == 'complete'
+    assert scrapewatch._complete(source, 'MEYD-568', [str(target)])
+
+
+def test_different_content_scrapes_as_separate_version_without_overwrite(library, db, monkeypatch):
+    root, download = library
+    old, source = root / 'MEYD-568.mp4', download / 'MEYD-568.mp4'
+    old.write_bytes(b'original version'); source.write_bytes(b'different encode')
+    old.with_suffix('.nfo').write_text('<movie><title>original metadata</title></movie>')
+    register(db, old)
+    settings = Settings(medialink_scrape_dir=str(root), medialink_library_path=str(root),
+                        scrape_source_dirs=str(download), scrape_still_limit=0, scrape_notify=False)
+    monkeypatch.setattr(scrape, 'get_settings', lambda: settings)
+    monkeypatch.setattr(scrape, 'load_group_meta', lambda *a, **kw: {'code':'MEYD-568', 'title':'new metadata'})
+    first = scrape.scrape_group('MEYD-568', [parse(source)])
+    assert first.ok and len(first.links) == 1, first
+    target = first.links[0]
+    assert ' - version-' in target.name and target.samefile(source)
+    assert old.read_bytes() == b'original version'
+    assert 'original metadata' in old.with_suffix('.nfo').read_text()
+    second = scrape.scrape_group('MEYD-568', [parse(source)])
+    assert second.ok and second.links == [target]
+    assert len(list(root.glob('*.mp4'))) == 2
+
+
+def test_identical_multiple_targets_remember_only_selected_canonical(library, db):
+    root, download = library
+    source = download / 'MEYD-568.mp4'
+    source.write_bytes(b'copy')
+    paths = [root / 'MEYD-568.mp4', root / 'MEYD-568-C.mp4']
+    for path in paths:
+        path.write_bytes(b'copy')
+        register(db, path)
+    selected, conflicts = mediaduplicate.check_existing('MEYD-568', [parse(source)])
+    chosen = selected[str(source)]
+    assert not conflicts and chosen in paths
+    assert mediaduplicate.verified_existing(source, chosen)
+    assert not mediaduplicate.verified_existing(source, next(path for path in paths if path != chosen))
+    assert mediaduplicate.check_existing('MEYD-568', [parse(source)], selected) == (selected, [])
 
 
 def test_equal_size_different_content_and_other_parts_are_not_merged(library, db):

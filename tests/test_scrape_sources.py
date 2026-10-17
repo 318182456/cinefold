@@ -592,3 +592,18 @@ def test_repair_drops_old_attempt_failure_when_correcting_domain_number(env):
     assert scrapeinventory.repair_filename_codes() == 1
     result = sources.list_videos()['items'][0]
     assert result['code'] == 'DASD-875' and result['status'] == 'pending' and result['error'] == ''
+
+
+@pytest.mark.parametrize('name,wrong,correct', [('1rct00828.mp4','1RCT-00828','RCT-828'),
+                                             ('1nhdta00565.mp4','1NHDTA-00565','NHDTA-565')])
+def test_repair_old_vendor_product_attempt_and_failure(env, name, wrong, correct):
+    root, _, db, _, _ = env
+    path = video(root, name)
+    scrapeinventory.refresh_now()
+    sources.record_attempt([{'path':str(path)}], wrong, status='failed', error=f'取不到元数据: {wrong}')
+    with db() as session:
+        session.get(ScrapeSourceVideo, sources.key(path)).detected_code = wrong
+        session.commit()
+    assert scrapeinventory.repair_filename_codes() == 1
+    row = sources.list_videos()['items'][0]
+    assert row['code'] == correct and row['status'] == 'pending' and row['error'] == ''
