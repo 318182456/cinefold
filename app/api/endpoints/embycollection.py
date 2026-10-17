@@ -43,6 +43,12 @@ def collection_state(current_user: str = Depends(get_current_user)):
     return ResponseEntity.ok(current())
 
 
+@router.get('/emby/collections/catalog')
+def collection_catalog(current_user: str = Depends(get_current_user)):
+    from app.services.embycollections import catalog
+    return ResponseEntity.ok(catalog())
+
+
 @router.post('/emby/collections/auto')
 def automatic_collections(body: AutomaticRequest, current_user: str = Depends(get_current_user)):
     from app.services.embycollections import automatic

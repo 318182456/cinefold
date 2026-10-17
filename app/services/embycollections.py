@@ -92,6 +92,29 @@ def _snapshot(limit):
             'truncated': bool(limit and len(mapped) > limit), 'limit': limit, 'fingerprint': _hash([context, scoped])}
 
 
+def catalog():
+    """Locally recorded Emby collections for the selected server and user."""
+    try:
+        context, _ = _context()
+    except ValueError:
+        return {'items':[]}
+    with session_scope() as session:
+        watches = {row.item_id:_core(row.code) for row in session.scalars(select(EmbyWatch).where(
+            EmbyWatch.server==context['server'], EmbyWatch.user_id==context['user_id']))}
+        covers = {}
+        for row in session.execute(select(Code.code,Code.title,Code.cn_title,Code.banner,Code.poster,Code.local_banner)):
+            covers.setdefault(_core(row.code), dict(row._mapping))
+        result=[]
+        for row in session.scalars(select(EmbyCollectionLink).where(
+                EmbyCollectionLink.server==context['server'], EmbyCollectionLink.user_id==context['user_id'],
+                EmbyCollectionLink.remote_id.is_not(None), EmbyCollectionLink.status=='published').order_by(EmbyCollectionLink.name)):
+            codes=sorted({watches[str(item)] for item in row.member_ids or [] if str(item) in watches})
+            result.append({'key':row.key,'name':row.name,'remote_id':row.remote_id,'status':row.status,
+                'count':len(codes),'codes':codes,'cover':next((covers[code] for code in codes if code in covers),None),
+                'emby_url':context['url']+'/web/index.html#!/item?id='+quote(row.remote_id,safe='')})
+        return {'items':result}
+
+
 def current():
     global _PLAN
     with _LOCK:
@@ -248,6 +271,28 @@ def automatic(mode='all'):
     if scrapemaintenance.busy():
         raise ValueError('媒体库正在重建，请等待完成后再创建合集')
     return suggest(mode, 0, automatic=True)
+
+
+def task_run(*, scheduled=False, restart=False):
+    """One task entry: full library, all categories, resume before restarting."""
+    from app.modules.review.reviewai import ReviewAI
+    with _LOCK:
+        state = current()
+        if state['running']:
+            if scheduled:
+                return {**state, 'skipped':True}
+            raise ValueError('AI 合集任务正在运行，请等待完成')
+        context, _ = _context()
+        if not ReviewAI().enabled:
+            raise ValueError('请先配置可用的 AI 助手或 OpenAI 兼容接口')
+        compatible = bool(_PLAN and _PLAN.get('automatic') and _PLAN.get('mode')=='all'
+                          and not _PLAN['snapshot']['limit'] and _PLAN['snapshot']['context']==context)
+        if compatible and state.get('can_resume') and not restart:
+            return resume()
+        if scheduled and compatible and state['phase']=='published':
+            if _snapshot(0)['fingerprint']==_PLAN['snapshot']['fingerprint']:
+                return {**state, 'skipped':True}
+        return automatic('all')
 
 
 def resume():

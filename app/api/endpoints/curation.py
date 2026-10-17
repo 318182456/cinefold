@@ -183,6 +183,8 @@ def delete_rule(rule_id: int):
 
 @router.get("/library")
 def library(keyword: str = "", genre: str = "", actor: str = "", publisher: str = "", series: str = "",
+            emby_collection_key: str = Query('',max_length=64),
+            system_collection: str = Query('', max_length=40),
             collection_id: int | None = None, favorite: bool = False, emby_favorite: bool = False, watch_later: bool = False,
             unseen: bool = False, include_skipped: bool = False,
             sort: Literal["recent", "release", "rating", "plays", "size"] = "recent",
@@ -191,6 +193,8 @@ def library(keyword: str = "", genre: str = "", actor: str = "", publisher: str 
     conditions = {k: v for k, v in {"genres": [genre] if genre else [], "casts": [actor] if actor else [], "publisher": publisher, "series": series}.items() if v}
     try:
         return ResponseEntity.ok(library_items(keyword=keyword, conditions=conditions, collection_id=collection_id,
+            emby_collection_key=emby_collection_key,
+            system_collection=system_collection,
             favorite=favorite, emby_favorite=emby_favorite, watch_later=watch_later, unseen=unseen, sort=sort, page=page, size=size, include_skipped=include_skipped))
     except ValueError as exc:
         raise HTTPException(404, str(exc)) from exc
@@ -267,6 +271,12 @@ def collections():
         return ResponseEntity.ok([r.to_dict() for r in session.scalars(select(Collection).order_by(Collection.id))])
 
 
+@router.get('/collections/system')
+def system_collections():
+    from app.services.playlists import SYSTEM_PLAYLISTS
+    return ResponseEntity.ok(SYSTEM_PLAYLISTS)
+
+
 @router.post("/collections")
 def create_collection(body: CollectionRequest):
     return save_collection(body)
@@ -278,7 +288,11 @@ def update_collection(collection_id: int, body: CollectionRequest):
 
 
 def save_collection(body, collection_id=None):
-    conditions = checked_conditions(body.conditions, allow_empty=True)
+    from app.services.playlists import validate
+    try:
+        conditions = validate(body.conditions) if body.kind == 'smart' else checked_conditions(body.conditions, allow_empty=True)
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(422, str(exc)) from exc
     if not body.name.strip():
         raise HTTPException(422, "片单名称不能为空")
     with session_scope() as session:

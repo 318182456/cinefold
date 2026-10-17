@@ -170,8 +170,14 @@ def list_cron(current_user: str = Depends(get_current_user)):
 
 
 @router.post("/task")
-def run_task(job_id: str, current_user: str = Depends(get_current_user)):
+def run_task(job_id: str, restart: bool = False, current_user: str = Depends(get_current_user)):
     """手动触发定时任务。"""
+    if job_id == 'auto_emby_collections':
+        from app.services.embycollections import task_run
+        try:
+            return ResponseEntity.ok(task_run(restart=restart))
+        except ValueError as exc:
+            return ResponseEntity.fail(str(exc), code=409)
     from app.scheduler import push_job
     if not push_job(job_id):
         return ResponseEntity.fail(f"未知任务 {job_id}", code=404)

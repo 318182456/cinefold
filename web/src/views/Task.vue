@@ -1,6 +1,7 @@
 <script setup>
 import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
 import { listCron, previewSchedule, runTask, translateTitles, updateSchedule } from '@/api'
+import http from '@/api'
 import { useToast } from '@/composables/useToast'
 import EmptyState from '@/components/EmptyState.vue'
 import LoadingBlock from '@/components/LoadingBlock.vue'
@@ -10,6 +11,37 @@ const jobs = ref([])
 const loading = ref(false)
 const running = ref('')
 let timer = null
+const COLLECTION_JOB = 'auto_emby_collections'
+const collection = ref({ running:false, phase:'idle', groups:[], done:0, total:0 })
+const collectionKnown = ref(false), collectionError = ref(''), shownResults = ref(20)
+let collectionTimer, collectionRequest = 0, disposed = false
+const collectionPhases = { idle:'待执行', ready:'历史建议已保留，执行任务后自动创建', suggesting:'分析影片', publishing:'创建 Emby 合集', published:'已完成', partial:'部分合集失败', failed:'任务失败', interrupted:'已中断，可继续' }
+const collectionSuccess = computed(() => (collection.value.groups || []).filter(row => row.publish_status==='published').length)
+const collectionFailed = computed(() => (collection.value.groups || []).filter(row => row.publish_status==='failed').length)
+const collectionElapsed = computed(() => {
+  const state = collection.value
+  if (!state.started_at) return ''
+  const seconds = Math.max(0,Math.floor((state.running ? Date.now()/1000 : state.finished_at || state.updated_at || state.started_at)-state.started_at))
+  return `${Math.floor(seconds/60)} 分 ${seconds%60} 秒`
+})
+
+function acceptCollection(state) {
+  collection.value = state
+  collectionKnown.value = true
+  collectionError.value = ''
+}
+async function pollCollection() {
+  clearTimeout(collectionTimer)
+  const request = ++collectionRequest
+  try {
+    const state = await http.get('/emby/collections/current')
+    if (!disposed && request===collectionRequest) acceptCollection(state)
+  } catch (err) {
+    if (!disposed && request===collectionRequest) { collectionKnown.value=false; collectionError.value=err.message }
+  } finally {
+    if (!disposed && request===collectionRequest) collectionTimer=setTimeout(pollCollection,collection.value.running ? 1800 : 15000)
+  }
+}
 
 // 正在改排班的任务，以及输入框里的说法
 const editing = ref('')
@@ -43,6 +75,7 @@ const DESCRIPTIONS = {
   scan_orphans: '扫描下载侧已删、媒体库仍在的关联',
   refresh_link_sizes: '回填媒体关联的体积与字幕状态',
   auto_update: '检查并安装新版本',
+  auto_emby_collections: '全库分批分析系列、主题、续作、演员与风格，自动创建或补充 Emby 合集；无需填写影片数量',
 }
 
 // 输入框下方的例子。放在界面上而不是等出错再说 —— 用户第一次点开就该
@@ -67,15 +100,21 @@ async function load() {
   }
 }
 
-async function trigger(jobId) {
+async function trigger(jobId, restart = false) {
+  if (jobId===COLLECTION_JOB && (!collectionKnown.value || collection.value.running)) return
   running.value = jobId
+  if (jobId===COLLECTION_JOB) { clearTimeout(collectionTimer); collectionRequest++ }
   try {
-    await runTask(jobId)
-    toast.success('任务已触发，执行情况见日志页')
+    const state = await runTask(jobId, restart)
+    if (jobId===COLLECTION_JOB) {
+      if (!disposed) acceptCollection(state)
+      toast.success('AI 全库合集任务已在后台启动')
+    } else toast.success('任务已触发，执行情况见日志页')
   } catch (err) {
     toast.error(err.message)
   } finally {
     running.value = ''
+    if (jobId===COLLECTION_JOB && !disposed) pollCollection()
   }
 }
 
@@ -143,10 +182,12 @@ async function save(job) {
 
 onMounted(() => {
   load()
+  pollCollection()
   // 下次执行时间会随时间推移，定期刷新
   timer = setInterval(load, 60000)
 })
 onUnmounted(() => {
+  disposed=true; collectionRequest++; clearTimeout(collectionTimer)
   clearInterval(timer)
   clearTimeout(previewTimer)
 })
@@ -193,12 +234,24 @@ onUnmounted(() => {
             </button>
             <button
               class="btn-primary px-3 py-1.5 text-xs"
-              :disabled="running === job.id"
+              :disabled="running === job.id || (job.id === COLLECTION_JOB && (!collectionKnown || collection.running))"
               @click="trigger(job.id)"
             >
-              {{ running === job.id ? '触发中…' : '立即执行' }}
+              {{ running === job.id ? '触发中…' : job.id === COLLECTION_JOB && collection.running ? '运行中' : job.id === COLLECTION_JOB && collection.can_resume ? '继续任务 / 重试失败' : '立即执行' }}
             </button>
           </div>
+        </div>
+
+        <div v-if="job.id === COLLECTION_JOB" class="mt-3 space-y-2 border-t border-gray-800 pt-3 text-xs">
+          <p class="text-gray-300">{{ collectionPhases[collection.phase] || collection.phase }}<span v-if="collection.total"> · {{ collection.done || 0 }} / {{ collection.total }} {{ collection.phase === 'suggesting' ? '部影片' : '个合集' }}</span></p>
+          <p v-if="collection.current" class="text-brand">{{ collection.current }}</p>
+          <div v-if="collection.running && collection.total" class="h-1.5 overflow-hidden rounded-full bg-gray-800" role="progressbar" aria-label="AI 合集任务进度" :aria-valuenow="collection.done || 0" :aria-valuemin="0" :aria-valuemax="collection.total"><div class="h-full bg-brand" :style="{ width: `${Math.min(100,(collection.done || 0)/collection.total*100)}%` }"></div></div>
+          <p v-if="collection.scope" class="text-gray-400">本次覆盖 {{ collection.scope.included }} 部影片 · 已分析 {{ collection.analyzed || 0 }} 部<span v-if="collection.scope.unmapped" class="text-amber-400"> · {{ collection.scope.unmapped }} 部缺少 Emby 关联，请先同步</span></p>
+          <p v-if="collectionElapsed" class="text-gray-500">耗时 {{ collectionElapsed }}<span v-if="collection.updated_at"> · 最后更新 {{ new Date(collection.updated_at*1000).toLocaleTimeString('zh-CN', { timeZone:'Asia/Shanghai' }) }}</span></p>
+          <p v-if="collection.running" class="text-gray-500">后台任务持续执行，可以离开此页。</p>
+          <p v-if="collection.error || collectionError" class="break-all text-red-400">{{ collection.error || collectionError }}</p>
+          <div class="flex items-center gap-3"><button class="text-brand" @click="pollCollection">刷新合集状态</button><button v-if="collection.can_resume" class="text-gray-400 disabled:opacity-40" :disabled="!collectionKnown || collection.running || running === job.id" @click="trigger(job.id, true)">重新分析全库</button></div>
+          <details v-if="collection.groups?.length" class="space-y-2"><summary class="cursor-pointer text-gray-400">{{ collection.groups.length }} 个合集 · 成功 {{ collectionSuccess }} · 失败 {{ collectionFailed }} · 查看明细</summary><div v-for="row in collection.groups.slice(0,shownResults)" :key="row.id" class="space-y-1 border-t border-gray-800 pt-2"><p :class="row.publish_status==='published' ? 'text-emerald-400' : row.publish_status==='failed' ? 'text-red-400' : 'text-gray-300'">{{ row.name }} · {{ row.codes?.length || 0 }} 部 · {{ row.publish_status==='published' ? '已发布' : row.publish_status==='failed' ? '失败' : '待处理' }}</p><p v-if="row.publish_error" class="break-all text-red-400">{{ row.publish_error }}</p><p v-if="row.reason" class="text-gray-500">{{ row.reason }}</p></div><button v-if="shownResults < collection.groups.length" class="text-brand" @click="shownResults += 20">再显示 20 条</button></details>
         </div>
 
         <!-- 改周期：直接说人话，不用会 cron -->

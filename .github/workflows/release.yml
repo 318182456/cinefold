@@ -86,11 +86,8 @@ jobs:
           git push origin "v${VERSION}"
           echo "已创建 tag v${VERSION}"
 
-      # 前后端不是每次都一起变。只改后端时前端包字节完全相同，发出来
-      # 只是让每台机器白下载一份 —— 所以按需打包，各自独立。
-      #
-      # 比对基准是上一个发布 tag。取不到（首个版本、tag 被删）时两边都打，
-      # 宁可多发一个包也不能漏发导致装不上
+      # 用户可能跨版本更新。最新发布必须带前端，避免只更新后端版本号、
+      # 却永远漏装中间版本的界面改动。
       - name: 判断哪边有变更
         id: changed
         env:
@@ -121,13 +118,8 @@ jobs:
             echo "后端有变更"
           fi
 
-          if git diff --quiet "$PREV" HEAD -- web; then
-            echo "frontend=false" >> "$GITHUB_OUTPUT"
-            echo "前端无变更，跳过前端包"
-          else
-            echo "frontend=true" >> "$GITHUB_OUTPUT"
-            echo "前端有变更"
-          fi
+          echo "frontend=true" >> "$GITHUB_OUTPUT"
+          echo "前端始终打包，支持跨版本更新补齐界面"
 
       - name: 安装 Node
         if: steps.changed.outputs.frontend == 'true'

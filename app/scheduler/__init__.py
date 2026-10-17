@@ -35,6 +35,17 @@ def sync_emby_watch() -> int:
     return scheduled_sync()
 
 
+def auto_emby_collections() -> int:
+    """Run the full-library task; unchanged libraries do not spend AI requests."""
+    from app.services.embycollections import task_run
+    try:
+        state = task_run(scheduled=True)
+        return int(not state.get('skipped') and state.get('running',False))
+    except ValueError as exc:
+        logger.info(f'[任务] AI 全库自动合集未启动：{exc}')
+        return 0
+
+
 def sub_rank() -> int:
     """榜单订阅任务。"""
     from app import services
@@ -462,6 +473,7 @@ JOBS: dict[str, dict] = {
     # 默认凌晨跑：每部片都要跨境请求，白天跑会跟抓取任务抢过盾服务
     "fill_subtitles": {"func": fill_subtitles, "name": "补抓字幕", "cron_key": "subtitle_fill_time"},
     "fill_reviews": {"func": fill_reviews, "name": "补生成影评", "cron_key": "review_fill_time"},
+    "auto_emby_collections": {"func": auto_emby_collections, "name": "AI 全库自动合集", "cron_key": "emby_collection_time"},
     # cron 默认为空，配了 CRAWLER_DB_TIME 才排班
     "import_crawler_db": {"func": import_crawler_db, "name": "导入爬虫库", "cron_key": "crawler_db_time"},
     # 手动专用：cron_key 留空不排班，避免每天大表全量扫一遍

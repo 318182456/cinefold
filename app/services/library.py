@@ -7,17 +7,33 @@ from urllib.parse import quote, urlsplit
 from sqlalchemy import exists, or_, select
 
 from app.core.config import get_settings
-from app.database.models import Code, CodeStatus, Collection, CollectionItem, EmbyWatch, LibraryPreference, MediaLink
+from app.database.models import Code, CodeStatus, Collection, CollectionItem, EmbyCollectionLink, EmbyWatch, LibraryPreference, MediaLink
 from app.database.session import session_scope
 from app.services.rules import matches, terms
+from app.services.playlists import SYSTEM_PLAYLISTS, accepts
 
 
 def library_items(*, keyword: str = "", conditions: dict | None = None, collection_id: int | None = None,
+                  emby_collection_key: str = '',
+                  system_collection: str = '',
                   favorite: bool = False, emby_favorite: bool = False, watch_later: bool = False, unseen: bool = False,
                   sort: str = "recent", page: int = 1, size: int = 30, include_skipped: bool = False) -> dict:
     conditions = conditions or {}
     collection_conditions = {}
+    system = next((item for item in SYSTEM_PLAYLISTS if item['key'] == system_collection), None)
+    if system_collection and not system:
+        raise ValueError('系统片单不存在')
     with session_scope() as session:
+        emby_codes = None
+        if emby_collection_key:
+            from app.services.embycollections import _context, _core
+            context, _ = _context()
+            collection = session.get(EmbyCollectionLink,emby_collection_key)
+            if not collection or not collection.remote_id or collection.server!=context['server'] or collection.user_id!=context['user_id']:
+                raise ValueError('合集不存在或不属于当前 Emby 用户')
+            members = {str(item) for item in collection.member_ids or []}
+            emby_codes = {_core(row.code) for row in session.scalars(select(EmbyWatch).where(
+                EmbyWatch.server==context['server'],EmbyWatch.user_id==context['user_id'])) if row.item_id in members}
         query = select(Code).where(or_(
             Code.status == CodeStatus.COMPLETED,
             exists(select(MediaLink.link_path).where(MediaLink.code == Code.code)),
@@ -43,11 +59,15 @@ def library_items(*, keyword: str = "", conditions: dict | None = None, collecti
             links[link.code].append(link.to_dict())
         result = []
         for row in session.scalars(query).yield_per(500):
+            if emby_codes is not None and _core(row.code) not in emby_codes:
+                continue
             item = row.to_dict()
-            if not matches(item, conditions) or not matches(item, collection_conditions):
+            if not matches(item, conditions):
                 continue
             pref = prefs.get(row.code, {})
             watch = watches.get(row.code, [])
+            if not accepts(item, collection_conditions or {}, pref, watch):
+                continue
             if emby_favorite and not any(w.get("favorite") for w in watch):
                 continue
             if favorite and not pref.get("favorite") or watch_later and not pref.get("watch_later"):
@@ -65,7 +85,10 @@ def library_items(*, keyword: str = "", conditions: dict | None = None, collecti
         "rating": lambda x: x["preference"].get("rating") or 0,
         "plays": lambda x: sum(w["play_count"] for w in x["watches"]),
         "size": lambda x: sum(f.get("size") or 0 for f in x["files"]),
+        "casts": lambda x: len(set(terms(x.get('casts')))),
+        "added": lambda x: x.get('create_time') or '',
     }
+    sort = system['sort'] if system else (collection_conditions or {}).get('sort', sort)
     result.sort(key=keys.get(sort, keys["recent"]), reverse=True)
     total = len(result)
     start = (page - 1) * size

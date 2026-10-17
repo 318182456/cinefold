@@ -288,6 +288,7 @@ class Settings:
     # 几周都填不完。改成每小时后成本仍受每轮上限约束，只是把同样的额度摊
     # 到全天。错开整点跑，避开其它任务扎堆
     review_fill_time: str = "35 * * * *"
+    emby_collection_time: str = "0 5 * * *"
 
     # 固定间隔任务的间隔（分钟）。这几个原先把间隔写死在 INTERVAL_JOBS 里，
     # 没有配置项就没处存 —— 任务页想改也落不了盘，重启就退回默认值。
@@ -630,6 +631,7 @@ def load_settings() -> Settings:
         warm_cache_time=_env("WARM_CACHE_TIME", "*/25 * * * *").strip("'\""),
         subtitle_fill_time=_env("SUBTITLE_FILL_TIME", "0 4 * * *").strip("'\""),
         review_fill_time=_env("REVIEW_FILL_TIME", "35 * * * *").strip("'\""),
+        emby_collection_time=_env("EMBY_COLLECTION_TIME", "0 5 * * *").strip("'\""),
         download_sync_interval=_env_int("DOWNLOAD_SYNC_INTERVAL", 5),
         translate_interval=_env_int("TRANSLATE_INTERVAL", 10),
         photo_cache_interval=_env_int("PHOTO_CACHE_INTERVAL", 20),

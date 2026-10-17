@@ -24,17 +24,26 @@ def explicit_groups(items, mode):
     """Whole-library metadata groups bridge independently analyzed batches."""
     grouped = {}
     for item in items:
-        for field, kind in (('casts', 'actor'), ('series', 'series')):
+        for field, kind in (('casts', 'actor'), ('series', 'series'), ('genres','theme')):
             if mode not in ('all', kind):
                 continue
-            values = re.split(r'[,，、/|;；\n]+', str(item.get(field) or ''))
+            raw = item.get(field) or ''
+            if isinstance(raw, str):
+                try:
+                    parsed = json.loads(raw)
+                    raw = parsed if isinstance(parsed, list) else raw
+                except (ValueError, TypeError):
+                    pass
+            values = raw if isinstance(raw, list) else re.split(r'[,，、/|;；\n]+', str(raw))
             for value in values:
-                value = unicodedata.normalize('NFKC', value).strip()
+                value = unicodedata.normalize('NFKC', str(value)).strip()
                 if not value or value.casefold() in ('未知', 'unknown', 'n/a', 'none', '素人'):
                     continue
+                if field=='genres' and re.fullmatch(r'(?:\d{3,4}p|[48]k|hd|fhd|uhd|高清|超高清|中字|中文字幕)',value,re.I):
+                    continue
                 row = grouped.setdefault((kind, value.casefold()),
-                    {'name': f'{"演员" if kind=="actor" else "系列"} · {value}'[:128], 'kind':kind,
-                     'reason':'根据全库已有演员或系列字段归类', 'confidence':1, 'codes':[]})
+                    {'name': f'{ {"actor":"演员", "series":"系列", "theme":"主题"}[kind]} · {value}'[:128], 'kind':kind,
+                     'reason':'根据全库已有演员、系列或类型字段归类', 'confidence':1, 'codes':[]})
                 if item['code'] not in row['codes']:
                     row['codes'].append(item['code'])
     return [row for row in grouped.values() if len(row['codes']) >= 2]
