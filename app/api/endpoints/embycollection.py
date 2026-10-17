@@ -1,4 +1,4 @@
-"""User-triggered AI collection previews and explicit Emby publication."""
+"""User-triggered whole-library collection jobs and optional previews."""
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 
@@ -10,7 +10,11 @@ router = APIRouter(tags=['emby-collections'])
 
 class SuggestRequest(BaseModel):
     mode: str = 'all'
-    limit: int = Field(default=200, ge=20, le=500)
+    limit: int = Field(default=0, ge=0, le=500)
+
+
+class AutomaticRequest(BaseModel):
+    mode: str = 'all'
 
 
 class PublishGroup(BaseModel):
@@ -37,6 +41,24 @@ def suggest_collections(body: SuggestRequest, current_user: str = Depends(get_cu
 def collection_state(current_user: str = Depends(get_current_user)):
     from app.services.embycollections import current
     return ResponseEntity.ok(current())
+
+
+@router.post('/emby/collections/auto')
+def automatic_collections(body: AutomaticRequest, current_user: str = Depends(get_current_user)):
+    from app.services.embycollections import automatic
+    try:
+        return ResponseEntity.ok(automatic(body.mode))
+    except ValueError as exc:
+        return ResponseEntity.fail(str(exc), code=400)
+
+
+@router.post('/emby/collections/resume')
+def resume_collections(current_user: str = Depends(get_current_user)):
+    from app.services.embycollections import resume
+    try:
+        return ResponseEntity.ok(resume())
+    except ValueError as exc:
+        return ResponseEntity.fail(str(exc), code=400)
 
 
 @router.post('/emby/collections/publish')
