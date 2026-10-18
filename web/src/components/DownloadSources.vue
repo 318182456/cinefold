@@ -1,6 +1,7 @@
 <script setup>
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import http from '@/api'
+import { revealDetails } from '@/utils/statNavigation'
 import { useToast } from '@/composables/useToast'
 import ModalDialog from '@/components/ModalDialog.vue'
 import ScrapeMetadataDetail from '@/components/ScrapeMetadataDetail.vue'
@@ -217,7 +218,7 @@ const stats = computed(() => {
 })
 function showDetail(row) { detailRow.value = row; detailOpen.value = true }
 function processDetail(detail) { detailOpen.value = false; open([{ ...detailRow.value, code: detail.code, links: detail.links }], !!detail.links.length) }
-function filterStatus(value) { status.value = value; search() }
+function filterStatus(value) { status.value = value; search(); revealDetails('source-video-results') }
 const LABELS = { pending: '未刮削', complete: '已刮削', kept_existing: '已保留已有版本', incomplete: '产物缺失', failed: '刮削失败', unrecognized: '需指定番号', downloading: '下载中', queued: '排队中', running: '刮削中', interrupted: '上次中断', cancelled: '已停止', empty: '空文件', ignored: '已跳过广告' }
 let request = 0, timer, indexTimer, disposed = false, initialIndexRequested = false
 const selectable = row => !rebuildLocked.value && !['downloading', 'queued', 'running', 'empty', 'ignored'].includes(row.status)
@@ -357,7 +358,7 @@ onUnmounted(() => { disposed = true; request++; rebuildRequest++; clearTimeout(t
       <div><p class="text-sm text-gray-300">全部重新刮削</p><p class="mt-1 text-xs text-gray-500">自动处理全部下载源，无需勾选视频，不受搜索、筛选和分页影响。</p></div>
       <button class="btn-ghost !text-xs text-amber-400" @click="openRebuild">全部重新刮削</button>
     </div>
-    <form class="flex flex-wrap gap-2" @submit.prevent="search">
+    <form id="source-video-results" class="flex scroll-mt-4 flex-wrap gap-2" @submit.prevent="search">
       <select v-model="root" class="input !w-auto max-w-full" aria-label="筛选源目录" @change="search"><option value="">全部下载源</option><option v-for="item in data.roots" :key="item.path" :value="item.path">{{ item.path }}</option></select>
       <input v-model="keyword" class="input min-w-36 flex-1" placeholder="搜索文件名、路径、番号或标题" aria-label="搜索源视频" />
       <select v-model="status" class="input !w-auto" aria-label="刮削状态筛选" @change="search"><option value="">全部状态</option><option v-for="(label, value) in LABELS" :key="value" :value="value">{{ label }}{{ data.counts[value] ? ` (${data.counts[value]})` : '' }}</option></select>

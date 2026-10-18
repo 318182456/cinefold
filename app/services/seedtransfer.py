@@ -277,7 +277,20 @@ def _all_completed(qb) -> list[dict]:
     return out
 
 
+_TRANSFER_LOCK = Lock()
+
+
 def transfer_hashes(hashes: list[str], delete_source: bool | None = None) -> TransferResult:
+    # 定时任务、完成回调和管理页共用，避免同时导出/移除同一批任务。
+    if not _TRANSFER_LOCK.acquire(blocking=False):
+        return TransferResult(failed=[{'hash': h, 'reason': '另一批转移正在执行，请稍后重试'} for h in hashes])
+    try:
+        return _transfer_hashes(hashes, delete_source)
+    finally:
+        _TRANSFER_LOCK.release()
+
+
+def _transfer_hashes(hashes: list[str], delete_source: bool | None = None) -> TransferResult:
     """把指定的 qb 种子转移到 tr 做种。
 
     delete_source 为 None 时取配置 SEED_TRANSFER_DELETE_SOURCE。无论如何都
@@ -305,6 +318,19 @@ def transfer_hashes(hashes: list[str], delete_source: bool | None = None) -> Tra
     for torrent_hash in hashes:
         detail = qb.get_torrent_detail(torrent_hash)
         if detail is None:
+            # 源任务可能已在进程中断前移除，先核对目标端，避免将成功的接管误报失败。
+            monitor = getattr(tr, 'monitor_torrent', None)
+            if monitor:
+                try:
+                    owned = monitor([torrent_hash])
+                    if any(str(row.get('hash', '')).lower() == torrent_hash.lower()
+                           and row.get('completed') and (row.get('progress') or 0) >= 1
+                           and not any(word in str(row.get('state', '')).lower() for word in ('error', 'missing', 'check'))
+                           for row in owned):
+                        result.transferred.append(torrent_hash)
+                        continue
+                except Exception:
+                    pass
             result.failed.append({"hash": torrent_hash, "reason": "qBittorrent 中找不到该任务"})
             continue
 

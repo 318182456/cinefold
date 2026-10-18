@@ -18,12 +18,12 @@ const running = ref(false)
 // 「待搜种」只含还没推给下载器的，不是订阅过的总数；actors 统计的是
 // 演员订阅表，不是番号里出现过的演员
 const TILES = [
-  { key: 'total', label: '番号总数', color: 'text-gray-200' },
-  { key: 'subscribed', label: '待搜种', color: 'text-blue-400' },
-  { key: 'downloading', label: '下载中', color: 'text-amber-400' },
-  { key: 'downloaded', label: '已下载', color: 'text-emerald-400' },
-  { key: 'completed', label: '已入库', color: 'text-emerald-300' },
-  { key: 'actors', label: '已订阅演员', color: 'text-gray-200' },
+  { to: { name: 'Subscribe', query: { status: 'all' } }, key: 'total', label: '番号总数', color: 'text-gray-200' },
+  { to: { name: 'Subscribe', query: { status: '1' } }, key: 'subscribed', label: '待搜种', color: 'text-blue-400' },
+  { to: { name: 'Downloads', query: { code_status: '2' } }, key: 'downloading', label: '下载中', color: 'text-amber-400' },
+  { to: { name: 'Downloads', query: { tab: 'history', code_status: '3' } }, key: 'downloaded', label: '已下载', color: 'text-emerald-400' },
+  { to: { name: 'Subscribe', query: { status: '4' } }, key: 'completed', label: '已入库', color: 'text-emerald-300' },
+  { to: { name: 'Actors', query: { mode: 'subscribed' } }, key: 'actors', label: '已订阅演员', color: 'text-gray-200' },
 ]
 
 async function load() {
@@ -63,12 +63,12 @@ onMounted(load)
   <div class="space-y-6">
     <!-- 统计 -->
     <div class="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
-      <div v-for="tile in TILES" :key="tile.key" class="card">
+      <RouterLink v-for="tile in TILES" :key="tile.key" :to="tile.to" class="card transition hover:border-brand/60 hover:bg-brand/5 focus-visible:outline focus-visible:outline-brand" :aria-label="`查看${tile.label} ${stats?.[tile.key] ?? ''}`" :title="`查看${tile.label}明细`">
         <p class="text-xs text-gray-500">{{ tile.label }}</p>
         <p class="mt-1 text-2xl font-semibold tabular-nums" :class="tile.color">
           {{ stats?.[tile.key] ?? '—' }}
         </p>
-      </div>
+      </RouterLink>
     </div>
 
     <div class="flex gap-2">

@@ -17,6 +17,7 @@ def library_items(*, keyword: str = "", conditions: dict | None = None, collecti
                   emby_collection_key: str = '',
                   system_collection: str = '',
                   favorite: bool = False, emby_favorite: bool = False, watch_later: bool = False, unseen: bool = False,
+                  watched: bool = False, last_played_month: str = '', release_year: int | None = None,
                   sort: str = "recent", page: int = 1, size: int = 30, include_skipped: bool = False) -> dict:
     conditions = conditions or {}
     collection_conditions = {}
@@ -75,6 +76,12 @@ def library_items(*, keyword: str = "", conditions: dict | None = None, collecti
             if pref.get("skipped") and not include_skipped:
                 continue
             if unseen and any(w["played"] for w in watch):
+                continue
+            if watched and not any(w['played'] for w in watch):
+                continue
+            if last_played_month and not any((w.get('last_played') or '').startswith(last_played_month) for w in watch):
+                continue
+            if release_year and not (row.release_date or '').startswith(str(release_year)):
                 continue
             item.update(preference=pref, watches=watch, files=links.get(row.code, []))
             item["emby_url"] = emby_link(watch[0]["item_id"]) if watch else ""

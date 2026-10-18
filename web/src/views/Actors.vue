@@ -1,10 +1,11 @@
 <script setup>
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
   listActors, subscribeActor, cancelActor, proxyImage, getActorProfile,
   refreshActorProfile, getActorProfileSync, subscribeActorWorks,
 } from '@/api'
+import { revealDetails } from '@/utils/statNavigation'
 import { useToast } from '@/composables/useToast'
 import EmptyState from '@/components/EmptyState.vue'
 import PrivateImage from '@/components/PrivateImage.vue'
@@ -69,7 +70,7 @@ async function loadDirectory() {
   finally { if (!disposed && id === directoryRequest) loading.value = false }
 }
 function searchDirectory() { directoryPage.value = 1; items.value = []; directoryTotal.value = 0; loadDirectory() }
-function setDirectoryMode(mode) { directoryMode.value = mode; searchDirectory() }
+function setDirectoryMode(mode) { router.push({ query: { ...route.query, mode: mode === 'subscribed' ? 'subscribed' : undefined } }) }
 function turnDirectoryPage(step) {
   directoryPage.value = Math.min(directoryPages.value, Math.max(1, directoryPage.value + step)); loadDirectory()
 }
@@ -144,7 +145,7 @@ async function refreshProfile() {
     if (!disposed && selectedName.value === name && id === refreshRequest) syncSubmitting.value = false
   }
 }
-function filterWorks(filter) { worksFilter.value = filter; worksPage.value = 1; loadProfile() }
+function filterWorks(filter) { worksFilter.value = filter; worksPage.value = 1; loadProfile(); revealDetails('actor-work-results') }
 function turnWorksPage(step) { worksPage.value = Math.min(worksPages.value, Math.max(1, worksPage.value + step)); loadProfile() }
 async function changeSubscription(name, subscribed, limitDate = '') {
   if (!name || isSubscriptionBusy(name)) return false
@@ -189,7 +190,7 @@ watch(() => route.query.name, value => {
   sync.value = { running: false, phase: 'idle', imported: 0, error: '' }
   if (selectedName.value) loadProfile()
 }, { immediate: true })
-onMounted(loadDirectory)
+watch(() => route.query.mode, value => { directoryMode.value = value === 'subscribed' ? 'subscribed' : 'all'; searchDirectory() }, { immediate: true })
 onUnmounted(() => { disposed = true; directoryRequest += 1; profileRequest += 1; refreshRequest += 1; batchRequest += 1; stopSyncPolling() })
 </script>
 
@@ -251,7 +252,7 @@ onUnmounted(() => { disposed = true; directoryRequest += 1; profileRequest += 1;
         <p class="text-xs text-gray-500">仅处理当前已收录作品，新资料可先从 JavDB 更新。已入库、下载中、已订阅或用户排除的影片会跳过；本次不直接推送下载。未来新作追更使用上方“订阅演员新作”。</p>
         <p v-if="batchResult" class="text-xs text-gray-400">本次匹配 {{ batchResult.matched || 0 }} 部，新增订阅 {{ batchResult.subscribed || 0 }} 部；已订阅 {{ batchResult.already_subscribed || 0 }}、已入库 {{ batchResult.owned || 0 }}、下载中 {{ batchResult.downloading || 0 }}、已排除 {{ batchResult.excluded || 0 }} 部已跳过。</p>
       </section>
-      <section class="space-y-3">
+      <section id="actor-work-results" class="scroll-mt-4 space-y-3">
         <div class="flex flex-wrap items-center justify-between gap-2"><h2 class="text-sm font-medium text-gray-300">{{ workFilters.find(item => item.key === worksFilter)?.label }}<span v-if="!profileLoading" class="ml-2 text-xs text-gray-500">{{ worksTotal }} 部</span></h2><span class="text-xs text-gray-500">收藏和已观看状态来自本地已记录的数据</span></div>
         <LoadingBlock v-if="profileLoading" :rows="3" /><div v-else-if="works.length" class="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3"><CodeCard v-for="item in works" :key="item.code" :item="item" @changed="loadProfile" /></div><EmptyState v-else :text="profileError ? '作品暂时无法读取' : '当前筛选下没有已保存作品'" hint="可切换筛选，或从 JavDB 更新演员资料与作品。" />
         <div v-if="worksTotal" class="flex items-center justify-end gap-3 text-xs text-gray-500"><span>{{ worksPage }} / {{ worksPages }} 页 · {{ worksTotal }} 部</span><button class="btn-ghost !text-xs" :disabled="profileLoading || worksPage <= 1" @click="turnWorksPage(-1)">上一页</button><button class="btn-ghost !text-xs" :disabled="profileLoading || worksPage >= worksPages" @click="turnWorksPage(1)">下一页</button></div>

@@ -8,6 +8,7 @@ import {
   previewMediaDuplicates, mergeMediaDuplicates,
   startGlobalMediaDuplicates, getGlobalMediaDuplicates, cancelGlobalMediaDuplicates,
 } from '@/api'
+import { revealDetails } from '@/utils/statNavigation'
 import { useToast } from '@/composables/useToast'
 import LoadingBlock from '@/components/LoadingBlock.vue'
 import ScrapeMetadataDetail from '@/components/ScrapeMetadataDetail.vue'
@@ -407,6 +408,12 @@ function search() {
   load()
 }
 
+function openStat(kind) {
+  view.value = 'all'; keyword.value = ''; sort.value = kind === 'size' ? 'size_desc' : 'time'
+  minGb.value = ''; maxGb.value = ''; subtitleFilter.value = ''; missingOnly.value = kind === 'missing'
+  search()
+  revealDetails('media-link-results')
+}
 function toggleMissing() {
   missingOnly.value = !missingOnly.value
   page.value = 1
@@ -706,15 +713,15 @@ onMounted(() => {
   <div class="space-y-4">
     <!-- 概览 -->
     <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
-      <div class="card">
+      <button type="button" class="card text-left transition hover:border-brand/60 focus-visible:outline focus-visible:outline-brand" aria-label="查看关联总数明细" @click="openStat('all')">
         <p class="text-xs text-gray-500">关联总数</p>
         <p class="mt-1 text-xl font-semibold text-gray-200">{{ stats?.total ?? '—' }}</p>
-      </div>
-      <div class="card">
+      </button>
+      <button type="button" class="card text-left transition hover:border-brand/60 focus-visible:outline focus-visible:outline-brand" aria-label="查看涉及番号明细" @click="openStat('all')">
         <p class="text-xs text-gray-500">涉及番号</p>
         <p class="mt-1 text-xl font-semibold text-gray-200">{{ stats?.codes ?? '—' }}</p>
-      </div>
-      <div class="card">
+      </button>
+      <button type="button" class="card text-left transition hover:border-brand/60 focus-visible:outline focus-visible:outline-brand" aria-label="查看占用空间明细" @click="openStat('size')">
         <p class="text-xs text-gray-500">占用空间</p>
         <!-- 大小已落库，这个数由纯 SQL 聚合得出，跟着第一批一起到，
              不必等磁盘探测 -->
@@ -736,8 +743,8 @@ onMounted(() => {
         <p v-if="stats?.size_pending" class="mt-0.5 text-[11px] text-amber-500">
           还有 {{ stats.size_pending }} 条未统计
         </p>
-      </div>
-      <div class="card">
+      </button>
+      <button type="button" class="card text-left transition hover:border-brand/60 focus-visible:outline focus-visible:outline-brand" aria-label="查看文件已丢失明细" @click="openStat('missing')">
         <p class="text-xs text-gray-500">文件已丢失</p>
         <!-- 探测中显示占位，别让用户以为是 0 -->
         <p v-if="missingLoading" class="mt-1 text-xl font-semibold text-gray-500">检测中…</p>
@@ -748,7 +755,7 @@ onMounted(() => {
         >
           {{ missing ?? '—' }}
         </p>
-      </div>
+      </button>
       <div class="card">
         <p class="text-xs text-gray-500">联动删除</p>
         <p
@@ -770,6 +777,7 @@ onMounted(() => {
     </p>
 
     <!-- 工具条 -->
+    <div id="media-link-results" class="scroll-mt-4"></div>
     <div class="flex flex-wrap items-center gap-2">
       <input
         v-model="keyword"

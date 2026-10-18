@@ -7,6 +7,7 @@ const routes = [
     component: () => import('@/layouts/MainLayout.vue'),
     children: [
       { path: '', name: 'Dashboard', component: () => import('@/views/Dashboard.vue'), meta: { title: '看板' } },
+      { path: 'downloads', name: 'Downloads', component: () => import('@/views/Downloads.vue'), meta: { title: '下载管理' } },
       { path: 'subscribe', name: 'Subscribe', component: () => import('@/views/Subscribe.vue'), meta: { title: '订阅' } },
       { path: 'subscription-rules', name: 'SubscriptionRules', component: () => import('@/views/SubscriptionRules.vue'), meta: { title: '条件订阅' } },
       { path: 'library', name: 'Library', component: () => import('@/views/Library.vue'), meta: { title: '媒体库' } },

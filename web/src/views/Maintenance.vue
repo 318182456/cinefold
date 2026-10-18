@@ -180,8 +180,8 @@ onUnmounted(stopPortraitPolling)
 
       <p v-if="stats" class="text-xs text-gray-400">
         当前已订阅
-        <span class="text-brand">{{ stats.subscribed }}</span> 个，
-        番号总数 {{ stats.total }}
+        <RouterLink :to="{ name: 'Subscribe', query: { status: '1' } }" class="text-brand hover:underline">{{ stats.subscribed }}</RouterLink> 个，
+        番号总数 <RouterLink :to="{ name: 'Subscribe', query: { status: 'all' } }" class="text-brand hover:underline">{{ stats.total }}</RouterLink>
       </p>
 
       <div class="flex flex-wrap gap-2">

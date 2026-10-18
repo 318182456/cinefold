@@ -70,6 +70,7 @@ const DESCRIPTIONS = {
   pt_wait: '同步下载器任务状态',
   translate_titles: '翻译缺中文标题的番号',
   cache_photos: '把封面图缓存到本地',
+  sync_download_history: '读取下载器状态并保留历史，移除种子后仍可查看最后快照',
   transfer_seeds: '把 qB 已下载完的种子转给 Transmission 做种',
   sync_watch_dirs: '监控目录全量对账，兜底 inotify 丢失的事件',
   scan_orphans: '扫描下载侧已删、媒体库仍在的关联',

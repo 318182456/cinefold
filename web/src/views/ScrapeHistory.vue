@@ -2,6 +2,7 @@
 import { onMounted, onUnmounted, ref } from 'vue'
 import http from '@/api'
 import ModalDialog from '@/components/ModalDialog.vue'
+import { revealDetails } from '@/utils/statNavigation'
 import { useToast } from '@/composables/useToast'
 
 const toast = useToast()
@@ -37,6 +38,12 @@ async function openDetail(id, reset = false) {
     if (!disposed && request === revision) detail.value = result
   } catch (err) { if (!disposed && request === revision) toast.error(err.message) }
   finally { if (request === revision) detailBusy.value = false }
+}
+async function showResults(id, filter = '') {
+  detailPage.value = 1; status.value = filter; detail.value = null
+  const loading = openDetail(id)
+  revealDetails('scrape-history-results')
+  await loading
 }
 async function resume(row, mode) {
   busy.value = true
@@ -81,11 +88,11 @@ onUnmounted(() => { disposed = true; revision++; clearTimeout(timer) })
           <button class="btn-ghost !text-xs text-red-400" :disabled="busy || row.running" @click="deleting = row">删除记录</button>
         </div>
       </div>
-      <p class="text-sm text-gray-400">已处理 {{ row.done }} / {{ row.total }} 部 · <span class="text-emerald-400">成功 {{ row.ok }}</span> · <span :class="row.failed ? 'text-red-400' : ''">失败 {{ row.failed }}</span> · 未完成 {{ row.pending }}</p>
+      <p class="text-sm text-gray-400"><button class="hover:text-brand hover:underline" @click="showResults(row.job_id)">已处理 {{ row.done }} / {{ row.total }} 部</button> · <button class="text-emerald-400 hover:underline" @click="showResults(row.job_id, 'succeeded')">成功 {{ row.ok }}</button> · <button class="hover:underline" :class="row.failed ? 'text-red-400' : ''" @click="showResults(row.job_id, 'failed')">失败 {{ row.failed }}</button> · 未完成 {{ row.pending }}</p>
       <p v-if="row.error" class="break-all text-xs text-red-400">{{ row.error }}</p>
     </article>
     <div v-if="data.total > 20" class="flex items-center justify-end gap-3 text-xs text-gray-400"><button class="btn-ghost" :disabled="page <= 1 || loading" @click="page--; load()">上一页</button><span>{{ page }} / {{ Math.ceil(data.total / 20) }}</span><button class="btn-ghost" :disabled="page * 20 >= data.total || loading" @click="page++; load()">下一页</button></div>
-    <div v-if="selected" class="card space-y-4">
+    <div v-if="selected" id="scrape-history-results" class="card scroll-mt-4 space-y-4">
       <div class="flex flex-wrap items-center justify-between gap-3"><h3 class="text-sm text-gray-200">逐项结果 · {{ selected.slice(0, 8) }}</h3><div class="flex items-center gap-3"><select v-model="status" class="input !w-auto" aria-label="结果筛选" @change="detailPage = 1; openDetail(selected)"><option value="">全部结果</option><option value="failed">仅失败</option><option value="succeeded">仅成功</option></select><button class="text-xs text-gray-400" @click="selected = ''; detail = null; revision++">收起明细</button></div></div>
       <p v-if="detailBusy" class="text-xs text-gray-500">正在读取明细…</p>
       <p v-if="detail && !detail.items.length" class="text-xs text-gray-500">暂无符合条件的结果，未处理影片可通过继续任务处理。</p>

@@ -1,5 +1,6 @@
 <script setup>
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { listCodes } from '@/api'
 import { useToast } from '@/composables/useToast'
 import { useCodeSelection } from '@/composables/useCodeSelection'
@@ -9,6 +10,7 @@ import LoadingBlock from '@/components/LoadingBlock.vue'
 import SelectionBar from '@/components/SelectionBar.vue'
 
 const toast = useToast()
+const route = useRoute(), router = useRouter()
 const items = ref([])
 const total = ref(0)
 const page = ref(1)
@@ -17,6 +19,7 @@ const status = ref(1)
 const loading = ref(false)
 
 const TABS = [
+  { value: 0, label: '未订阅' },
   { value: 1, label: '已订阅' },
   { value: 2, label: '下载中' },
   { value: 3, label: '已下载' },
@@ -44,13 +47,16 @@ async function load() {
 
 const sel = useCodeSelection(items, load)
 
-watch(status, () => {
-  page.value = 1
+function chooseStatus(value) {
+  router.push({ query: { ...route.query, status: value === null ? 'all' : String(value) } })
+}
+watch(() => route.query.status, value => {
+  status.value = value === 'all' ? null : /^[0-5]$/.test(String(value ?? '')) ? Number(value) : 1
   sel.clear()
-  load()
-})
+  if (page.value !== 1) page.value = 1
+  else load()
+}, { immediate: true })
 watch(page, load)
-onMounted(load)
 </script>
 
 <template>
@@ -61,7 +67,7 @@ onMounted(load)
         :key="String(tab.value)"
         class="btn px-3 py-1.5 text-xs"
         :class="status === tab.value ? 'bg-brand text-white' : 'btn-ghost'"
-        @click="status = tab.value"
+        @click="chooseStatus(tab.value)"
       >
         {{ tab.label }}
       </button>

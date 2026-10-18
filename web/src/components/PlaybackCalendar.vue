@@ -1,6 +1,7 @@
 <script setup>
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import http from '@/api'
+import { revealDetails } from '@/utils/statNavigation'
 import { useToast } from '@/composables/useToast'
 const toast = useToast()
 const today = new Date()
@@ -23,6 +24,13 @@ async function load() {
     if (!disposed && id === request) data.value = result
   } catch (e) { if (!disposed && id === request) toast.error(e.message) }
 }
+function showMonthDetails() {
+  if (day.value) day.value = ''
+  else if (page.value !== 1) page.value = 1
+  else load()
+  revealDetails('playback-records')
+}
+function showDay(value) { day.value = day.value === value ? '' : value; revealDetails('playback-records') }
 async function refresh() {
   busy.value = true
   try { await http.post('/playback/poll'); await load() } catch (e) { toast.error(e.message) } finally { busy.value = false }
@@ -47,16 +55,16 @@ onUnmounted(() => { disposed = true; request++; clearInterval(timer) })
     <template v-if="data">
       <p v-if="!data.enabled" class="text-sm text-amber-400">播放记录尚未启用。<RouterLink :to="{ name: 'Config' }" class="text-brand">设置 → 媒体服务器 → Emby</RouterLink> 中开启后开始记录。</p>
       <p class="text-xs text-gray-500">{{ data.note }} 日历时区：{{ data.timezone }}。</p>
-      <div class="grid grid-cols-3 gap-3 text-center"><div class="rounded-lg bg-gray-800/60 p-3"><p class="text-xs text-gray-500">本月播放</p><p class="mt-1 text-lg">{{ data.plays }} 次</p></div><div class="rounded-lg bg-gray-800/60 p-3"><p class="text-xs text-gray-500">本月观看时长（估算）</p><p class="mt-1 text-lg">{{ duration(data.seconds) }}</p></div><div class="rounded-lg bg-gray-800/60 p-3"><p class="text-xs text-gray-500">活跃天数</p><p class="mt-1 text-lg">{{ data.active_days }} 天</p></div></div>
+      <div class="grid grid-cols-3 gap-3 text-center"><button type="button" class="rounded-lg bg-gray-800/60 p-3 transition hover:bg-gray-700/70 focus-visible:outline focus-visible:outline-brand" title="查看本月播放明细" @click="showMonthDetails"><p class="text-xs text-gray-500">本月播放</p><p class="mt-1 text-lg">{{ data.plays }} 次</p></button><button type="button" class="rounded-lg bg-gray-800/60 p-3 transition hover:bg-gray-700/70 focus-visible:outline focus-visible:outline-brand" title="查看本月播放明细" @click="showMonthDetails"><p class="text-xs text-gray-500">本月观看时长（估算）</p><p class="mt-1 text-lg">{{ duration(data.seconds) }}</p></button><button type="button" class="rounded-lg bg-gray-800/60 p-3 transition hover:bg-gray-700/70 focus-visible:outline focus-visible:outline-brand" title="查看本月播放明细" @click="showMonthDetails"><p class="text-xs text-gray-500">活跃天数</p><p class="mt-1 text-lg">{{ data.active_days }} 天</p></button></div>
       <div class="grid grid-cols-7 gap-1.5 sm:gap-2">
         <span v-for="weekday in ['一', '二', '三', '四', '五', '六', '日']" :key="weekday" class="py-1 text-center text-xs text-gray-500">{{ weekday }}</span>
         <span v-for="n in blanks" :key="`blank-${n}`" />
-        <button v-for="cell in data.days" :key="cell.date" class="min-h-16 rounded-lg border p-1.5 text-left transition sm:p-2" :class="[day === cell.date ? 'border-brand ring-1 ring-brand' : 'border-transparent hover:border-gray-600', cell.seconds >= 3600 ? 'bg-emerald-800/70' : cell.plays ? 'bg-emerald-950/70' : 'bg-gray-800/40']" :aria-label="`${cell.date}，${cell.plays} 次播放，${duration(cell.seconds)}`" :aria-pressed="day === cell.date" @click="day = day === cell.date ? '' : cell.date">
+        <button v-for="cell in data.days" :key="cell.date" class="min-h-16 rounded-lg border p-1.5 text-left transition sm:p-2" :class="[day === cell.date ? 'border-brand ring-1 ring-brand' : 'border-transparent hover:border-gray-600', cell.seconds >= 3600 ? 'bg-emerald-800/70' : cell.plays ? 'bg-emerald-950/70' : 'bg-gray-800/40']" :aria-label="`${cell.date}，${cell.plays} 次播放，${duration(cell.seconds)}`" :aria-pressed="day === cell.date" @click="showDay(cell.date)">
           <span class="text-xs text-gray-300">{{ Number(cell.date.slice(-2)) }}</span>
           <p v-if="cell.plays" class="mt-1 text-[10px] text-emerald-300 sm:text-xs">{{ cell.plays }} 次<span class="hidden sm:inline"> · {{ duration(cell.seconds) }}</span></p>
         </button>
       </div>
-      <div class="flex items-center justify-between"><h3 class="text-sm">{{ day || month }} 播放记录</h3><button v-if="day" class="text-xs text-brand" @click="day = ''">查看整月</button></div>
+      <div id="playback-records" class="flex scroll-mt-4 items-center justify-between"><h3 class="text-sm">{{ day || month }} 播放记录</h3><button v-if="day" class="text-xs text-brand" @click="day = ''">查看整月</button></div>
       <p v-if="!data.records.length" class="text-sm text-gray-500">暂无记录，启用后在 Emby 中播放即可累计。</p>
       <article v-for="row in data.records" :key="row.id" class="flex flex-wrap items-center justify-between gap-2 border-t border-gray-800 pt-3">
         <div class="min-w-0 flex-1"><p class="truncate text-sm">{{ row.title || row.code }} <span v-if="row.active" class="text-xs text-brand">{{ row.paused ? '暂停中' : '播放中' }}</span></p><p class="mt-1 text-xs text-gray-500">{{ time(row.started_at) }} · {{ row.user_name || row.user_id }} · {{ row.device }} {{ row.client }}</p></div>

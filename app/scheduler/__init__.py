@@ -241,6 +241,13 @@ def transfer_seeds() -> int:
         return 0
 
 
+def sync_download_history() -> int:
+    """后台保留下载器任务快照，关闭下载页面后也持续积累历史。"""
+    from app.services.downloads import live
+    result = live(size=1)
+    return result['counts']['all']
+
+
 def poll_playback() -> int:
     """每分钟只读 Emby 会话，持续记录播放。"""
     from app.services.playback import poll
@@ -474,6 +481,7 @@ JOBS: dict[str, dict] = {
     "fill_subtitles": {"func": fill_subtitles, "name": "补抓字幕", "cron_key": "subtitle_fill_time"},
     "fill_reviews": {"func": fill_reviews, "name": "补生成影评", "cron_key": "review_fill_time"},
     "auto_emby_collections": {"func": auto_emby_collections, "name": "AI 全库自动合集", "cron_key": "emby_collection_time"},
+    "sync_download_history": {"func": sync_download_history, "name": "保存下载历史", "minutes": 5},
     # cron 默认为空，配了 CRAWLER_DB_TIME 才排班
     "import_crawler_db": {"func": import_crawler_db, "name": "导入爬虫库", "cron_key": "crawler_db_time"},
     # 手动专用：cron_key 留空不排班，避免每天大表全量扫一遍

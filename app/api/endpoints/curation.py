@@ -187,6 +187,8 @@ def library(keyword: str = "", genre: str = "", actor: str = "", publisher: str 
             system_collection: str = Query('', max_length=40),
             collection_id: int | None = None, favorite: bool = False, emby_favorite: bool = False, watch_later: bool = False,
             unseen: bool = False, include_skipped: bool = False,
+            watched: bool = False, last_played_month: str = Query('', pattern=r'^(?:\d{4}-(?:0[1-9]|1[0-2]))?$'),
+            release_year: int | None = Query(None, ge=1900, le=2200),
             sort: Literal["recent", "release", "rating", "plays", "size"] = "recent",
             page: int = Query(1, ge=1), size: int = Query(30, ge=1, le=100)):
     from app.services.library import library_items
@@ -195,6 +197,7 @@ def library(keyword: str = "", genre: str = "", actor: str = "", publisher: str 
         return ResponseEntity.ok(library_items(keyword=keyword, conditions=conditions, collection_id=collection_id,
             emby_collection_key=emby_collection_key,
             system_collection=system_collection,
+            watched=watched, last_played_month=last_played_month, release_year=release_year,
             favorite=favorite, emby_favorite=emby_favorite, watch_later=watch_later, unseen=unseen, sort=sort, page=page, size=size, include_skipped=include_skipped))
     except ValueError as exc:
         raise HTTPException(404, str(exc)) from exc

@@ -250,6 +250,36 @@ class TransmissionClient:
             logger.error(f"查询 Transmission 任务状态失败: {exc}")
             return []
 
+    def list_downloads(self) -> list[dict]:
+        if not self._ensure_client():
+            raise ValueError('Transmission 连接失败，请检查下载器配置')
+        try:
+            torrents = self.client.get_torrents(arguments=[
+                'id', 'hashString', 'name', 'percentDone', 'status', 'downloadDir', 'totalSize',
+                'rateDownload', 'rateUpload', 'peersConnected', 'trackerStats', 'downloadedEver',
+                'uploadedEver', 'uploadRatio', 'eta', 'addedDate', 'doneDate', 'error',
+            ])
+            rows = []
+            for t in torrents:
+                # trackerStats may contain passkeys; return counts only, never tracker URLs.
+                trackers = t.fields.get('trackerStats') or []
+                seed_counts = [v['seederCount'] for v in trackers if v.get('seederCount', -1) >= 0]
+                peer_counts = [v['leecherCount'] for v in trackers if v.get('leecherCount', -1) >= 0]
+                rows.append({
+                    'hash': t.hash_string, 'name': t.name, 'progress': float(t.percent_done or 0),
+                    'state': 'error' if t.fields.get('error') else str(t.status), 'save_path': t.download_dir,
+                    'content_path': '', 'size': t.total_size, 'download_speed': t.rate_download,
+                    'upload_speed': t.rate_upload, 'seeds_connected': None,
+                    'seeds_total': max(seed_counts) if seed_counts else None,
+                    'peers_connected': t.peers_connected, 'peers_total': max(peer_counts) if peer_counts else None,
+                    'downloaded': t.downloaded_ever, 'uploaded': t.uploaded_ever, 'ratio': t.upload_ratio,
+                    'eta': t.fields.get('eta'), 'added_at': t.fields.get('addedDate'),
+                    'completed_at': t.fields.get('doneDate'), 'category': '',
+                })
+            return rows
+        except Exception:
+            raise ValueError('Transmission 任务读取失败，请检查连接与权限') from None
+
     def list_torrent_files(self, hashes: Sequence[str]) -> list[str]:
         """列出这些种子包含的全部文件，返回绝对路径。语义同 qBittorrent 版。"""
         if not hashes:

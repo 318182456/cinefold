@@ -31,6 +31,7 @@ const destinations = [
     title: '资源',
     items: [
       { name: 'Dashboard', label: '看板', icon: 'M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6' },
+      { name: 'Downloads', label: '下载管理', icon: 'M12 3v12m-5-5l5 5 5-5M5 17v4h14v-4' },
       { name: 'Subscribe', label: '订阅', icon: 'M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9' },
       { name: 'Search', label: '搜索', icon: 'M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z' },
     ],
@@ -66,7 +67,7 @@ function workspace(name, label, pages = []) {
 const groups = [{ title: '工作区', items: [
   workspace('Dashboard', '看板'),
   workspace('Library', '媒体库', [['Library', '影片与片单'], ['LibraryInsights', '分析与播放日历']]),
-  workspace('Subscribe', '订阅', [['Subscribe', '订阅列表'], ['SubscriptionRules', '条件与方案']]),
+  workspace('Subscribe', '订阅与下载', [['Subscribe', '订阅列表'], ['Downloads', '下载管理与历史'], ['SubscriptionRules', '条件与方案']]),
   workspace('Search', '发现', [['Search', '搜索'], ['Rank', '榜单'], ['Hot', '推荐'], ['Actors', '演员'], ['Brands', '厂牌']]),
   workspace('Scrape', '入库管理'),
   workspace('Logs', '运行记录', [['Logs', '日志'], ['Task', '任务']]),

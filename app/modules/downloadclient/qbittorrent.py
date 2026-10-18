@@ -359,6 +359,28 @@ class QBitTorrentClient:
             self._on_error(exc, "查询任务状态")
             return []
 
+    def list_downloads(self) -> list[dict]:
+        """管理页全分类快照。失败抛出，不能把断连显示为零个任务。"""
+        if not self._ensure_client():
+            raise ValueError('qBittorrent 连接失败，请检查下载器配置')
+        try:
+            torrents = self.client.torrents_info()
+            _report_ok()
+            return [{
+                'hash': t.hash, 'name': t.name, 'progress': float(t.progress), 'state': str(t.state),
+                'save_path': t.save_path, 'content_path': getattr(t, 'content_path', '') or t.save_path,
+                **{field: getattr(t, source, None) for field, source in {
+                    'size': 'size', 'download_speed': 'dlspeed', 'upload_speed': 'upspeed',
+                    'seeds_connected': 'num_seeds', 'seeds_total': 'num_complete',
+                    'peers_connected': 'num_leechs', 'peers_total': 'num_incomplete',
+                    'downloaded': 'downloaded', 'uploaded': 'uploaded', 'ratio': 'ratio', 'eta': 'eta',
+                    'added_at': 'added_on', 'completed_at': 'completion_on', 'category': 'category',
+                }.items()},
+            } for t in torrents]
+        except Exception as exc:
+            self._on_error(exc, '读取下载管理列表')
+            raise ValueError('qBittorrent 任务读取失败，请检查连接与权限') from None
+
     def list_torrent_files(self, hashes: Sequence[str]) -> list[str]:
         """列出这些种子包含的全部文件，返回绝对路径。
 

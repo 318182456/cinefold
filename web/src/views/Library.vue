@@ -12,7 +12,7 @@ const items = ref([]), total = ref(0), page = ref(1), busy = ref(false), collect
 const embyCollections = ref([]), embyCollectionsError = ref(''), systemCollections = ref([])
 const activeSystem = computed(() => systemCollections.value.find(item => `system:${item.key}` === filters.value.collection_id))
 const activeEmbyCollection = computed(() => embyCollections.value.find(item => `emby:${item.key}` === filters.value.collection_id))
-const filters = ref({ keyword: '', genre: '', actor: '', publisher: '', favorite: false, emby_favorite: false, watch_later: false, unseen: false, include_skipped: false, collection_id: '', sort: 'recent' })
+const filters = ref({ keyword: '', genre: '', actor: '', publisher: '', favorite: false, emby_favorite: false, watch_later: false, unseen: false, watched: false, last_played_month: '', release_year: '', include_skipped: false, collection_id: '', sort: 'recent' })
 const collectionOpen = ref(false), collectionForm = ref({ name: '', kind: 'manual', conditions: {} }), collectionEditing = ref(null), chosenCollection = ref('')
 const embyOpen = ref(false), embyUsers = ref([]), embyUser = ref(''), embySyncing = ref(false)
 const embyActing = ref(false)
@@ -35,6 +35,7 @@ async function load() {
     const data = await http.get('/library', { params: { ...filters.value,
       collection_id: choice.includes(':') ? undefined : choice || undefined,
       system_collection: choice.startsWith('system:') ? choice.slice(7) : undefined,
+      release_year: filters.value.release_year || undefined,
       emby_collection_key: choice.startsWith('emby:') ? choice.slice(5) : undefined, page: page.value } })
     if (id === request) { items.value = data.items; total.value = data.total }
   }
@@ -54,8 +55,7 @@ async function reloadCollections() {
 }
 function chooseCollection(id) {
   filters.value.collection_id = id
-  if (String(route.query.collection_id || '') === String(id || '')) search()
-  else router.replace({ query:{ ...route.query, collection_id:id || undefined } })
+  search()
 }
 function setCollectionState(key, checked) { const states = new Set(collectionForm.value.conditions.states || []); checked ? states.add(key) : states.delete(key); collectionForm.value.conditions.states = [...states] }
 function newCollection(row = null) { collectionEditing.value = row?.id || null; collectionForm.value = row ? { ...JSON.parse(JSON.stringify(row)), conditions: { op: 'AND', sort: 'recent', states: [], ...JSON.parse(JSON.stringify(row.conditions || {})) } } : { name: '', kind: 'manual', conditions: { op: 'AND', sort: 'recent', states: [] } }; collectionOpen.value = true }
@@ -64,17 +64,27 @@ const activeCollection = computed(() => collections.value.find(x => x.id === Num
 async function deleteCollection() { if (!activeCollection.value || !window.confirm(`删除片单「${activeCollection.value.name}」？影片与文件会保留。`)) return; await perform(async () => { await http.delete(`/collections/${activeCollection.value.id}`); await reloadCollections(); chooseCollection('') }) }
 async function configureEmby() { embyOpen.value = true; await perform(async () => { const [users, config] = await Promise.all([http.get('/library/emby/users'), getConfig()]); embyUsers.value = users; embyUser.value = config.emby_user_id || '' }) }
 async function syncEmby() { embySyncing.value = true; try { if (!embyUser.value) throw new Error('请先选择 Emby 用户'); await saveConfig({ emby_user_id: embyUser.value }); const result = await http.post('/library/emby/sync', null, { timeout: 600000 }); toast.success(`同步 ${result.matched} 条，${result.ignored} 条无法匹配本地番号`); embyOpen.value = false; await load() } catch (e) { toast.error(e.message) } finally { embySyncing.value = false } }
-function search() { page.value = 1; load() }
+function search() {
+  const query = {}
+  for (const [key,value] of Object.entries(filters.value)) {
+    if (value === false || value === '' || value == null || (key === 'sort' && value === 'recent')) continue
+    query[key] = String(value)
+  }
+  if (router.resolve({ query }).fullPath === route.fullPath) { if (page.value !== 1) page.value = 1; else load() }
+  else router.replace({ query })
+}
 watch(page, load)
 watch(() => route.query, (query) => {
-  for (const key of ['actor', 'genre', 'publisher','collection_id']) {
+  for (const key of ['keyword', 'actor', 'genre', 'publisher', 'collection_id', 'last_played_month', 'release_year']) {
     filters.value[key] = typeof query[key] === 'string' ? query[key] : ''
   }
+  for (const key of ['favorite', 'emby_favorite', 'watch_later', 'unseen', 'watched', 'include_skipped']) filters.value[key] = ['1', 'true'].includes(String(query[key] || ''))
+  filters.value.sort = ['recent', 'release', 'rating', 'plays', 'size'].includes(query.sort) ? query.sort : 'recent'
   if (page.value !== 1) page.value = 1
   else load()
 }, { immediate: true })
 function clearFilters() {
-  Object.assign(filters.value, { keyword: '', genre: '', actor: '', publisher: '', favorite: false, emby_favorite: false, watch_later: false, unseen: false, include_skipped: false, collection_id: '', sort: 'recent' })
+  Object.assign(filters.value, { keyword: '', genre: '', actor: '', publisher: '', favorite: false, emby_favorite: false, watch_later: false, unseen: false, watched: false, last_played_month: '', release_year: '', include_skipped: false, collection_id: '', sort: 'recent' })
   if (Object.keys(route.query).length) router.replace({ name: 'Library', query: {} })
   else search()
 }
@@ -93,7 +103,7 @@ onMounted(() => perform(reloadCollections))
     </section>
     <form class="card space-y-3" @submit.prevent="search">
       <div class="flex flex-wrap gap-3"><input v-model="filters.keyword" class="input !w-auto min-w-40 flex-1" placeholder="搜索番号、标题、演员、标签" aria-label="搜索媒体库"><select v-model="filters.collection_id" class="input !w-auto" aria-label="选择合集或片单" @change="chooseCollection(filters.collection_id)"><option value="">全部影片</option><optgroup label="智能片单"><option v-for="c in systemCollections" :key="c.key" :value="`system:${c.key}`">{{ c.name }}</option></optgroup><optgroup label="我的片单"><option v-for="c in collections" :key="c.id" :value="c.id">{{ c.kind === 'smart' ? '智能 · ' : '' }}{{ c.name }}</option></optgroup><optgroup label="Emby 合集"><option v-for="c in embyCollections" :key="c.key" :value="`emby:${c.key}`">{{ c.name }}</option></optgroup></select><select v-model="filters.sort" :disabled="!!activeSystem || activeCollection?.kind === 'smart'" class="input !w-auto" @change="search"><option value="recent">最近更新</option><option value="release">最新发行</option><option value="rating">个人评分</option><option value="plays">播放最多</option><option value="size">文件体积</option></select><button class="btn-ghost">搜索</button></div>
-      <div class="flex flex-wrap items-center gap-4 text-sm"><label v-for="[key, label] in [['favorite','本地收藏'],['emby_favorite','Emby 收藏'],['watch_later','想看'],['unseen','未看完'],['include_skipped','显示已跳过']]" :key="key" class="flex items-center gap-2"><input v-model="filters[key]" type="checkbox" @change="search">{{ label }}</label><span class="ml-auto text-gray-500">{{ total }} 部</span></div>
+      <div class="flex flex-wrap items-center gap-4 text-sm"><label v-for="[key, label] in [['favorite','本地收藏'],['emby_favorite','Emby 收藏'],['watch_later','想看'],['unseen','未看完'],['watched','已看完'],['include_skipped','显示已跳过']]" :key="key" class="flex items-center gap-2"><input v-model="filters[key]" type="checkbox" @change="search">{{ label }}</label><span class="ml-auto text-gray-500">{{ total }} 部</span></div>
       <div class="flex flex-wrap gap-3">
         <input v-model="filters.genre" class="input !w-auto" placeholder="精确标签" aria-label="标签筛选">
         <input v-model="filters.actor" class="input !w-auto" placeholder="精确演员名" aria-label="演员筛选">
@@ -102,6 +112,7 @@ onMounted(() => perform(reloadCollections))
         <button type="button" class="btn-ghost" @click="clearFilters">清除筛选</button>
       </div>
     </form>
+    <p v-if="filters.last_played_month || filters.release_year" class="text-xs text-brand">{{ filters.last_played_month ? `最后观看月份：${filters.last_played_month}` : '' }} {{ filters.release_year ? `发行年份：${filters.release_year}` : '' }}<button class="ml-3" @click="clearFilters">清除筛选</button></p>
     <p v-if="activeSystem" class="text-sm text-gray-400">智能片单 · {{ activeSystem.name }} · {{ activeSystem.description }}，随资料与观看状态自动更新</p>
     <div v-if="activeCollection" class="flex items-center gap-3 text-sm"><span class="text-gray-400">{{ activeCollection.kind === 'smart' ? '智能片单' : '手动片单' }} · {{ activeCollection.name }}</span><button class="text-brand" @click="newCollection(activeCollection)">编辑</button><button class="text-red-400" @click="deleteCollection">删除片单</button></div>
     <div v-if="activeEmbyCollection" class="flex flex-wrap items-center gap-3 text-sm"><span class="text-gray-400">Emby 合集 · {{ activeEmbyCollection.name }} · {{ activeEmbyCollection.count }} 部</span><a :href="activeEmbyCollection.emby_url" target="_blank" rel="noopener noreferrer" class="text-brand">在 Emby 中打开 ↗</a><RouterLink :to="{ name:'Task' }" class="text-xs text-gray-500">合集任务与进度</RouterLink></div>

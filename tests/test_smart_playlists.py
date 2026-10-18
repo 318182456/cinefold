@@ -70,3 +70,21 @@ def test_whole_library_genres_bridge_ai_batches():
     assert len(groups[0]['codes']) == 150
     groups = explicit_groups([{'code': f'ABC-{n}', 'genres': '["主题甲", "4K"]'} for n in range(2)], 'all')
     assert len(groups) == 1 and groups[0]['name'] == '主题 · 主题甲'
+
+
+def test_analysis_numbers_filter_actual_watched_month_and_release_year(client, library, db):
+    with db.begin() as session:
+        session.get(EmbyWatch, ('u', 'one')).last_played = '2026-10-17T08:00:00Z'
+        session.get(EmbyWatch, ('u', 'two')).last_played = '2026-09-01T08:00:00Z'
+        session.get(Code, 'ABC-001').release_date = '2025-03-01'
+        session.get(Code, 'ABC-002').release_date = '2026-04-01'
+    def codes(params):
+        response = client.get('/api/v1/library', params=params)
+        assert response.status_code == 200
+        return [item['code'] for item in response.json()['data']['items']]
+    assert codes({'watched': True}) == ['ABC-001']
+    assert codes({'last_played_month': '2026-10'}) == ['ABC-001']
+    assert codes({'last_played_month': '2026-09'}) == ['ABC-002']
+    assert codes({'release_year': 2026}) == ['ABC-002']
+    assert codes({'watched': True, 'release_year': 2026}) == []
+    assert client.get('/api/v1/library', params={'last_played_month': '2026-1'}).status_code == 422
