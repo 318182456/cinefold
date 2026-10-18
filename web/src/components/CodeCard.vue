@@ -68,9 +68,11 @@ async function toggleSubscribe() {
   try {
     if (subscribed.value) {
       await cancelCode(props.item.code)
+      props.item.status = 0
       toast.success(`已取消订阅 ${props.item.code}`)
     } else {
-      await subscribeCode(props.item.code)
+      const result = await subscribeCode(props.item.code)
+      props.item.status = result?.status ?? 1
       toast.success(`已订阅 ${props.item.code}`)
     }
     emit('changed')

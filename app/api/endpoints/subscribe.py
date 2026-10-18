@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import date
+from typing import Literal
 
 from fastapi import APIRouter, Depends
 from loguru import logger
@@ -131,8 +132,12 @@ def search_torrents(
 def sub(body: SubscribeRequest, current_user: str = Depends(get_current_user)):
     from app import services
     code = get_true_code(body.code) or body.code
-    services.subscribe_code(code)
-    return ResponseEntity.ok(message=f"已订阅 {code}")
+    if not services.subscribe_code(code):
+        return ResponseEntity.fail('未订阅：命中当前过滤规则，请检查订阅设置', code=409)
+    with session_scope() as session:
+        row = services.get_code_row(session, code)
+        result = {'code': row.code if row else code, 'status': row.status if row else CodeStatus.SUBSCRIBED}
+    return ResponseEntity.ok(result, message=f"已订阅 {code}")
 
 
 @router.post("/codes/cancel")
@@ -376,25 +381,31 @@ def recommend(
 
 @router.get("/rank")
 def rank(
-    rank_type: str = "",
+    rank_type: Literal['', 'daily', 'weekly', 'monthly'] = "",
     limit: int = PAGE_SIZE,
     current_user: str = Depends(get_current_user),
 ):
-    """榜单，带标题封面。抓不到时返回本地高分番号。"""
-    from app import services
+    """先返回榜单快照，后台更新源站，不将本地高分影片冒充日榜。"""
+    from app.services.rankpages import read
+    return ResponseEntity.ok(read(rank_type or 'daily', limit=max(1, min(limit, 500))))
 
-    items = services.get_rank_items(rank_type)
-    if items:
-        return ResponseEntity.ok({"items": items[:max(limit, 1)]})
 
-    return recommend(limit=limit, current_user=current_user)
+@router.post('/rank/refresh')
+def refresh_rank(rank_type: Literal['daily', 'weekly', 'monthly'] = 'daily', current_user: str = Depends(get_current_user)):
+    from app.services.rankpages import read
+    return ResponseEntity.ok(read(rank_type, force=True))
 
 
 @router.post("/rank/subscribe")
-def rank_subscribe(current_user: str = Depends(get_current_user)):
-    from app.scheduler import push_job
-    push_job("sub_rank")
-    return ResponseEntity.ok(message="榜单订阅任务已触发")
+def rank_subscribe(rank_type: Literal['daily', 'weekly', 'monthly'] = 'daily', current_user: str = Depends(get_current_user)):
+    from app.services.ranksubscriptions import start
+    return ResponseEntity.ok(start(rank_type), message='榜单订阅任务已触发')
+
+
+@router.get('/rank/subscribe/status')
+def rank_subscribe_status(rank_type: Literal['daily', 'weekly', 'monthly'] = 'daily', current_user: str = Depends(get_current_user)):
+    from app.services.ranksubscriptions import current
+    return ResponseEntity.ok(current(rank_type))
 
 
 @router.get("/hot")

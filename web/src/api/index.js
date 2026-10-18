@@ -221,7 +221,9 @@ export const previewScrapeWatermark = (payload) => http.post('/scrape/watermark-
 // ---------------------------------------------------------------- 榜单
 export const getRank = (rankType = '', limit = 120) =>
   http.get('/rank', { params: { rank_type: rankType, limit } })
-export const subscribeRank = () => http.post('/rank/subscribe')
+export const refreshRank = (rankType = 'daily') => http.post('/rank/refresh', null, { params: { rank_type: rankType } })
+export const subscribeRank = (rankType = 'daily') => http.post('/rank/subscribe', null, { params: { rank_type: rankType } })
+export const getRankSubscription = (rankType = 'daily') => http.get('/rank/subscribe/status', { params: { rank_type: rankType } })
 export const getHot = () => http.get('/hot')
 export const getBrands = () => http.get('/brands')
 // 某厂牌的最新发布与预定发布

@@ -152,7 +152,13 @@ async def image_proxy(
     if not url:
         return Response(status_code=400, content=b"missing url")
 
-    cached = imagecache.find_cached(url, code, kind)
+    local_prefix = next((prefix for prefix in ('/pic/', '/pics/') if url.startswith(prefix)), None)
+    if local_prefix:
+        cached = imagecache.resolve_relative(url[len(local_prefix):])
+        if cached is None:
+            return Response(status_code=404, content=b'not found')
+    else:
+        cached = imagecache.find_cached(url, code, kind)
     if cached is not None:
         if poster:
             try:

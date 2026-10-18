@@ -1569,7 +1569,7 @@ def enrich_codes(codes: list[str], fetch_limit: int | None = None) -> list[dict]
 
         # 每个番号要跨境抓 1~4 次，串行下来榜单页首次打开要等几十秒。
         # 这是用户直接等待的路径，并发抓完再统一写库
-        if fill_lack_codes_by_list(missing[:limit]):
+        if limit > 0 and fill_lack_codes_by_list(missing[:limit]):
             known = _rows_by_code(codes)
 
     out = []
@@ -1588,15 +1588,27 @@ def _ensure_codes(codes: list[str]) -> None:
         )
 
 
-def get_rank_items(rank_type: str = "") -> list[dict]:
+def _listing_with_current_status(items: list[dict]) -> list[dict]:
+    """只缓存榜单内容；用户操作和下载状态每次批量从数据库读取。"""
+    variants = {item.get('code', ''): code_variants(item.get('code', '')) for item in items}
+    wanted = list({code for choices in variants.values() for code in choices})
+    with session_scope() as session:
+        statuses = dict(session.execute(select(Code.code, Code.status).where(Code.code.in_(wanted))).all()) if wanted else {}
+    return [{**item, 'status': next((statuses[code] for code in variants[item.get('code', '')] if code in statuses), CodeStatus.NONE)}
+            for item in items]
+
+
+def get_rank_items(rank_type: str = "", *, refresh: bool = False, fetch_limit: int | None = None) -> list[dict]:
     """榜单，带详情与缓存。"""
     import json
 
     key = (rank_type or "daily").strip().lower()
-    cached = get_rank_cache("rank", key, ttl=RANK_CACHE_TTL)
+    cached = None if refresh else get_rank_cache("rank", key, ttl=RANK_CACHE_TTL)
     if cached:
         try:
-            return json.loads(cached)
+            value = json.loads(cached)
+            if isinstance(value, list) and all(isinstance(item, dict) and isinstance(item.get('code'), str) for item in value):
+                return _listing_with_current_status(value)
         except ValueError:
             logger.debug("榜单缓存解析失败，重新抓取")
 
@@ -1606,10 +1618,10 @@ def get_rank_items(rank_type: str = "") -> list[dict]:
     except (ImportError, AttributeError):
         return []
 
-    items = enrich_codes(codes)
+    items = enrich_codes(codes, fetch_limit=fetch_limit)
     if items:
-        set_rank_cache("rank", key, json.dumps(items, ensure_ascii=False, default=str))
-    return items
+        set_rank_cache("rank", key, json.dumps(items, ensure_ascii=False, default=str), ttl=RANK_CACHE_TTL)
+    return _listing_with_current_status(items)
 
 
 def get_brand_items(brand: str, past_days: int = 7, future_days: int = 14) -> list[dict]:
@@ -1623,7 +1635,9 @@ def get_brand_items(brand: str, past_days: int = 7, future_days: int = 14) -> li
     cached = get_rank_cache("brand", key, ttl=BRAND_CACHE_TTL)
     if cached:
         try:
-            return json.loads(cached)
+            value = json.loads(cached)
+            if isinstance(value, list) and all(isinstance(item, dict) and isinstance(item.get('code'), str) for item in value):
+                return _listing_with_current_status(value)
         except ValueError:
             logger.debug("厂牌缓存解析失败，重新抓取")
 
@@ -1653,8 +1667,8 @@ def get_brand_items(brand: str, past_days: int = 7, future_days: int = 14) -> li
     items.sort(key=lambda i: i.get("release_date") or "", reverse=True)
 
     if items:
-        set_rank_cache("brand", key, json.dumps(items, ensure_ascii=False, default=str))
-    return items
+        set_rank_cache("brand", key, json.dumps(items, ensure_ascii=False, default=str), ttl=BRAND_CACHE_TTL)
+    return _listing_with_current_status(items)
 
 
 # ======================================================================

@@ -64,7 +64,14 @@ def sub_rank() -> int:
     if not codes:
         return 0
 
-    count = sum(1 for code in codes if services.subscribe_code(code))
+    count = 0
+    from app.database.session import session_scope
+    for code in codes:
+        with session_scope() as session:
+            row = services.get_code_row(session, code)
+            already = row is not None and row.status >= 1
+        if not already and services.subscribe_code(code):
+            count += 1
     logger.info(f"[任务] 榜单订阅新增 {count} 个")
     return count
 
