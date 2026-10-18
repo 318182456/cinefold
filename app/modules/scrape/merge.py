@@ -119,7 +119,10 @@ def clean_detail(detail: dict, code: str = "") -> dict:
             return {}
     result = {k: v for k, v in detail.items() if k in METADATA_FIELDS and v not in (None, "", [])}
     for key, value in list(result.items()):
-        if key == "star":
+        if key == 'casts':
+            from app.utils.actornames import cast_names
+            result[key] = ','.join(cast_names(value))
+        elif key == "star":
             try:
                 score = float(value)
                 if not 0 <= score <= 10:
@@ -165,6 +168,10 @@ def _better(field: str, current: object, candidate: object) -> bool:
         return False
     if current in (None, "", 0):
         return True
+
+    if field == 'casts' and _count_items(candidate) == _count_items(current):
+        from app.utils.actornames import cast_names, native
+        return sum(native(name) for name in cast_names(candidate)) > sum(native(name) for name in cast_names(current))
 
     if field in _COUNT_FIELDS:
         return _count_items(candidate) > _count_items(current)

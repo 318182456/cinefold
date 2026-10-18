@@ -4,7 +4,6 @@ from __future__ import annotations
 import copy
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
-import re
 import threading
 import time
 import unicodedata
@@ -16,12 +15,12 @@ from app.database.session import session_scope
 from app.modules.ladysite.transport import FetchBudget
 from app.modules.scrape.merge import base_code, clean_detail
 from app.utils import get_true_code
+from app.utils.actornames import names as clean_names, valid as valid_name, presentation
 
 _LOCK = threading.RLock()
 _POOL = ThreadPoolExecutor(max_workers=2, thread_name_prefix='actor-profile')
 _CAPACITY = threading.BoundedSemaphore(4)
 _JOBS = {}
-_SPLIT = re.compile(r'[,，、;；|/\n]+')
 _FIELDS = ('photo', 'birthday', 'height', 'measurements', 'description', 'source_url')
 
 
@@ -35,14 +34,7 @@ def _key(value):
 
 def names(value):
     """演员名按独立 token 匹配，姓名中的空格不作分隔符。"""
-    out = []
-    for raw in _SPLIT.split(_name(value)):
-        raw = raw.strip()
-        if not raw:
-            continue
-        match = re.fullmatch(r'([^()]+)\(([^()]+)\)', raw)
-        out.extend([match[1].strip(), match[2].strip()] if match else [raw])
-    return list(dict.fromkeys(out))
+    return clean_names(value)
 
 
 def _identity(session, name):
@@ -73,7 +65,7 @@ def sync_state(name):
 
 def profile(name, *, page=1, size=24, filter='all'):
     name = _name(name)
-    if not name or len(name) > 128:
+    if not valid_name(name):
         raise ValueError('请填写有效演员姓名（最多128字）')
     if filter not in {'all', 'owned', 'missing', 'favorite', 'watched'}:
         raise ValueError('未知作品筛选条件')
@@ -83,11 +75,12 @@ def profile(name, *, page=1, size=24, filter='all'):
         data = copy.deepcopy(cached.data or {}) if cached else {}
         data.update(name=actor.name if actor else cached.name if cached else name,
                     aliases=list(dict.fromkeys([*(data.get('aliases') or []), *(names(actor.name_2) if actor else [])])),
-                    photo=(actor.photo if actor else '') or data.get('photo') or '',
+                    photo=(data.get('photo') if data.get('source_url') else '') or (actor.photo if actor else '') or data.get('photo') or '',
                     subscribed=bool(actor and actor.subscribed),
                     updated_at=cached.updated_at.isoformat() if cached and cached.updated_at else None)
         for field in _FIELDS:
             data.setdefault(field, '')
+        data.update(presentation(data['name'], data['aliases'], data.get('native_name', '')))
         grouped = {}
         for row in session.scalars(select(Code)):
             core = base_code(row.code) or row.code
@@ -134,8 +127,14 @@ def profile(name, *, page=1, size=24, filter='all'):
 def directory(*, keyword='', page=1, size=15, subscribed=True):
     page, size = max(1, page), max(1, min(100, size))
     with session_scope() as session:
-        rows = list(session.scalars(select(Actor)))
+        rows = [row for row in session.scalars(select(Actor)) if valid_name(row.name)]
+        profiles = {_key(row.name): row for row in session.scalars(select(ActorProfile)) if valid_name(row.name)}
         items = {_key(row.name): row.to_dict() for row in rows if not subscribed or row.subscribed}
+        for key, item in items.items():
+            data = (profiles[key].data or {}) if key in profiles else {}
+            item['photo'] = (data.get('photo') if data.get('source_url') else '') or item.get('photo') or data.get('photo') or ''
+            item['source'] = 'profile' if data.get('source_url') else 'actor'
+            item.update(presentation(item['name'], [*names(item.get('name_2')), *names(data.get('aliases'))], data.get('native_name', '')))
         if not subscribed:
             canonical = {}
             for row in rows:
@@ -144,15 +143,18 @@ def directory(*, keyword='', page=1, size=15, subscribed=True):
             for casts in session.scalars(select(Code.casts).where(Code.casts.is_not(None))):
                 for token in names(casts):
                     key = canonical.get(_key(token), _key(token))
-                    items.setdefault(key, {'name': token, 'name_2': '', 'photo': '', 'subscribed': False})
-        found = [item for item in items.values() if not keyword or _key(keyword) in _key(item['name']) or _key(keyword) in _key(item.get('name_2'))]
-        found.sort(key=lambda item: _key(item['name']))
+                    data = (profiles[key].data or {}) if key in profiles else {}
+                    items.setdefault(key, {'name': token, 'name_2': '', 'photo': data.get('photo') or '', 'subscribed': False,
+                                           'source': 'profile' if data.get('source_url') else 'casts',
+                                           **presentation(token, data.get('aliases', []), data.get('native_name', ''))})
+        found = [item for item in items.values() if not keyword or any(_key(keyword) in _key(value) for value in [item['name'], item['display_name'], *item['aliases']])]
+        found.sort(key=lambda item: (not item.get('subscribed'), _key(item['display_name'])))
         return {'items': found[(page - 1) * size:page * size], 'total': len(found), 'page': page, 'size': size}
 
 
 def subscribe_works(name):
     name = _name(name)
-    if not name or len(name) > 128:
+    if not valid_name(name):
         raise ValueError('请填写有效演员姓名（最多128字）')
     result = dict(matched=0, subscribed=0, already_subscribed=0, owned=0, downloading=0, excluded=0, skipped=0)
     with session_scope() as session:
@@ -203,6 +205,8 @@ def _import(name, payload):
             session.add(cached)
         data = dict(cached.data or {})
         data['aliases'] = list(dict.fromkeys([*data.get('aliases', []), *aliases]))
+        if payload.get('name'):
+            data['native_name'] = payload['name']
         for field in _FIELDS:
             if payload.get(field):
                 data[field] = payload[field]
@@ -242,7 +246,7 @@ def _import(name, payload):
 
 def refresh(name, max_pages=3):
     name = _name(name)
-    if not name or len(name) > 128:
+    if not valid_name(name):
         raise ValueError('请填写有效演员姓名（最多128字）')
     max_pages = max(1, min(10, max_pages))
     key = _key(name)
@@ -262,14 +266,16 @@ def refresh(name, max_pages=3):
         budget = FetchBudget(time.perf_counter() + 45)
         try:
             with session_scope() as session:
-                _, _, cached = _identity(session, name)
+                _, actor, cached = _identity(session, name)
                 actor_url = (cached.data or {}).get('source_url', '') if cached else ''
+                data = (cached.data or {}) if cached else {}
+                lookup = presentation(name, [*names(actor.name_2 if actor else ''), *names(data.get('aliases'))], data.get('native_name', ''))['display_name']
             with budget.activate():
                 for page in range(1, max_pages + 1):
                     budget.check()
                     with _LOCK:
                         _JOBS[key].update(phase='fetching')
-                    payload = _fetch(name, page, actor_url)
+                    payload = _fetch(lookup, page, actor_url)
                     budget.check()
                     imported = _import(name, payload)
                     actor_url = payload.get('source_url') or actor_url

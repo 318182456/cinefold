@@ -234,6 +234,8 @@ export const getBrandCodes = (brand, pastDays = 7, futureDays = 14) =>
 
 // ---------------------------------------------------------------- 演员
 export const listActors = (params) => http.get('/actors', { params })
+export const startActorPhotos = (names, force = false) => http.post('/actors/photos', { names, force })
+export const getActorPhotos = () => http.get('/actors/photos/status')
 export const subscribeActor = (name, limitDate) =>
   http.post('/actors/sub', { name, limit_date: limitDate })
 export const cancelActor = (name) => http.post('/actors/cancel', { name })

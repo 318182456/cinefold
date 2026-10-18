@@ -313,43 +313,79 @@ def search_code(keyword: str) -> list[dict]:
 
 
 def get_actor_photo(name: str) -> str:
+    return _find_actor(name, details=False)
+
+
+def get_actor_identity(name: str) -> dict:
+    return _find_actor(name, details=True) or {}
+
+
+def _find_actor(name: str, *, details=False):
     """查演员头像。同 get_code_detail，多站并发取最快的那个。"""
     # 演员查询与番号形态无关，用通用清单；且只有部分源实现了 search_actor
+    from app.utils.actornames import valid
+    from app.modules.ladysite.transport import FetchBudget
+    if not valid(name):
+        return ''
     enabled = _enabled_sites()
     sites = tuple(s for s in enabled if s in ACTOR_SITES) or enabled
-    if len(sites) == 1:
-        return _fetch_actor_photo(sites[0], name)
+    if not sites:
+        return ''
+    budget = FetchBudget(time.perf_counter() + 20)
+    def fetch(site):
+        with budget.activate():
+            return _fetch_actor_identity(site, name) if details else _fetch_actor_photo(site, name)
 
     from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 
     pool = ThreadPoolExecutor(max_workers=min(len(sites), MAX_PARALLEL_SITES))
+    best = {}
     try:
-        futures = {pool.submit(_fetch_actor_photo, s, name): s for s in sites}
+        futures = {pool.submit(fetch, s): s for s in sites}
         pending = set(futures)
         while pending:
-            done, pending = wait(pending, return_when=FIRST_COMPLETED)
+            done, pending = wait(pending, timeout=budget.remaining(), return_when=FIRST_COMPLETED)
+            if not done:
+                break
             for future in done:
                 try:
                     photo = future.result()
                 except Exception:
                     continue
                 if photo:
+                    if details:
+                        from app.utils.actornames import native
+                        if any(native(value) for value in photo.get('aliases', [])):
+                            return photo
+                        best = photo
+                        continue
                     return photo
     finally:
+        budget.cancel()
         pool.shutdown(wait=False, cancel_futures=True)
-    return ""
+    return best if details else ""
 
 
 def _fetch_actor_photo(site_name: str, name: str) -> str:
+    return _fetch_actor_identity(site_name, name).get('photo', '')
+
+
+def _fetch_actor_identity(site_name: str, name: str) -> dict:
     site = _get_site(site_name)
     if site is None or not hasattr(site, "search_actor"):
-        return ""
+        return {}
     try:
         actor = site.search_actor(name)
     except Exception as exc:
         logger.debug(f"[{name}] {site_name} 查演员失败: {exc}")
-        return ""
-    return actor.photo if actor and actor.photo else ""
+        return {}
+    from app.utils.actornames import matches, names, native
+    if not actor or not matches(name, actor.name, getattr(actor, 'name_2', '')):
+        return {}
+    aliases = names([actor.name, getattr(actor, 'name_2', '')])
+    if not actor.photo and not any(native(value) for value in aliases):
+        return {}
+    return {'name': actor.name, 'aliases': aliases, 'photo': actor.photo or ''}
 
 
 # ----------------------------------------------------------------------

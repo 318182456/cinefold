@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 import {
   listActors, subscribeActor, cancelActor, proxyImage, getActorProfile,
   refreshActorProfile, getActorProfileSync, subscribeActorWorks,
+  startActorPhotos, getActorPhotos,
 } from '@/api'
 import { revealDetails } from '@/utils/statNavigation'
 import { useToast } from '@/composables/useToast'
@@ -21,13 +22,47 @@ const selectedName = ref(''), profile = ref(null), works = ref([]), profileLoadi
 const worksPage = ref(1), worksSize = ref(PAGE_SIZE), worksTotal = ref(0), worksFilter = ref('all')
 const sync = ref({ running: false, phase: 'idle', imported: 0, error: '' }), syncSubmitting = ref(false)
 const syncPollError = ref(''), batchBusy = ref(false), batchResult = ref(null)
+const photos = ref({ running: false }), photoError = ref('')
+let photoTimer, photoBusy = false
+function missingPhotos() {
+  return selectedName.value ? (profile.value && (!actor.value.photo || actor.value.needs_name_lookup) ? [actorName.value] : [])
+    : items.value.filter(item => !item.photo || item.needs_name_lookup).map(item => item.name)
+}
+async function fillPhotos(force = false) {
+  if (disposed || photoBusy || photos.value.running) return
+  const names = missingPhotos()
+  if (!names.length) return
+  photoBusy = true; photoError.value = ''
+  try {
+    photos.value = await startActorPhotos(names, force)
+    if (!disposed && photos.value.running) schedulePhotoPoll()
+  } catch (err) { if (!disposed) photoError.value = err.message }
+  finally { photoBusy = false }
+}
+function schedulePhotoPoll() {
+  clearTimeout(photoTimer)
+  if (!disposed) photoTimer = setTimeout(pollPhotos, 1800)
+}
+async function pollPhotos() {
+  try {
+    const result = await getActorPhotos()
+    if (disposed) return
+    photos.value = result; photoError.value = ''
+    if (result.running) schedulePhotoPoll()
+    else {
+      if (selectedName.value) await loadProfile()
+      else await loadDirectory()
+    }
+  } catch (err) { if (!disposed) { photoError.value = err.message; schedulePhotoPoll() } }
+}
 let disposed = false, directoryRequest = 0, profileRequest = 0, refreshRequest = 0, batchRequest = 0, syncEpoch = 0, syncTimer
 const directoryPages = computed(() => Math.max(1, Math.ceil(directoryTotal.value / PAGE_SIZE)))
 const worksPages = computed(() => Math.max(1, Math.ceil(worksTotal.value / worksSize.value)))
 const actor = computed(() => profile.value?.actor || { name: selectedName.value })
 const actorName = computed(() => actor.value.name || selectedName.value)
+const actorDisplayName = computed(() => actor.value.display_name || actorName.value)
 const actorAliases = computed(() => Array.isArray(actor.value.aliases)
-  ? actor.value.aliases.filter(name => typeof name === 'string' && name && name !== actorName.value) : [])
+  ? actor.value.aliases.filter(name => typeof name === 'string' && name && name !== actorDisplayName.value) : [])
 const sourceUrl = computed(() => {
   try { const url = new URL(actor.value.source_url); return ['http:', 'https:'].includes(url.protocol) ? url.href : '' }
   catch { return '' }
@@ -66,6 +101,7 @@ async function loadDirectory() {
     if (disposed || id !== directoryRequest) return
     items.value = result.items || []; directoryTotal.value = result.total || 0
     if (directoryPage.value > directoryPages.value) { directoryPage.value = directoryPages.value; await loadDirectory() }
+    else if (!selectedName.value) fillPhotos()
   } catch (err) { if (!disposed && id === directoryRequest) directoryError.value = err.message }
   finally { if (!disposed && id === directoryRequest) loading.value = false }
 }
@@ -94,6 +130,7 @@ async function loadProfile() {
     if (disposed || id !== profileRequest || selectedName.value !== name) return
     profile.value = result; works.value = result.items || []; worksTotal.value = result.total || 0
     worksSize.value = result.size || PAGE_SIZE; worksPage.value = result.page || worksPage.value
+    fillPhotos()
     if (syncVersion === syncEpoch) {
       sync.value = result.sync || { running: false, phase: 'idle', imported: 0, error: '' }
       if (sync.value.running) scheduleSyncPoll()
@@ -191,11 +228,17 @@ watch(() => route.query.name, value => {
   if (selectedName.value) loadProfile()
 }, { immediate: true })
 watch(() => route.query.mode, value => { directoryMode.value = value === 'subscribed' ? 'subscribed' : 'all'; searchDirectory() }, { immediate: true })
-onUnmounted(() => { disposed = true; directoryRequest += 1; profileRequest += 1; refreshRequest += 1; batchRequest += 1; stopSyncPolling() })
+onUnmounted(() => { disposed = true; clearTimeout(photoTimer); directoryRequest += 1; profileRequest += 1; refreshRequest += 1; batchRequest += 1; stopSyncPolling() })
 </script>
 
 <template>
   <div class="space-y-5">
+    <div v-if="photos.running || photos.done || photoError" class="flex flex-wrap items-center gap-3 rounded-lg bg-gray-800/40 p-3 text-xs text-gray-400">
+      <span>{{ photos.running ? '后台补全姓名与头像' : '姓名与头像补全结果' }} · {{ photos.done || 0 }}/{{ photos.total || 0 }} · 头像成功 {{ photos.ok || 0 }} · 头像未找到 {{ photos.failed || 0 }}</span>
+      <span v-if="photos.updated_at">更新于 {{ new Date(photos.updated_at * 1000).toLocaleTimeString() }}</span>
+      <span v-if="photoError" class="text-amber-400">{{ photoError }}</span>
+      <button class="text-brand disabled:opacity-40" :disabled="photos.running || photoBusy" @click="fillPhotos(true)">重试当前姓名与头像补全</button>
+    </div>
     <template v-if="!selectedName">
       <div class="flex flex-wrap items-end justify-between gap-3">
         <div><h1 class="text-lg font-medium text-gray-200">演员目录</h1><p class="mt-1 text-xs text-gray-500">查看本地演员与已同步作品，订阅演员可继续追踪新作品。</p></div>
@@ -209,9 +252,10 @@ onUnmounted(() => { disposed = true; directoryRequest += 1; profileRequest += 1;
       <LoadingBlock v-if="loading" :rows="3" />
       <div v-else-if="items.length" class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
         <article v-for="item in items" :key="item.name" class="card flex items-center gap-3 transition-colors hover:border-gray-700">
-          <button class="h-14 w-14 shrink-0 overflow-hidden rounded-full bg-gray-800" :aria-label="`打开 ${item.name} 的档案`" @click="openProfile(item.name)"><PrivateImage v-if="item.photo" :src="proxyImage(item.photo)" :alt="item.name" img-class="h-full w-full object-cover" /><span v-else class="text-lg text-gray-500">{{ item.name?.slice(0, 1) }}</span></button>
+          <button class="h-14 w-14 shrink-0 overflow-hidden rounded-full bg-gray-800" :aria-label="`打开 ${item.display_name || item.name} 的档案`" @click="openProfile(item.name)"><PrivateImage :src="item.photo ? proxyImage(item.photo) : ''" :alt="item.display_name || item.name" fallback-text="暂无照片" img-class="h-full w-full object-cover" /></button>
           <div class="min-w-0 flex-1">
-            <button class="max-w-full truncate text-left text-sm font-medium text-gray-200 hover:text-brand" @click="openProfile(item.name)">{{ item.name }}</button>
+            <button class="max-w-full truncate text-left text-sm font-medium text-gray-200 hover:text-brand" @click="openProfile(item.name)">{{ item.display_name || item.name }}</button>
+            <p class="mt-1 text-[10px] text-gray-600">{{ item.source === 'profile' ? 'JavDB 档案' : item.source === 'casts' ? '影片演员字段' : '已有演员资料' }}</p>
             <p v-if="item.aliases?.length || item.name_2" class="mt-1 truncate text-[11px] text-gray-500">{{ Array.isArray(item.aliases) && item.aliases.length ? item.aliases.join(' / ') : item.name_2 }}</p>
             <p v-if="item.limit_date && item.subscribed" class="mt-1 text-[11px] text-gray-500">{{ item.limit_date }} 起订阅</p>
             <div class="mt-2 flex flex-wrap gap-3"><button class="text-[11px] text-brand" @click="openProfile(item.name)">查看档案</button><button class="text-[11px] disabled:opacity-40" :class="item.subscribed ? 'text-gray-500' : 'text-brand'" :disabled="isSubscriptionBusy(item.name)" @click="changeSubscription(item.name, !item.subscribed)">{{ item.subscribed ? '取消订阅' : '订阅演员' }}</button></div>
@@ -226,9 +270,9 @@ onUnmounted(() => { disposed = true; directoryRequest += 1; profileRequest += 1;
       <div class="flex flex-wrap items-center justify-between gap-3"><button class="text-xs text-brand" @click="backToDirectory">← 返回演员目录</button><button class="btn-ghost !text-xs" :disabled="profileLoading" @click="loadProfile">刷新本地档案</button></div>
       <section class="card space-y-4">
         <div class="flex flex-col gap-4 sm:flex-row sm:items-start">
-          <div class="h-28 w-28 shrink-0 overflow-hidden rounded-xl bg-gray-800"><PrivateImage v-if="actor.photo" :src="proxyImage(actor.photo)" :alt="actorName" img-class="h-full w-full object-cover" /><div v-else class="flex h-full items-center justify-center text-3xl text-gray-500">{{ actorName.slice(0, 1) }}</div></div>
+          <div class="h-28 w-28 shrink-0 overflow-hidden rounded-xl bg-gray-800"><PrivateImage :src="actor.photo ? proxyImage(actor.photo) : ''" :alt="actorDisplayName" fallback-text="暂无照片" img-class="h-full w-full object-cover" /></div>
           <div class="min-w-0 flex-1">
-            <div class="flex flex-wrap items-center gap-2"><h1 class="break-all text-xl font-medium text-gray-200">{{ actorName }}</h1><span v-if="actor.subscribed" class="rounded bg-brand/10 px-2 py-0.5 text-[10px] text-brand">已订阅新作</span></div>
+            <div class="flex flex-wrap items-center gap-2"><h1 class="break-all text-xl font-medium text-gray-200">{{ actorDisplayName }}</h1><span v-if="actor.subscribed" class="rounded bg-brand/10 px-2 py-0.5 text-[10px] text-brand">已订阅新作</span></div>
             <p v-if="actorAliases.length" class="mt-2 break-all text-xs text-gray-400">别名 · {{ actorAliases.join(' / ') }}</p>
             <dl v-if="fields.length" class="mt-3 flex flex-wrap gap-x-5 gap-y-2 text-xs"><div v-for="field in fields" :key="field.label" class="flex gap-2"><dt class="text-gray-500">{{ field.label }}</dt><dd class="text-gray-300">{{ field.value }}</dd></div></dl>
             <p v-if="actor.description" class="mt-3 whitespace-pre-line break-words text-xs leading-relaxed text-gray-400">{{ actor.description }}</p>

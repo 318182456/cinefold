@@ -161,6 +161,9 @@ def _read_meta(code: str) -> dict:
         inherited = merge.clean_detail(original.to_dict(), code) if original else {}
         own = merge.clean_detail(row.to_dict(), code) if row else {}
         detail = {**inherited, **own}
+        if detail.get('casts'):
+            from app.services.actornames import localize_casts
+            detail['casts'] = localize_casts(detail['casts'], session)
         if not detail:
             return {}
         return {**detail, "code": code,
@@ -234,9 +237,16 @@ def _save_meta(code: str, detail: dict, overwrite: bool = False) -> None:
         row = session.get(Code, code)
         if row is None:
             return
+        from app.services.actornames import localize_casts
+        if row.casts:
+            row.casts = localize_casts(row.casts, session)
         for key, value in merge.clean_detail(detail, code).items():
+            if key == 'casts':
+                value = localize_casts(value, session)
             existing = getattr(row, key, None)
-            if overwrite or existing in (None, "") or key in ("title", "cn_title") and not merge.clean_detail({key: existing}, code).get(key):
+            if (overwrite or existing in (None, "")
+                    or key == 'casts' and merge._better('casts', existing, value)
+                    or key in ("title", "cn_title") and not merge.clean_detail({key: existing}, code).get(key)):
                 setattr(row, key, value)
                 if overwrite and existing != value:
                     if key == "banner":
@@ -625,6 +635,12 @@ def scrape_group(
     if preserved_meta and not force:
         meta = {**{k: v for k, v in preserved_meta.items() if v}, **meta,
                 **{k: v for k, v in preserved_meta.items() if k.startswith('_local_') and v}}
+    if meta.get('casts'):
+        from app.services.actornames import localize_casts
+        localized = localize_casts(meta['casts'])
+        if localized != meta['casts']:
+            meta['casts'] = localized
+            _save_meta(code, {'casts': localized})
     if meta.get('_lookup_code'):
         result.warnings.append(f'商品编号 {code} 使用已验证候选 {meta["_lookup_code"]} 获取元数据')
     result.sources = meta.get("_sources", [])

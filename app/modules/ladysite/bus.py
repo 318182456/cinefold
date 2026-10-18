@@ -46,7 +46,8 @@ class Bus:
         if not html:
             return None
         actors = self.html_to_actors(html)
-        return actors[0] if actors else None
+        from app.utils.actornames import matches
+        return next((actor for actor in actors if matches(name, actor.name, actor.name_2)), None)
 
     def crawler_new(self, page: int = 1) -> list[str]:
         """首页新片列表，返回番号。"""

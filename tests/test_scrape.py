@@ -14,6 +14,7 @@ from xml.etree import ElementTree
 import pytest
 
 from app.modules.scrape import merge, naming, nfo
+from tests.test_scrape_reliability import db
 
 Image = pytest.importorskip("PIL.Image", reason="未安装 Pillow")
 
@@ -342,6 +343,7 @@ class Test图片落盘:
 
 
 # ----------------------------------------------------------------------
+@pytest.mark.usefixtures('db')
 class Test人工指定番号:
     """文件名认不出番号时的兜底：手动指定，重新刮削。
 

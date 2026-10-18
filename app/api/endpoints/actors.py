@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 
 from app.api.endpoints import get_current_user
@@ -21,6 +21,23 @@ class ActorRequest(BaseModel):
 class ActorRefreshRequest(BaseModel):
     name: str
     max_pages: int = 3
+
+
+class ActorPhotosRequest(BaseModel):
+    names: list[str] = Field(min_length=1, max_length=24)
+    force: bool = False
+
+
+@router.post('/actors/photos')
+def actor_photos(body: ActorPhotosRequest, current_user: str = Depends(get_current_user)):
+    from app.services.actorphotos import start
+    return ResponseEntity.ok(start(body.names, body.force))
+
+
+@router.get('/actors/photos/status')
+def actor_photos_status(current_user: str = Depends(get_current_user)):
+    from app.services.actorphotos import current
+    return ResponseEntity.ok(current())
 
 
 @router.get('/actors/profile')

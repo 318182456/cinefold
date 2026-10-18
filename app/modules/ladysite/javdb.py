@@ -124,21 +124,16 @@ class Avdb:
 
     # ------------------------------------------------------------------
     def search_actor(self, name: str) -> ActorInfo | None:
-        html = self.client.get("/search", params={"q": name, "f": "actor"})
-        if not html:
-            return None
-
         try:
-            doc = PyQuery(html)
-            item = doc(".actor-box").eq(0)
-            if not item:
-                return None
-            link = item("a").eq(0)
-            photo = item("img").attr("src") or ""
-            return ActorInfo(
-                name=(link.attr("title") or link.text() or name).strip(),
-                photo=convert_image_url(photo),
-            )
+            from app.modules.ladysite.javdb_actor import _search, _profile, _read
+            from app.utils.actornames import native
+            url, photo, doc = _search(self.client, name)
+            if doc is None and (not photo or not native(name)):
+                doc, _ = _read(self.client, url, actor=True)
+            if doc is not None:
+                data = _profile(doc, name, self.client.host, photo)
+                return ActorInfo(name=data['name'], name_2=','.join(data.get('aliases', [])), photo=data.get('photo', ''))
+            return ActorInfo(name=name, photo=photo) if photo else None
         except Exception as exc:
             logger.debug(f"[javdb] 解析演员失败: {exc}")
             return None

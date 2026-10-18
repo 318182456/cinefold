@@ -1474,13 +1474,14 @@ def cache_lack_photos(limit: int = PHOTO_CACHE_LIMIT) -> int:
 
 
 def fill_lack_actors(limit: int = 50) -> int:
+    from app.utils.actornames import valid
     with session_scope() as session:
         names = session.scalars(
             select(Actor.name)
             .where((Actor.photo.is_(None)) | (Actor.photo == ""))
-            .limit(limit)
+            .order_by(Actor.subscribed.desc(), Actor.update_time.desc())
         ).all()
-    return fill_lack_actors_by_list(list(names))
+    return fill_lack_actors_by_list([name for name in names if valid(name)][:limit])
 
 
 def fill_lack_actors_by_list(names: list[str]) -> int:
