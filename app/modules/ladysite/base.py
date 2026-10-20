@@ -32,6 +32,10 @@ BYPASS_SOLVE_TIMEOUT_MS = 90000
 # 多个源串行，沿用 90s 会直接顶穿前端 60s 超时。
 BYPASS_CHECK_TIMEOUT_MS = 20000
 
+# Browser navigation can itself consume 30 seconds. Give a normal attempt room
+# for acquisition/challenges rather than splitting 90 seconds into three 30s jobs.
+BYPASS_NODE_WINDOW_MS = 40000
+
 # 连接类异常（SSL EOF、连接重置）的额外重试次数
 CONNECT_RETRIES = 1
 
@@ -521,12 +525,13 @@ def _solver_request(client, endpoint, body, quick=False):
     from app.services.mihomo import get_manager
     manager = get_manager()
     automatic = manager.config["enabled"] and manager.config["automatic"]
-    attempts = max(1, min(3, len(manager.nodes), max(1, body["maxTimeout"] // 20000))) if automatic else 1
+    attempts = max(1, min(3, len(manager.nodes), max(1, body["maxTimeout"] // BYPASS_NODE_WINDOW_MS))) if automatic else 1
     deadline = time.perf_counter() + body["maxTimeout"] / 1000
     for attempt in range(max(1, attempts)):
         # Re-enter the FIFO queue for each exit attempt, so a slow site's
         # complete retry chain cannot monopolize a browser slot.
         with _bypass_slot(endpoint, quick), manager.lease(remote=True, url=body["url"], timeout=min(20, max(0, deadline-time.perf_counter()))) as proxy:
+            node_name = manager.proxy_name(proxy)
             request = dict(body)
             if proxy:
                 request["proxy"] = {"url": proxy}
@@ -536,7 +541,7 @@ def _solver_request(client, endpoint, body, quick=False):
                 remaining = min(remaining, budget.remaining())
             if remaining <= 0:
                 raise FetchCancelled("bypass 排队及节点重试达到总时限")
-            remaining_attempts = min(attempts - attempt, max(1, int(remaining // 20))) if automatic else 1
+            remaining_attempts = min(attempts - attempt, max(1, int(remaining * 1000 // BYPASS_NODE_WINDOW_MS))) if automatic else 1
             request["maxTimeout"] = max(1, int(remaining * 1000 / remaining_attempts))
             # A service disconnection is not a failure of the target's exit.
             response = client.post(endpoint, json=request)
@@ -554,7 +559,7 @@ def _solver_request(client, endpoint, body, quick=False):
             elif response.is_success and payload.get("status") in ("ok", None):
                 manager.note_result(body["url"], proxy, True)
         if automatic and failed_exit and attempt + 1 < attempts:
-            logger.info(f"bypass 抓取 {body['url'].split('?')[0]} 节点失败，尝试其他节点")
+            logger.info(f"bypass 抓取 {body['url'].split('?')[0]} 节点「{node_name}」失败（本次上限 {request['maxTimeout'] / 1000:.1f}s），尝试其他节点")
             continue
         return response
 

@@ -491,8 +491,9 @@ class Mihomo:
                 ordered = [pool[index] for index in range(max(map(len, pools.values()), default=0))
                            for pool in pools.values() if index < len(pool)]
                 candidates = ([selected] if selected in names else []) + [name for name in ordered if name != selected]
+                identities = {node["name"]: self._identity(node) for node in self.nodes}
                 candidates = [name for name in candidates if name not in exclude
-                              and now - self.health.get((route, name), -1e9) >= 120]
+                              and now - self.health.get((route, identities[name]), -1e9) >= 120]
                 if not candidates:
                     raise RuntimeError("此数据源的候选节点近期均失败，请稍后重试或更换订阅")
                 selected = candidates[0]
@@ -572,6 +573,14 @@ class Mihomo:
                     self.allocated.discard(name)
                     self.available.notify_all()
 
+    def proxy_name(self, proxy):
+        """A log-safe label: never return the authenticated listener URL."""
+        if not proxy:
+            return "默认代理"
+        index = (urlparse(proxy).port or 0) - FIRST_PORT
+        with self.lock:
+            return self.nodes[index]["name"] if 0 <= index < len(self.nodes) else "未知节点"
+
     def note_result(self, url, proxy, success):
         if not proxy or not self.config["enabled"]:
             return
@@ -583,13 +592,15 @@ class Mihomo:
             if not 0 <= index < len(self.nodes):
                 return
             name = self.nodes[index]["name"]
+            identity = self._identity(self.nodes[index])
             route = self._source("", url)[1]
             if success:
                 self.winners[route] = (name, time.monotonic())
-                self.health.pop((route, name), None)
+                self.health.pop((route, identity), None)
             else:
-                self.health[(route, name)] = time.monotonic()
-                if self.winners.get(route, (None,))[0] == name:
+                self.health[(route, identity)] = time.monotonic()
+                winner = self.winners.get(route, (None,))[0]
+                if any(node["name"] == winner and self._identity(node) == identity for node in self.nodes):
                     self.winners.pop(route, None)
             # Bound runtime history for long-lived installations.
             if len(self.health) > 2048:

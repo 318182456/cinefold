@@ -468,6 +468,10 @@ def sync_hot() -> int:
         logger.info("排行榜无结果，改用 javbus 新片列表")
         codes = _fallback_new_codes()
 
+    if not codes:
+        logger.warning("同步热门未取得有效列表：排行榜与 javbus 兜底均无结果，本轮未更新")
+        return 0
+
     count = _store_codes(codes)
     logger.info(f"同步热门完成，处理 {count} 个番号")
     return count
@@ -485,6 +489,10 @@ def sync_news() -> int:
     if not codes:
         logger.info("最想看榜无结果，改用 javbus 新片列表")
         codes = _fallback_new_codes()
+
+    if not codes:
+        logger.warning("同步新片未取得有效列表：最想看榜与 javbus 兜底均无结果，本轮未更新")
+        return 0
 
     count = _store_codes(codes)
     logger.info(f"同步新片完成，处理 {count} 个番号")

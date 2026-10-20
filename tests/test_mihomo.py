@@ -650,3 +650,37 @@ def test_quick_check_gives_one_node_the_full_short_solve_window(manager):
     with httpx.Client(transport=httpx.MockTransport(respond)) as c:
         assert base._fetch_bypass_response(c, "http://trawl/v1", "https://check.example/", "", 20000, quick=True) == "good"
     assert len(requests) == 1 and 19000 <= requests[0]["maxTimeout"] <= 20000
+
+
+def test_trawl_challenge_gets_more_than_thirty_seconds_with_many_nodes(manager):
+    from app.modules.ladysite import base
+    manager.nodes = [*nodes(), dict(nodes()[1], name="Third", port=8003)]
+    manager.config.update(enabled=True, selected="Japan")
+    requests = []
+
+    def respond(request):
+        body = json.loads(request.content)
+        requests.append(body)
+        # Simulate a challenge that needs 35 seconds; three 30s jobs all fail.
+        if body["maxTimeout"] < 35000:
+            return httpx.Response(500, json={"status": "error", "message": "Scrape deadline exceeded"})
+        return httpx.Response(200, json={"status": "ok", "solution": {"status": 200, "response": "rank page"}})
+
+    with httpx.Client(transport=httpx.MockTransport(respond)) as c:
+        assert base._fetch_bypass_response(c, "http://trawl/v1", "https://javdb.com/rankings/movies", "", 90000) == "rank page"
+    assert len(requests) == 1 and 40000 <= requests[0]["maxTimeout"] <= 45000
+
+
+def test_failed_exit_aliases_share_cooldown_and_clear_cached_alias(manager):
+    manager.nodes = [nodes()[0], dict(nodes()[0], name="other-subscription / alias"), nodes()[1]]
+    manager.config.update(enabled=True, selected="Japan")
+    target = "https://javdb.com/rankings/movies"
+    first = manager.proxy(url=target)
+    manager.config["selected"] = "other-subscription / alias"
+    alias = manager.proxy(url=target)
+    manager.note_result(target, alias, True)
+    manager.note_result(target, first, False)
+    assert "javdb.com" not in manager.winners
+    assert ":17892" in manager.proxy(url=target)
+    assert manager.proxy_name(first) == "Japan"
+    assert ":17891" in manager.proxy(url="https://other.example/")

@@ -10,6 +10,32 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import pytest
 
 
+def test_sync_hot_reports_missing_lists_without_a_success_message(monkeypatch):
+    from app.modules import ladysite
+    from loguru import logger
+    monkeypatch.setattr(ladysite, "get_rank_codes", lambda *args: [])
+    monkeypatch.setattr(ladysite, "_fallback_new_codes", lambda: [])
+    monkeypatch.setattr(ladysite, "_store_codes", lambda codes: pytest.fail("failed listings must not update the library"))
+    messages = []
+    sink = logger.add(lambda message: messages.append((message.record["level"].name, str(message))))
+    try:
+        assert ladysite.sync_hot() == 0
+    finally:
+        logger.remove(sink)
+    assert any(level == "WARNING" and "未取得有效列表" in text for level, text in messages)
+    assert not any("同步热门完成" in text for _, text in messages)
+
+
+def test_sync_hot_uses_fallback_codes_when_rank_fails(monkeypatch):
+    from app.modules import ladysite
+    monkeypatch.setattr(ladysite, "get_rank_codes", lambda *args: [])
+    monkeypatch.setattr(ladysite, "_fallback_new_codes", lambda: ["ABC-123"])
+    stored = []
+    monkeypatch.setattr(ladysite, "_store_codes", lambda codes: stored.extend(codes) or len(codes))
+    assert ladysite.sync_hot() == 1
+    assert stored == ["ABC-123"]
+
+
 @pytest.fixture(autouse=True)
 def ensure_tables():
     """建表。
