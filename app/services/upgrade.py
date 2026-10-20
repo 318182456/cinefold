@@ -640,6 +640,8 @@ def _restart_process() -> None:
     会被它的信号处理拦下来，进程能挂在那儿不动。
     """
     logger.info("[升级] 重启进程以加载新版本")
+    from app.services.mihomo import get_manager
+    get_manager().shutdown()
     try:
         from app.scheduler import stop_scheduler
         stop_scheduler()

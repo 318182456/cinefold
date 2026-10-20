@@ -24,6 +24,7 @@ import re
 from loguru import logger
 
 from app.modules.ladysite.base import SiteClient
+from app.services.mihomo import proxy_lease
 from app.modules.subtitle.base import (
     MAX_SUBTITLE_BYTES,
     MIN_SUBTITLE_BYTES,
@@ -133,10 +134,10 @@ class GithubSubtitle:
         settings = get_settings()
         url = f"{client.host}{path}"
         try:
-            with httpx.Client(
+            with proxy_lease(settings.proxy or None, getattr(client, 'proxy', None), 'subtitlegh', url) as proxy, httpx.Client(
                 timeout=15.0,
                 follow_redirects=True,
-                proxy=settings.proxy or None,
+                proxy=proxy,
                 verify=False,
                 trust_env=False,
             ) as http:

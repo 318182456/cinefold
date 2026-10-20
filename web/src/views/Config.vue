@@ -13,6 +13,7 @@ import { useConfigStore } from '@/stores/config'
 import ConfigField from '@/components/ConfigField.vue'
 import LoadingBlock from '@/components/LoadingBlock.vue'
 import WatermarkPreview from '@/components/WatermarkPreview.vue'
+import MihomoPanel from '@/components/MihomoPanel.vue'
 
 const toast = useToast()
 const configStore = useConfigStore()
@@ -1187,6 +1188,7 @@ onUnmounted(stopUpgradePoll)
 
     <template v-else>
       <div v-for="group in GROUPS" v-show="activeGroup === group.key" :key="group.key" class="space-y-4">
+        <MihomoPanel v-if="group.key === 'network' && activeGroup === 'network'" />
         <div v-if="group.key === 'scrape'" class="card space-y-3">
           <div class="flex flex-wrap items-center justify-between gap-2"><div><p class="font-medium">刮削设置</p><p class="mt-1 text-xs text-gray-500">长期规则在这里设置，视频操作与任务进度在刮削工作台。</p></div><RouterLink :to="{ name: 'Scrape' }" class="text-sm text-brand">打开工作台 ↗</RouterLink></div>
           <div class="flex flex-wrap gap-2" role="tablist" aria-label="刮削设置分类"><button v-for="[value, label] in SCRAPE_TABS" :key="value" class="btn text-xs" :class="scrapeTab === value ? 'bg-brand text-white' : 'btn-ghost'" role="tab" :aria-selected="scrapeTab === value" @click="scrapeTab = value">{{ label }}</button></div>

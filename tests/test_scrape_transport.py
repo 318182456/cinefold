@@ -368,3 +368,88 @@ def test_solver_http_failure_log_contains_target_and_reason(monkeypatch):
     assert base.fetch_via_bypass("https://source.test/works/date") == ""
     assert "https://source.test/works/date" in messages[0]
     assert "Scrape deadline exceeded" in messages[0]
+
+
+def test_unbudgeted_solver_queue_has_deadline(monkeypatch):
+    monkeypatch.setattr(base, "get_settings", lambda: SimpleNamespace(bypass_url="http://queue-test/v1"))
+    monkeypatch.setattr(base, "BYPASS_QUEUE_TIMEOUT", 0.05)
+    monkeypatch.setattr(base, "http_client", lambda **kw: pytest.fail("queue timeout must not start HTTP"))
+    started = time.perf_counter()
+    base._BYPASS_LOCK.acquire()
+    try:
+        assert base.fetch_via_bypass("https://source.test/movie") == ""
+    finally:
+        base._BYPASS_LOCK.release()
+    assert time.perf_counter() - started < 0.5
+
+
+def test_solver_disconnect_pauses_then_recovers(monkeypatch):
+    monkeypatch.setattr(base, "get_settings", lambda: SimpleNamespace(bypass_url="http://recovery-test/v1"))
+    monkeypatch.setattr(base, "_BYPASS_RECOVERY", {})
+    original_client = httpx.Client
+    calls = []
+
+    def respond(request):
+        calls.append(request)
+        if len(calls) == 1:
+            raise httpx.RemoteProtocolError("Server disconnected without sending a response")
+        return httpx.Response(200, json={"status": "ok", "solution": {"response": "recovered"}})
+
+    monkeypatch.setattr(base, "http_client", lambda **kw: original_client(transport=httpx.MockTransport(respond)))
+    assert base.fetch_via_bypass("https://source.test/movie") == ""
+    assert base.fetch_via_bypass("https://other.test/movie") == ""
+    assert len(calls) == 1
+    base._BYPASS_RECOVERY["http://recovery-test/v1"] = 0
+    assert base.fetch_via_bypass("https://source.test/movie") == "recovered"
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize("sites", [("airav",), ("airav", "javdb")])
+def test_legacy_detail_deadline_cancels_io_and_queue(mock_http, monkeypatch, sites):
+    from app.modules import ladysite
+    cancelled = threading.Event()
+
+    async def handler(request):
+        try:
+            await asyncio.sleep(60)
+        finally:
+            cancelled.set()
+
+    mock_http(handler)
+    monkeypatch.setattr(ladysite, "_sites_for_code", lambda code: sites)
+    monkeypatch.setattr(ladysite, "DETAIL_TIMEOUT_SECONDS", 0.15)
+
+    def fetch(site, code):
+        return {"title": "unexpected"} if base.SiteClient("https://source.test").get("/movie") else {}
+
+    monkeypatch.setattr(ladysite, "_fetch_detail", fetch)
+    started = time.perf_counter()
+    assert ladysite.get_code_detail("WAAA-687") == {}
+    assert time.perf_counter() - started < 1
+    assert cancelled.wait(1)
+
+
+def test_legacy_detail_winner_cancels_losing_request(mock_http, monkeypatch):
+    from app.modules import ladysite
+    active, cancelled = threading.Event(), threading.Event()
+
+    async def handler(request):
+        active.set()
+        try:
+            await asyncio.sleep(60)
+        finally:
+            cancelled.set()
+
+    mock_http(handler)
+    monkeypatch.setattr(ladysite, "_sites_for_code", lambda code: ("slow", "fast"))
+
+    def fetch(site, code):
+        if site == "slow":
+            base.SiteClient("https://source.test").get("/movie")
+            return {}
+        assert active.wait(1)
+        return {"code": code, "title": "winner"}
+
+    monkeypatch.setattr(ladysite, "_fetch_detail", fetch)
+    assert ladysite.get_code_detail("WAAA-687")["title"] == "winner"
+    assert cancelled.wait(1)

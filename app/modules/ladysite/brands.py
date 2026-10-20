@@ -60,6 +60,7 @@ class Brands:
         # 这些官网对非日本出口普遍是静默丢包或 502/504，而不是返回挑战页，
         # 因此撞不出 403 也就触发不了"被拦才降级"。配了 bypass 就直接走它
         self.client = SiteClient(host, interval=1.5, bypass_first=True)
+        self.client.source_key = f"brand:{self.brand}"
 
     def list_dates(self) -> list[str] | None:
         """取官网挂出的全部发行日期。

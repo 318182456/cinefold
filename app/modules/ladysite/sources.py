@@ -456,6 +456,7 @@ def _check_direct(url: str, timeout: float, key: str = "") -> tuple[str, str]:
 
     from app.core.config import get_settings
     from app.modules.ladysite.base import DEFAULT_UA, SiteClient, is_tls_error
+    from app.services.mihomo import proxy_lease
 
     settings = get_settings()
     client_obj = SiteClient.from_source(key) if key else None
@@ -466,10 +467,10 @@ def _check_direct(url: str, timeout: float, key: str = "") -> tuple[str, str]:
         "Accept-Language": "zh-CN,zh;q=0.9,ja;q=0.8,en;q=0.7",
     }
     try:
-        with httpx.Client(
+        with proxy_lease(settings.proxy or None, getattr(client_obj, 'proxy', None), key, url) as proxy, httpx.Client(
             timeout=timeout,
             follow_redirects=True,
-            proxy=client_obj.proxy if client_obj is not None and client_obj.proxy is not None else settings.proxy or None,
+            proxy=proxy,
             verify=False,
         ) as client:
             response = client.get(url, headers=headers)

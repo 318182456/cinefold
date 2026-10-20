@@ -28,6 +28,7 @@ DETAIL_SITES = (
 # （base._BYPASS_LOCK），排在后面的过盾请求只会干等；线程再多也没用，
 # 反而把连接数与内存吃掉。取最快结果的策略下，前几个站命中即可返回。
 MAX_PARALLEL_SITES = 6
+DETAIL_TIMEOUT_SECONDS = 120.0
 
 # 实现了 search_actor 的源。其余源查演员必然空手而归，
 # _fetch_actor_photo 虽有 hasattr 兜底，但先筛掉能省下建实例的开销
@@ -218,19 +219,27 @@ def get_code_detail(code: str) -> dict:
     logger.info(f"[{code}] 检索数据源（共 {len(sites)} 个）：{', '.join(sites)}")
     started = time.perf_counter()
 
-    if len(sites) == 1:
-        detail = _fetch_detail(sites[0], code)
-        _log_detail_result(code, sites[0] if detail else "", detail, started, sites)
-        return detail
-
     from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+    from app.modules.ladysite.transport import FetchBudget, FetchCancelled
+
+    budget = FetchBudget(started + DETAIL_TIMEOUT_SECONDS)
+
+    def fetch(name):
+        try:
+            with budget.activate():
+                return _fetch_detail(name, code)
+        except FetchCancelled:
+            return {}
 
     pool = ThreadPoolExecutor(max_workers=min(len(sites), MAX_PARALLEL_SITES))
     try:
-        futures = {pool.submit(_fetch_detail, name, code): name for name in sites}
+        futures = {pool.submit(fetch, name): name for name in sites}
         pending = set(futures)
         while pending:
-            done, pending = wait(pending, return_when=FIRST_COMPLETED)
+            done, pending = wait(pending, timeout=budget.remaining(), return_when=FIRST_COMPLETED)
+            if not done:
+                logger.warning(f"[{code}] 详情查询达到总时限，取消剩余请求")
+                break
             for future in done:
                 name = futures[future]
                 try:
@@ -242,6 +251,7 @@ def get_code_detail(code: str) -> dict:
                     _log_detail_result(code, name, detail, started, sites)
                     return detail
     finally:
+        budget.cancel()
         # 已经拿到结果就不等剩下的站点
         pool.shutdown(wait=False, cancel_futures=True)
 
@@ -302,7 +312,7 @@ def _fetch_detail(site_name: str, code: str) -> dict:
         logger.info(f"[{code}] ← {site_name} 返回详情（{elapsed:.1f}s）：{info.title[:40]}")
         return info.to_dict()
 
-    logger.info(f"[{code}] ← {site_name} 无此番号（{elapsed:.1f}s）")
+    logger.info(f"[{code}] ← {site_name} 未取得有效详情（可能未收录、请求失败或超时；{elapsed:.1f}s）")
     return {}
 
 

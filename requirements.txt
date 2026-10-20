@@ -10,6 +10,7 @@ SQLAlchemy~=2.0.36
 psycopg[binary]~=3.2.3
 redis~=5.2.0
 python-dotenv~=1.0.1
+PyYAML~=6.0.2
 httpx[socks]~=0.28.1
 # Site scraping goes through pyquery (lxml under the hood)
 pyquery~=2.0.0

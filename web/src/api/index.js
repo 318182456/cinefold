@@ -73,6 +73,10 @@ export const getUpgradeStatus = () => http.get('/upgrade/status')
 export const startUpgrade = (version = '') =>
   http.post('/upgrade', null, { params: { version } })
 export const rollbackUpgrade = () => http.post('/upgrade/rollback')
+export const getMihomo = () => http.get('/mihomo')
+export const saveMihomo = (config) => http.post('/mihomo/config', config)
+export const mihomoAction = (action) => http.post(`/mihomo/action/${action}`)
+export const testMihomo = (data) => http.post('/mihomo/test', data)
 
 // ---------------------------------------------------------------- 番号
 export const listCodes = (params) => http.get('/codes/list', { params })

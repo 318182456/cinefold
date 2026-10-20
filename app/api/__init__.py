@@ -44,6 +44,8 @@ def init_cinefold() -> None:
 
     with _step(1, total, "加载配置"):
         get_settings()
+        from app.services.mihomo import get_manager
+        get_manager().start_monitor()
 
     with _step(2, total, "初始化数据库"):
         from app.database.utils.setup import setup_database
@@ -70,6 +72,8 @@ def init_cinefold() -> None:
 async def lifespan(app: FastAPI):
     init_cinefold()
     yield
+    from app.services.mihomo import get_manager
+    get_manager().shutdown()
     from app.api.endpoints.picproxy import close_client
     await close_client()
     from app.modules.notify.tgpolling import stop_polling
@@ -108,12 +112,12 @@ def create_app() -> FastAPI:
 
     from app.api.endpoints import (
         actors, admin, agent, auth, config, datasource, medialink, message,
-        picproxy, scrape, subscribe, watchdir, webhook, curation, mcp, embycollection, downloads,
+        picproxy, scrape, subscribe, watchdir, webhook, curation, mcp, embycollection, downloads, mihomo,
     )
 
     for module in (
         admin, auth, config, subscribe, actors, picproxy, message, datasource,
-        medialink, watchdir, webhook, agent, scrape, curation, mcp, embycollection, downloads,
+        medialink, watchdir, webhook, agent, scrape, curation, mcp, embycollection, downloads, mihomo,
     ):
         app.include_router(module.router, prefix=API_PREFIX)
 

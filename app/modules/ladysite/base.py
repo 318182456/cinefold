@@ -9,6 +9,7 @@ import re
 import ssl
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from urllib.parse import urlencode
 
@@ -18,6 +19,7 @@ from loguru import logger
 from app.core.config import get_settings
 from app.utils import clean_header_value
 from app.modules.ladysite.transport import FetchCancelled, current_budget, http_client
+from app.services.mihomo import source_context, proxy_lease
 
 # bypass 服务类型探测结果缓存：{base_url: 是否讲 FlareSolverr 协议}
 # 覆盖 FlareSolverr / Byparr / TRAWL，三家都是 POST /v1
@@ -36,6 +38,41 @@ CONNECT_RETRIES = 1
 # 这类服务每个会话独占一个浏览器实例，并发请求会互相拖慢甚至超时，
 # 因此同一时刻只允许一个请求进入。
 _BYPASS_LOCK = threading.Lock()
+_MIHOMO_BYPASS_SLOTS = threading.BoundedSemaphore(2)
+BYPASS_QUEUE_TIMEOUT = 20.0
+BYPASS_RECOVERY_SECONDS = 30.0
+_BYPASS_RECOVERY: dict[str, float] = {}
+
+
+@contextmanager
+def _bypass_slot(base: str, quick: bool):
+    """Bound queue time even for callers without a scrape budget."""
+    deadline = time.perf_counter() + (2.0 if quick else BYPASS_QUEUE_TIMEOUT)
+    budget = current_budget()
+    from app.services.mihomo import get_manager
+    slot = _MIHOMO_BYPASS_SLOTS if get_manager().config["enabled"] else _BYPASS_LOCK
+    while True:
+        if budget:
+            budget.check()
+        if _BYPASS_RECOVERY.get(base, 0) > time.perf_counter():
+            raise FetchCancelled("bypass 服务连接中断，恢复等待中")
+        remaining = deadline - time.perf_counter()
+        if remaining <= 0:
+            raise TimeoutError("bypass 排队超时，服务繁忙")
+        if slot.acquire(timeout=min(0.05, remaining)):
+            break
+    try:
+        if budget:
+            budget.check()
+        if _BYPASS_RECOVERY.get(base, 0) > time.perf_counter():
+            raise FetchCancelled("bypass 服务连接中断，恢复等待中")
+        yield
+    except httpx.RemoteProtocolError:
+        # Do not send the entire waiting queue into a restarting service.
+        _BYPASS_RECOVERY[base] = time.perf_counter() + BYPASS_RECOVERY_SECONDS
+        raise
+    finally:
+        slot.release()
 
 DEFAULT_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -138,6 +175,7 @@ class SiteClient:
         self.last_page = ''
         self.last_url = ''
         self.proxy = None
+        self.source_key = ""
 
     def _remember(self, html: str, url: str) -> str:
         self.last_page, self.last_url = html, str(getattr(html, 'url', url))
@@ -164,6 +202,7 @@ class SiteClient:
             bypass_first=source.get("bypass_first", False),
         )
         client.proxy = source.get('proxy') or None
+        client.source_key = key
         return client
 
     @classmethod
@@ -216,6 +255,10 @@ class SiteClient:
             state[1] = time.time()
 
     def get(self, path: str, params: dict | None = None, timeout: float = 15.0, bypass_first: bool | None = None, allow_bypass: bool = True, **kwargs) -> str:
+        with source_context(self.source_key):
+            return self._get(path, params, timeout, bypass_first, allow_bypass, **kwargs)
+
+    def _get(self, path: str, params: dict | None = None, timeout: float = 15.0, bypass_first: bool | None = None, allow_bypass: bool = True, **kwargs) -> str:
         """GET 请求，返回文本。失败返回空串。
 
         默认超时偏短：抓取由定时任务驱动，单站不通时应尽快让位给下一个站点。
@@ -241,20 +284,26 @@ class SiteClient:
 
         for attempt in range(CONNECT_RETRIES + 1):
             self._throttle()
+            request_proxy = None
             try:
-                with httpx.Client(
+                with proxy_lease(settings.proxy or None, self.proxy, self.source_key, url) as request_proxy, httpx.Client(
                     timeout=timeout,
                     follow_redirects=True,
-                    proxy=self.proxy if self.proxy is not None else settings.proxy or None,
+                    proxy=request_proxy,
                     verify=False,
                     # 只认配置里的 PROXY，避免被宿主机环境变量里的代理劫持
                     trust_env=False,
                 ) as client:
                     response = client.get(url, headers=headers, params=params)
                     response.raise_for_status()
+                    _note_proxy_result(url, request_proxy, True)
                     return self._remember(response.text, str(response.url))
             except httpx.HTTPStatusError as exc:
                 status = exc.response.status_code
+                if status == 429:
+                    _note_proxy_result(url, request_proxy, False)
+                    if attempt < CONNECT_RETRIES:
+                        continue
                 # 421 需要重建连接，不能在同一次失败后立即判为无此作品。
                 if status == 421:
                     if attempt < CONNECT_RETRIES:
@@ -271,6 +320,7 @@ class SiteClient:
                 logger.warning(f"请求 {url} 失败: {status}")
                 return ""
             except httpx.TimeoutException as exc:
+                _note_proxy_result(url, request_proxy, False)
                 # 超时不重试直连：站点本来就慢，再等一轮只会拖住后面的站点。
                 # 但部分站点是对直连静默丢包而非返回挑战页，配了 bypass 就交给它
                 if allow_bypass and settings.bypass_url:
@@ -279,6 +329,7 @@ class SiteClient:
                 logger.warning(f"请求 {url} 超时: {exc}")
                 return ""
             except (httpx.TransportError, ssl.SSLError) as exc:
+                _note_proxy_result(url, request_proxy, False)
                 # SSL EOF、连接重置这类抖动重试一次多半就好，节流已保证不会打太密
                 if attempt < CONNECT_RETRIES:
                     logger.debug(f"请求 {url} 连接异常，重试: {exc}")
@@ -311,19 +362,23 @@ class SiteClient:
             for attempt in range(CONNECT_RETRIES + 1):
                 self._throttle()
                 retry_after = None
+                request_proxy = None
                 try:
-                    with http_client(
+                    with proxy_lease(settings.proxy or None, self.proxy, self.source_key, url) as request_proxy, http_client(
                         timeout=timeout, follow_redirects=True,
-                        proxy=self.proxy if self.proxy is not None else settings.proxy or None,
+                        proxy=request_proxy,
                         verify=False, trust_env=False,
                     ) as client:
                         response = client.get(url, headers=headers, params=params)
                     response.raise_for_status()
+                    _note_proxy_result(url, request_proxy, True)
                     return self._remember(response.text, str(response.url))
                 except FetchCancelled:
                     return ""
                 except httpx.HTTPStatusError as exc:
                     status = exc.response.status_code
+                    if status == 429:
+                        _note_proxy_result(url, request_proxy, False)
                     if status == 421 and attempt >= CONNECT_RETRIES:
                         return bypass() if allow_bypass and settings.bypass_url else ""
                     if allow_bypass and settings.bypass_url and (status == 403 or status >= 500):
@@ -332,6 +387,7 @@ class SiteClient:
                         return ""
                     retry_after = exc.response.headers.get("Retry-After")
                 except (httpx.TransportError, ssl.SSLError) as exc:
+                    _note_proxy_result(url, request_proxy, False)
                     if attempt >= CONNECT_RETRIES and allow_bypass and settings.bypass_url and is_tls_error(exc):
                         logger.info(f"{url} TLS 重试失败，尝试通过 bypass 服务获取")
                         return bypass()
@@ -357,6 +413,11 @@ class SiteClient:
         except Exception as exc:
             logger.warning(f"请求 {url} 异常: {exc}")
         return ""
+
+
+def _note_proxy_result(url, proxy, success):
+    from app.services.mihomo import get_manager
+    get_manager().note_result(url, proxy, success)
 
 
 def _cookie_pairs(cookie: str) -> list[dict]:
@@ -392,7 +453,8 @@ def fetch_via_bypass(
 
     通过 BYPASS_URL 配置服务地址；未配置时直接返回空串。
     quick=True 用更短的过盾上限，供连通性测试这类有人在等的场景。
-    bypass 使用自身的代理配置，不传递全局或数据源代理。
+    默认由 bypass 自行管理代理；启用内置 Mihomo 时显式传递其节点入口。
+    全局及数据源配置中的外部代理不会传递。
     cookie 会转交给 FlareSolverr（mgstage 的年龄门就靠它）；
     GET /html 风格的服务没有传 Cookie 的口子，只能丢弃。
     """
@@ -414,7 +476,7 @@ def fetch_via_bypass(
 
     try:
         budget = current_budget()
-        with budget.acquire(_BYPASS_LOCK) if budget else _BYPASS_LOCK:
+        with _bypass_slot(base, quick):
             if budget:
                 solver_timeout = min(solver_timeout, max(1, int(budget.remaining() * 1000)))
                 client_timeout = min(client_timeout, budget.remaining())
@@ -435,6 +497,43 @@ def fetch_via_bypass(
         return ""
 
 
+def _solver_request(client, endpoint, body):
+    from app.services.mihomo import get_manager
+    manager = get_manager()
+    automatic = manager.config["enabled"] and manager.config["automatic"]
+    attempts = min(3, len(manager.nodes)) if automatic else 1
+    deadline = time.perf_counter() + body["maxTimeout"] / 1000
+    for attempt in range(max(1, attempts)):
+        with manager.lease(remote=True, url=body["url"], timeout=min(20, max(0, deadline-time.perf_counter()))) as proxy:
+            request = dict(body)
+            if proxy:
+                request["proxy"] = {"url": proxy}
+            if automatic:
+                remaining = deadline - time.perf_counter()
+                if remaining <= 0:
+                    raise TimeoutError("bypass 节点重试达到总时限")
+                request["maxTimeout"] = max(1, int(remaining * 1000 / (attempts - attempt)))
+            # A service disconnection is not a failure of the target's exit.
+            response = client.post(endpoint, json=request)
+            try:
+                payload = response.json()
+            except ValueError:
+                payload = {}
+            solution = payload.get("solution") or {}
+            status = solution.get("status")
+            message = str(payload.get("message") or payload.get("msg") or "")
+            failed_exit = status in (403, 429) or isinstance(status, int) and status >= 500 or bool(
+                re.search(r"timeout|deadline|blocked|challenge|http-403|http-429|proxy-connection|ECONNRESET", message, re.I))
+            if failed_exit:
+                manager.note_result(body["url"], proxy, False)
+            elif response.is_success and payload.get("status") in ("ok", None):
+                manager.note_result(body["url"], proxy, True)
+        if automatic and failed_exit and attempt + 1 < attempts:
+            logger.info(f"bypass 抓取 {body['url'].split('?')[0]} 节点失败，尝试其他节点")
+            continue
+        return response
+
+
 def _fetch_bypass_response(client, base, url, cookie, solver_timeout):
     if base.endswith("/v1") or _is_flaresolverr(base):
         endpoint = base if base.endswith("/v1") else f"{base}/v1"
@@ -448,10 +547,7 @@ def _fetch_bypass_response(client, base, url, cookie, solver_timeout):
         pairs = _cookie_pairs(clean_header_value(cookie))
         if pairs:
             body["cookies"] = pairs
-        response = client.post(
-            endpoint,
-            json=body,
-        )
+        response = _solver_request(client, endpoint, body)
         response.raise_for_status()
         payload = response.json()
         solution = payload.get("solution") or {}
