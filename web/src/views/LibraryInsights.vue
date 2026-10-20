@@ -1,4 +1,5 @@
 <script setup>
+import PagePanel from '@/components/PagePanel.vue'
 import { onMounted, onUnmounted, ref } from 'vue'
 import http from '@/api'
 import { useToast } from '@/composables/useToast'
@@ -14,8 +15,12 @@ onMounted(() => { load(); poll() })
 onUnmounted(() => { disposed = true; clearTimeout(timer) })
 </script>
 <template>
-  <div class="space-y-6">
+  <PagePanel content-class="space-y-6">
+    <template #header>
+
     <div><h1 class="text-xl font-semibold">收藏分析与健康检查</h1><p class="mt-1 text-sm text-gray-500">了解收藏分布，检查缺失文件、多版本和内容重复。</p></div>
+    </template>
+
     <template v-if="stats">
       <div class="grid grid-cols-2 gap-3 lg:grid-cols-4"><RouterLink :to="{ name: 'Library', query: { ...query, include_skipped: 'true' } }" :title="`查看${label}对应影片`" v-for="[label, value, query] in [['库内影片',stats.total,{}],['已看完',stats.watched,{watched:'true'}],['累计播放',stats.plays,{sort:'plays'}],['收藏',stats.favorites,{favorite:'true'}]]" :key="label" class="card transition hover:border-brand/60 focus-visible:outline focus-visible:outline-brand"><p class="text-sm text-gray-500">{{ label }}</p><p class="mt-2 text-2xl font-semibold">{{ value }}</p></RouterLink></div>
       <div class="grid gap-4 lg:grid-cols-3">
@@ -42,5 +47,5 @@ onUnmounted(() => { disposed = true; clearTimeout(timer) })
       <details v-if="health.result.versions.length"><summary class="cursor-pointer text-sm">同番号多文件（{{ health.result.versions.length }} 组）</summary><div v-for="v in health.result.versions" :key="v.code" class="my-3 rounded-lg bg-gray-800 p-3 text-sm"><p>{{ v.code }} <span class="text-gray-500">{{ v.multipart ? '含分卷标记，请保留完整分卷' : '多版本或多个文件引用，需人工核对' }}</span></p><p v-for="f in v.files" :key="f.path" class="mt-2 break-all text-xs text-gray-400">{{ f.path }} · {{ gb(f.size) }}</p></div></details>
       <div v-for="(issue, index) in health.result.issues" :key="index" class="border-t border-gray-800 pt-3 text-sm"><p>{{ issue.code }} · {{ issue.message }}</p><p class="mt-1 break-all text-xs text-gray-500">{{ issue.path }}</p></div><p v-if="!health.result.issues.length" class="text-sm text-green-400">未发现缺失、空文件或资料缺项。</p><RouterLink :to="{ name: 'MediaLink' }" class="btn-ghost">到硬链接管理预览清理范围</RouterLink></template>
     </div>
-  </div>
+  </PagePanel>
 </template>

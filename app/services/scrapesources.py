@@ -91,7 +91,7 @@ def remove_root(path: str) -> list[dict]:
     return roots()
 
 
-def validate_file(raw: str) -> Path:
+def validate_file(raw: str, parent_job_id: str = '') -> Path:
     path = Path(raw)
     if mediafile.is_advertisement(path.stem):
         raise ValueError('广告视频已跳过，不参与刮削')
@@ -101,7 +101,21 @@ def validate_file(raw: str) -> Path:
         raise ValueError(f"视频为空文件: {path.name}")
     path = path.resolve()
     if not any(r['available'] and path.is_relative_to(Path(r['resolved'])) for r in roots(probe=True)):
-        raise ValueError(f"视频不在当前有效的下载源目录中: {path}")
+        # 下载完成触发的自动任务也可能来自清单目录以外；重试只授权原任务记录的文件。
+        from app.database.models import ScrapeTask
+        allowed, seen = False, set()
+        with session_scope() as session:
+            while parent_job_id and parent_job_id not in seen:
+                seen.add(parent_job_id)
+                task = session.get(ScrapeTask, parent_job_id)
+                if task is None or not any(Path(item['path']).resolve() == path for item in task.sources):
+                    break
+                if task.kind == 'automatic':
+                    allowed = True
+                    break
+                parent_job_id = task.parent_id
+        if not allowed:
+            raise ValueError(f"视频不在当前有效的下载源目录中: {path}")
     return path
 
 
@@ -234,7 +248,7 @@ def start(entries: list[dict], *, overwrite: bool = False, refresh_metadata: boo
         attempts = {a.source_key: a.code for a in session.scalars(select(ScrapeAttempt))}
         downloading = set(session.scalars(select(Code.code).where(Code.status == CodeStatus.DOWNLOADING)))
     for entry in entries:
-        path = validate_file(entry['path'])
+        path = validate_file(entry['path'], parent_job_id) if parent_job_id else validate_file(entry['path'])
         identity = key(path)
         if identity in seen:
             continue
@@ -271,7 +285,7 @@ def start(entries: list[dict], *, overwrite: bool = False, refresh_metadata: boo
         for code, items in groups.items():
             record_attempt(items, code, status='queued', job_id=job_id)
         try:
-            Thread(target=_run, args=(groups, job_id, overwrite, refresh_metadata, fetch_meta, force), daemon=True, name='manual-scrape').start()
+            Thread(target=_run, args=(groups, job_id, overwrite, refresh_metadata, fetch_meta, force, parent_job_id), daemon=True, name='manual-scrape').start()
         except Exception:
             _STATE.update(running=False, error='启动刮削任务失败')
             scrapehistory.sync({**_STATE, 'phase':'failed', 'finished_at':time.time()}, 'manual')
@@ -287,7 +301,7 @@ def cancel() -> dict:
 
 
 @maintenance_guarded
-def _run(groups, job_id, overwrite, refresh_metadata, fetch_meta, force=False):
+def _run(groups, job_id, overwrite, refresh_metadata, fetch_meta, force=False, parent_job_id=''):
     """两组影片并行准备网络资料；scrape 内部仍串行提交文件。"""
     queue = iter(groups.items())
 
@@ -298,7 +312,7 @@ def _run(groups, job_id, overwrite, refresh_metadata, fetch_meta, force=False):
             record_attempt(items, code, status='running', job_id=job_id)
         try:
             for info in items:
-                validate_file(str(info.path))
+                validate_file(str(info.path), parent_job_id) if parent_job_id else validate_file(str(info.path))
             with _LOCK, session_scope() as session:
                 existing = {}
                 for row in session.scalars(select(MediaLink).where(

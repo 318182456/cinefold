@@ -5,10 +5,116 @@ import pytest
 from sqlalchemy import delete
 
 from app.database.models import ScrapeTask, ScrapeTaskResult
-from app.services import scrape, scrapehistory, scraperebuild, scraperecovery, scrapesources
+from app.services import scrape, scrapehistory, scraperebuild, scraperecovery, scrapesources, scrapewatch
 from tests.test_scrape_rebuild import library, copy_mode, wait
 from tests.test_scrape_recovery import partial, writer
 from tests.test_scrape_sources import env, video
+
+
+def test_download_automatic_history_survives_restart_and_retries_only_failed(env, monkeypatch):
+    from types import SimpleNamespace
+    from app import services
+    root, settings, factory, _, tasks = env
+    settings.scrape_mode = 'builtin'
+    monkeypatch.setattr(services, 'get_settings', lambda: settings)
+    monkeypatch.setattr(scrapehistory, '_legacy', lambda: None)
+    paths = [video(root, f'SONE-{n}.mp4') for n in (725, 726, 727)]
+    original = [path.read_bytes() for path in paths]
+    seen = []
+    def run(code, items, **options):
+        rows = scrapehistory.listing()['items']
+        assert len(rows) == 1 and rows[0]['running']
+        assert not rows[0]['can_retry_failed']
+        with pytest.raises(ValueError, match='运行中'):
+            scrapehistory.remove(rows[0]['job_id'])
+        seen.append(code)
+        if code == 'SONE-726':
+            raise RuntimeError('metadata unavailable')
+        return scrape.ScrapeResult(code=code, links=[items[0].path], warnings=['artwork warning'] if code=='SONE-727' else [])
+    monkeypatch.setattr(scrape, 'scrape_group', run)
+    client = SimpleNamespace(list_torrent_files=lambda hashes: [str(path) for path in paths])
+    services._scrape_just_completed(client, ['test-hash'])
+    row = scrapehistory.listing()['items'][0]
+    assert row['kind'] == 'automatic' and row['phase'] == 'partial'
+    assert (row['total'], row['done'], row['ok'], row['failed']) == (3, 3, 2, 1)
+    assert row['can_retry_failed'] and row['finished_at']
+    assert scrapehistory.detail(row['job_id'], status='failed')['items'][0]['error'] == 'metadata unavailable'
+    with factory() as session:
+        assert session.get(ScrapeTask, row['job_id']).options['trigger'] == 'download'
+    # A fresh request reads persisted results after the active task registry is empty.
+    assert not scrapehistory._AUTOMATIC
+    assert scrapehistory.detail(row['job_id'])['total'] == 3
+    seen.clear()
+    monkeypatch.setattr(scrape, 'scrape_group', lambda code, items, **kw: seen.append(code) or scrape.ScrapeResult(code=code, links=[items[0].path]))
+    resumed = scrapehistory.resume(row['job_id'], 'failed')
+    tasks[-1].run()
+    assert seen == ['SONE-726']
+    assert scrapehistory.detail(resumed['job_id'])['task']['parent_id'] == row['job_id']
+    scrapehistory.remove(row['job_id'])
+    assert [path.read_bytes() for path in paths] == original
+
+
+def test_directory_automatic_records_only_selected_stable_groups(env, monkeypatch):
+    import os
+    import time
+    root, settings, _, _, _ = env
+    settings.scrape_mode = 'builtin'
+    monkeypatch.setattr(scrapehistory, '_legacy', lambda: None)
+    monkeypatch.setattr(scrapewatch, '_OBSERVED', {})
+    monkeypatch.setattr(scrapewatch, '_RETRY', {})
+    paths = [video(root, f'SONE-725-CD{n}.mp4') for n in (1, 2)]
+    for path in paths:
+        os.utime(path, (time.time()-500, time.time()-500))
+    now = [1000.0]
+    monkeypatch.setattr(scrapewatch.time, 'monotonic', lambda: now[0])
+    monkeypatch.setattr(scrape, 'scrape_group', lambda code, items, **kw: scrape.ScrapeResult(code=code, links=[i.path for i in items]))
+    assert scrapewatch.scan() == 0
+    assert scrapehistory.listing()['total'] == 0
+    now[0] += 130
+    assert scrapewatch.scan() == 1
+    task = scrapehistory.listing()['items'][0]
+    assert task['kind'] == 'automatic' and task['phase'] == 'completed'
+    assert task['total'] == task['done'] == task['ok'] == 1
+    assert len(scrapehistory.detail(task['job_id'])['items'][0]['paths']) == 2
+    assert scrapewatch.scan() == 0
+    assert scrapehistory.listing()['total'] == 1
+
+
+def test_interrupted_automatic_task_can_continue_pending_only(env, monkeypatch):
+    root, settings, _, _, tasks = env
+    monkeypatch.setattr(scrapehistory, '_legacy', lambda: None)
+    paths = [video(root, f'SONE-{n}.mp4') for n in (725, 726)]
+    scrapehistory.begin('interrupted-auto', 'automatic', [{'path':str(path),'code':f'SONE-{n}'} for path,n in zip(paths,(725,726))], {'overwrite':False}, 2)
+    scrapehistory.record('interrupted-auto', {'code':'SONE-725','ok':True})
+    scrapehistory.sync({'job_id':'interrupted-auto','phase':'running','done':1,'ok':1}, 'automatic')
+    row = scrapehistory.listing()['items'][0]
+    assert row['phase'] == 'interrupted' and row['can_resume']
+    seen = []
+    monkeypatch.setattr(scrape, 'scrape_group', lambda code, items, **kw: seen.append(code) or scrape.ScrapeResult(code=code, links=[items[0].path]))
+    scrapehistory.resume(row['job_id'])
+    tasks[-1].run()
+    assert seen == ['SONE-726']
+
+
+def test_download_history_retry_accepts_only_original_files_outside_inventory(env, monkeypatch, tmp_path):
+    root, settings, _, _, tasks = env
+    monkeypatch.setattr(scrapehistory, '_legacy', lambda: None)
+    outside = tmp_path / 'downloader'; outside.mkdir()
+    source = video(outside)
+    unrelated = video(outside, 'SONE-726.mp4')
+    groups = scrapesources.group_entries([{'path':str(source),'code':'SONE-725'}])
+    monkeypatch.setattr(scrape, 'scrape_group', lambda code, items, **kw: scrape.ScrapeResult(code=code, error='offline'))
+    with scrapehistory.AutomaticTask(groups, settings, 'download') as task:
+        task.process('SONE-725', groups['SONE-725'])
+    with pytest.raises(ValueError, match='下载源目录'):
+        scrapesources.validate_file(str(unrelated), task.job_id)
+    with pytest.raises(ValueError, match='下载源目录'):
+        scrapesources.validate_file(str(source))
+    monkeypatch.setattr(scrape, 'scrape_group', lambda code, items, **kw: scrape.ScrapeResult(code=code, links=[items[0].path]))
+    resumed = scrapehistory.resume(task.job_id, 'failed')
+    tasks[-1].run()
+    assert scrapehistory.detail(resumed['job_id'])['task']['phase'] == 'completed'
+    assert source.read_bytes() == unrelated.read_bytes() == b'video-data'
 
 
 def test_rebuild_history_retry_and_delete_preserve_files(copy_mode, monkeypatch):

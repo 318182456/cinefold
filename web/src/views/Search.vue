@@ -1,4 +1,5 @@
 <script setup>
+import PagePanel from '@/components/PagePanel.vue'
 import { ref, onMounted, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import {
@@ -173,7 +174,9 @@ const sizeText = (mb) => (mb >= 1024 ? `${(mb / 1024).toFixed(2)} GB` : `${mb.to
 </script>
 
 <template>
-  <div class="space-y-5">
+  <PagePanel content-class="space-y-5">
+    <template #header>
+
     <div class="flex gap-2">
       <input
         v-model="keyword"
@@ -206,6 +209,8 @@ const sizeText = (mb) => (mb >= 1024 ? `${(mb / 1024).toFixed(2)} GB` : `${mb.to
         清空
       </button>
     </div>
+    </template>
+
 
     <!-- 番号结果 -->
     <div v-if="results.length" class="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
@@ -335,5 +340,5 @@ const sizeText = (mb) => (mb >= 1024 ? `${(mb / 1024).toFixed(2)} GB` : `${mb.to
         </div>
       </div>
     </div>
-  </div>
+  </PagePanel>
 </template>

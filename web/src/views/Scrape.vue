@@ -1,4 +1,5 @@
 <script setup>
+import PagePanel from '@/components/PagePanel.vue'
 import { computed, defineAsyncComponent, nextTick, onMounted, reactive, ref, watch } from 'vue'
 import { previewScrape, runScrape, getScrapeFields } from '@/api'
 import { useToast } from '@/composables/useToast'
@@ -148,9 +149,13 @@ async function doRun() {
 </script>
 
 <template>
-  <div class="space-y-4">
+  <PagePanel content-class="space-y-4">
+    <template #header>
+
     <div class="flex flex-wrap items-center justify-between gap-3"><div><h1 class="text-xl font-semibold">入库管理</h1><p class="mt-1 text-sm text-gray-500">从下载源到 Emby 媒体库，查看资料、补全元数据和管理入库任务。</p></div><RouterLink :to="{ name: 'Config', query: { section: 'scrape' } }" class="btn-ghost">刮削设置 ↗</RouterLink></div>
     <div class="flex gap-5 overflow-x-auto border-b border-gray-800" role="tablist" aria-label="刮削工作区"><button v-for="[value, label] in [['videos', '源视频'], ['links', '媒体库关联'], ['history', '刮削记录'], ['watch', '目录监控'], ['tools', '路径试算']]" :key="value" class="shrink-0 border-b-2 px-1 py-3 text-sm transition" :class="workspace === value ? 'border-brand text-brand' : 'border-transparent text-gray-500 hover:text-gray-300'" role="tab" :aria-selected="workspace === value" @click="workspace = value">{{ label }}</button></div>
+    </template>
+
     <!-- 当前刮削方式。走 external 时这个页面只能手动刮，说清楚免得白等 -->
     <div v-if="workspace === 'videos' && mode && mode !== 'builtin'" class="card">
       <p class="text-[11px] text-amber-400">
@@ -482,5 +487,5 @@ async function doRun() {
         </div>
       </template>
     </ModalDialog>
-  </div>
+  </PagePanel>
 </template>

@@ -1,4 +1,5 @@
 <script setup>
+import PagePanel from '@/components/PagePanel.vue'
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import {
   adoptScrapeDir, backfillWatchDirTorrents, cancelWatchDirHold, createWatchDir,
@@ -417,7 +418,9 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="space-y-4">
+  <PagePanel content-class="space-y-4">
+    <template #header>
+
     <!-- 概览 -->
     <div class="grid gap-3 sm:grid-cols-4">
       <div class="card">
@@ -447,6 +450,8 @@ onUnmounted(() => {
         </p>
       </div>
     </div>
+    </template>
+
 
     <!-- 环境提示。媒体库根目录不再是必需的 —— 每条规则可自带目标目录，
          所以这里只提示「没配根目录时新建规则必须填目标目录」 -->
@@ -1125,5 +1130,5 @@ onUnmounted(() => {
         </div>
       </div>
     </div>
-  </div>
+  </PagePanel>
 </template>

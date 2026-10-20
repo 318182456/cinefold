@@ -1,4 +1,5 @@
 <script setup>
+import PagePanel from '@/components/PagePanel.vue'
 import { onMounted, onUnmounted, ref } from 'vue'
 import http from '@/api'
 import ModalDialog from '@/components/ModalDialog.vue'
@@ -11,6 +12,7 @@ const selected = ref(''), detail = ref(null), detailPage = ref(1), status = ref(
 const busy = ref(false), deleting = ref(null)
 let timer, disposed = false, revision = 0
 const phases = { completed: '已完成', partial: '部分失败', interrupted: '已中断', failed: '任务失败', cancelled: '已停止', running: '刮削中', checking: '检查中', quarantine: '备份中', backup: '备份中', clearing: '清理中', rebuilding: '刮削中' }
+const kinds = { rebuild: '全部重新刮削', manual: '手动批量刮削', automatic: '自动刮削' }
 const date = value => value ? new Date(value * 1000).toLocaleString() : '—'
 
 async function load() {
@@ -71,16 +73,20 @@ onUnmounted(() => { disposed = true; revision++; clearTimeout(timer) })
 </script>
 
 <template>
-  <section class="space-y-4">
+  <PagePanel content-class="space-y-4">
+    <template #header>
+
     <div class="flex items-start justify-between gap-4">
-      <div><h2 class="font-medium text-gray-200">刮削记录 <span class="ml-2 text-xs text-gray-500">{{ data.total }} 个任务</span></h2><p class="mt-1 text-xs text-gray-500">保存全部重建与手动批量刮削结果。继续任务保留已完成影片；删除记录保留影片、下载源和备份。</p></div>
+      <div><h2 class="font-medium text-gray-200">刮削记录 <span class="ml-2 text-xs text-gray-500">{{ data.total }} 个任务</span></h2><p class="mt-1 text-xs text-gray-500">保存自动刮削、手动批量刮削与全部重建结果。继续任务保留已完成影片；删除记录保留影片、下载源和备份。</p></div>
       <button class="btn-ghost shrink-0" :disabled="loading || busy" @click="load">刷新</button>
     </div>
+    </template>
+
     <p v-if="error" class="text-sm text-red-400" role="alert">{{ error }}</p>
     <p v-if="!data.items.length" class="card text-sm text-gray-500">{{ loading ? '正在读取记录…' : '暂无刮削记录' }}</p>
     <article v-for="row in data.items" :key="row.job_id" class="card space-y-3">
       <div class="flex flex-wrap justify-between gap-3">
-        <div><p class="text-sm font-medium text-gray-200">{{ row.kind === 'rebuild' ? '全部重新刮削' : '手动批量刮削' }} <span class="ml-2 text-xs" :class="row.running ? 'text-brand' : row.failed ? 'text-amber-400' : 'text-gray-400'">{{ phases[row.phase] || row.phase }}</span></p><p class="mt-1 text-xs text-gray-500">{{ date(row.started_at) }} · {{ row.job_id.slice(0, 8) }} <span v-if="row.parent_id">· 续接 {{ row.parent_id.slice(0, 8) }}</span></p></div>
+        <div><p class="text-sm font-medium text-gray-200">{{ kinds[row.kind] || row.kind }} <span class="ml-2 text-xs" :class="row.running ? 'text-brand' : row.failed ? 'text-amber-400' : 'text-gray-400'">{{ phases[row.phase] || row.phase }}</span></p><p class="mt-1 text-xs text-gray-500">{{ date(row.started_at) }} · {{ row.job_id.slice(0, 8) }} <span v-if="row.parent_id">· 续接 {{ row.parent_id.slice(0, 8) }}</span></p></div>
         <div class="flex flex-wrap items-center gap-2 text-xs">
           <button class="btn-ghost !text-xs" @click="openDetail(row.job_id, true)">查看明细</button>
           <button v-if="row.can_resume" class="btn-primary !text-xs" :disabled="busy || data.running" @click="resume(row, 'unfinished')">继续未完成</button>
@@ -103,5 +109,5 @@ onUnmounted(() => { disposed = true; revision++; clearTimeout(timer) })
       <p class="text-sm text-gray-300">删除后，此任务不再出现在历史和恢复选择中。影片、下载源及隔离备份会保留。</p>
       <div class="mt-5 flex justify-end gap-3"><button class="btn-ghost" :disabled="busy" @click="deleting = null">取消</button><button class="btn-primary" :disabled="busy" @click="remove">{{ busy ? '处理中…' : '确认删除记录' }}</button></div>
     </ModalDialog>
-  </section>
+  </PagePanel>
 </template>

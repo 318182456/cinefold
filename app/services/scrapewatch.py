@@ -145,7 +145,7 @@ def _scan(settings) -> int:
             _RETRY.pop(key, None)
 
     # 先分组再跳过已入库分集，保持分集编号与冲突消解稳定。
-    from app.services.scrapesources import group_entries, key, record_attempt
+    from app.services.scrapesources import group_entries, key
     entries = []
     from app.services.sourceidentity import SourceIdentityResolver
     identity_resolver = SourceIdentityResolver()
@@ -154,7 +154,7 @@ def _scan(settings) -> int:
         if code:
             entries.append({'path': str(path), 'code': code})
     groups = group_entries(entries)
-    processed = successful = 0
+    selected = {}
     for code, items in sorted(groups.items(), key=lambda pair: max(_RETRY.get(str(i.path), 0) for i in pair[1])):
         if code in downloading:
             continue
@@ -162,23 +162,21 @@ def _scan(settings) -> int:
             continue
         if all(i.trailer or key(i.path) not in failed and _complete(i.path, code, registered.get(str(i.path), []), settings.scrape_require_images) for i in items):
             continue
-        if processed >= max(1, min(100, settings.scrape_scan_limit)):
+        if len(selected) >= max(1, min(100, settings.scrape_scan_limit)):
             break
-        processed += 1
-        for item in items:
-            _RETRY[str(item.path)] = now + max(600, settings.scrape_scan_interval * 60)
-        try:
-            record_attempt(items, code, status='running')
+        selected[code] = items
+    if not selected:
+        return 0
+    from app.services.scrapehistory import AutomaticTask
+    successful = 0
+    with AutomaticTask(selected, settings, 'directory') as task:
+        for code, items in selected.items():
+            for item in items:
+                _RETRY[str(item.path)] = now + max(600, settings.scrape_scan_interval * 60)
             existing = {str(i.path): Path(registered[str(i.path)][0]) for i in items if registered.get(str(i.path))}
-            result = scrape.scrape_group(code, items, existing_targets=existing) if existing else scrape.scrape_group(code, items)
-            record_attempt(items, code, status='succeeded' if result.ok else 'failed', error=result.error)
-            if result.ok:
-                successful += 1
-            else:
+            result = task.process(code, items, **({'existing_targets':existing} if existing else {}))
+            successful += int(result.ok)
+            if not result.ok:
                 logger.warning(f"[{code}] 自动刮削未完成，将在后续扫描重试: {result.error}")
-        except Exception:
-            record_attempt(items, code, status='failed', error='自动刮削异常，请查看日志或手动重试')
-            logger.exception(f"[{code}] 自动刮削失败，将在后续扫描重试")
-    if processed:
-        logger.info(f"[自动刮削] 本轮处理 {processed} 个番号，成功 {successful} 个")
+    logger.info(f"[自动刮削] 本轮处理 {len(selected)} 个番号，成功 {successful} 个")
     return successful

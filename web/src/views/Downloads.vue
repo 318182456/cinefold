@@ -1,4 +1,5 @@
 <script setup>
+import PagePanel from '@/components/PagePanel.vue'
 import { computed, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import http from '@/api'
@@ -71,9 +72,13 @@ onUnmounted(() => { disposed = true; revision++; clearTimeout(timer) })
 </script>
 
 <template>
-  <div class="space-y-5">
+  <PagePanel content-class="space-y-5">
+    <template #header>
+
     <div class="flex flex-wrap items-center justify-between gap-3"><div><h1 class="text-xl font-semibold">下载管理</h1><p class="mt-1 text-sm text-gray-500">查看下载与做种状态、下载历史，并转移到 Transmission 长期做种。</p></div><button class="btn-ghost" :disabled="busy" @click="refresh">{{ busy ? '刷新中…' : '刷新状态' }}</button></div>
     <div class="flex gap-2"><button class="btn-ghost" :class="tab === 'live' ? 'text-brand' : ''" @click="switchTab('live')">实时任务</button><button class="btn-ghost" :class="tab === 'history' ? 'text-brand' : ''" @click="switchTab('history')">下载历史</button></div>
+    </template>
+
     <div v-if="tab === 'live'" class="grid grid-cols-2 gap-3 lg:grid-cols-6"><button v-for="[key,label] in STATES" :key="key" class="card text-left transition hover:border-brand/60" :class="state === key ? 'border-brand/50' : ''" @click="chooseState(key)"><p class="text-xs text-gray-500">{{ label }}</p><p class="mt-2 text-xl tabular-nums">{{ data.counts?.[key || 'all'] ?? '—' }}</p></button></div>
     <div v-if="tab === 'live'" class="flex flex-wrap gap-4 text-sm text-gray-400"><span>下载 ↓ {{ speed(data.download_speed) }}</span><span>上传 ↑ {{ speed(data.upload_speed) }}</span><span v-if="data.updated_at">快照 {{ date(data.updated_at) }}</span></div>
     <p v-if="tab === 'history'" class="text-xs text-gray-500">保留系统推送记录和此页读取过的任务快照，下载器移除任务后仍可查看。历史进度为最后一次观测值，未记录的旧任务不推算完成时间。</p>
@@ -95,5 +100,5 @@ onUnmounted(() => { disposed = true; revision++; clearTimeout(timer) })
     <section class="card space-y-3" aria-label="转移做种任务"><h2 class="font-medium">转移做种记录</h2><p v-if="transferError" class="text-sm text-red-400">{{ transferError }}</p><template v-if="current.job_id"><p class="text-sm text-gray-300">{{ current.running ? '后台转移中' : ({completed:'转移完成',partial:'部分失败',interrupted:'已中断',failed:'任务失败'})[current.phase] || current.phase }} · {{ current.results?.length || 0 }} / {{ current.hashes?.length || 0 }} · 成功 {{ successes(current) }} · 失败 {{ failures(current) }}</p><p v-if="current.current" class="break-all text-xs text-brand">正在处理 {{ current.current }}</p><p v-if="current.updated_at" class="text-xs text-gray-500">耗时 {{ elapsed }} · 最后进度 {{ date(current.updated_at) }} · 可以离开此页，任务在后台继续</p><p v-if="current.error" class="text-xs text-red-400">{{ current.error }}</p><button v-if="['partial','failed','interrupted'].includes(current.phase)" class="btn-primary !text-xs" :disabled="submitting || current.running || !!transferError" @click="start(true)">继续未完成 / 重试失败</button></template><p v-else class="text-xs text-gray-500">暂无手动转移记录。自动转移仍按设置中的周期执行。</p><details v-for="job in transfer.history" :key="job.job_id" class="border-t border-gray-800 pt-3"><summary class="cursor-pointer text-xs text-gray-400">{{ date(job.started_at) }} · {{ job.phase }} · 成功 {{ successes(job) }} / {{ job.hashes?.length || 0 }} · 查看结果</summary><p v-for="row in job.results || []" :key="row.hash" class="mt-2 break-all text-xs" :class="row.status === 'failed' ? 'text-red-400' : 'text-gray-500'">{{ row.hash }} · {{ {succeeded:'已转移',skipped:'未满足转移条件，已跳过',failed:'失败'}[row.status] }} {{ row.error }}</p></details></section>
     <ModalDialog v-model:open="confirm" title="转移到 Transmission 做种" :close-on-backdrop="!submitting" :close-on-esc="!submitting"><div class="space-y-4"><p class="text-sm text-gray-300">将所选 {{ selectedRows.length }} 个 qB 已完成任务交给 Transmission。使用已有文件并校验，按设置映射存储路径。</p><p v-for="row in selectedRows" :key="row.hash" class="break-all text-xs text-gray-500">{{ row.name }} · {{ row.save_path }}</p><label class="flex gap-2 text-sm"><input v-model="deleteSource" type="checkbox" :disabled="submitting">接管后移除 qB 源任务（保留视频文件）</label><div class="flex justify-end gap-3"><button class="btn-ghost" :disabled="submitting" @click="confirm=false">取消</button><button class="btn-primary" :disabled="submitting || !selectedRows.length || current.running" @click="start(false)">{{ submitting ? '启动中…' : '确认转移做种' }}</button></div></div></ModalDialog>
     <ModalDialog :open="!!detail" :title="detail?.name || '下载详情'" scrollable @update:open="value => {if(!value) detail=null}"><div v-if="detail" class="space-y-3 text-sm text-gray-400"><p>{{ names[detail.client] || '历史记录' }} · {{ detail.state }} · {{ progress(detail) }}</p><p class="break-all">Hash：{{ detail.hash }}</p><p class="break-all">存储目录：{{ detail.save_path || '未记录' }}</p><p v-if="detail.content_path" class="break-all">内容路径：{{ detail.content_path }}</p><p>大小 {{ size(detail.size) }} · 累计下载 {{ size(detail.downloaded) }} · 累计上传 {{ size(detail.uploaded) }}</p><p>添加 {{ date(detail.added_at) }} · 完成 {{ date(detail.completed_at) }}</p><p v-if="detail.last_seen">最后观测 {{ date(detail.last_seen) }}</p><p v-if="detail.code_status != null">系统影片状态：{{ CODE_STATES[detail.code_status] }}</p><RouterLink v-if="detail.code" :to="{name:'Search',query:{keyword:detail.code}}" class="text-brand">查看影片 {{ detail.code }} ↗</RouterLink></div></ModalDialog>
-  </div>
+  </PagePanel>
 </template>

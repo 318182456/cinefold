@@ -36,10 +36,9 @@ const routes = [
 const router = createRouter({
   history: createWebHistory(),
   routes,
-  // 桌面滚的是布局里的 <main>，不是 window，vue-router 的返回值对它无效，
-  // 得手动归零；移动端整页滚动才轮得到 window
+  // 路由内容在各自的局部容器滚动；页面外壳始终固定。
   scrollBehavior() {
-    document.querySelector('main')?.scrollTo({ top: 0 })
+    document.querySelectorAll('.page-panel-content').forEach(element => element.scrollTo({ top: 0 }))
     return { top: 0 }
   },
 })

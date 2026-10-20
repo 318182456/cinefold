@@ -1,4 +1,5 @@
 <script setup>
+import PagePanel from '@/components/PagePanel.vue'
 import { onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { getProfile, updateProfile, getLongToken, resetLongToken } from '@/api'
@@ -93,7 +94,7 @@ onMounted(load)
 </script>
 
 <template>
-  <div class="max-w-xl space-y-4">
+  <PagePanel content-class="space-y-4" class="max-w-xl">
     <div class="card space-y-4">
       <p class="text-sm font-medium text-gray-300">账户信息</p>
 
@@ -135,5 +136,5 @@ onMounted(load)
     <div class="card">
       <button class="btn-ghost w-full" @click="logout">退出登录</button>
     </div>
-  </div>
+  </PagePanel>
 </template>

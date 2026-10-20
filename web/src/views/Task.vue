@@ -1,4 +1,5 @@
 <script setup>
+import PagePanel from '@/components/PagePanel.vue'
 import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
 import { listCron, previewSchedule, runTask, translateTitles, updateSchedule } from '@/api'
 import http from '@/api'
@@ -195,11 +196,15 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="space-y-4">
+  <PagePanel content-class="space-y-4">
+    <template #header>
+
     <div class="flex flex-wrap gap-2">
       <button class="btn-ghost px-3 py-1.5 text-xs" @click="load">刷新</button>
       <button class="btn-ghost px-3 py-1.5 text-xs" @click="doTranslate">立即翻译标题</button>
     </div>
+    </template>
+
 
     <LoadingBlock v-if="loading && !jobs.length" :rows="4" />
 
@@ -302,5 +307,5 @@ onUnmounted(() => {
     </div>
 
     <EmptyState v-else text="没有已注册的任务" hint="调度器可能未正常启动" />
-  </div>
+  </PagePanel>
 </template>

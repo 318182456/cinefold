@@ -1,4 +1,5 @@
 <script setup>
+import PagePanel from '@/components/PagePanel.vue'
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import {
   batchDeleteMediaLinks, batchDropMediaLinkRecords, deleteMediaLink,
@@ -710,7 +711,9 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="space-y-4">
+  <PagePanel content-class="space-y-4">
+    <template #header>
+
     <!-- 概览 -->
     <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
       <button type="button" class="card text-left transition hover:border-brand/60 focus-visible:outline focus-visible:outline-brand" aria-label="查看关联总数明细" @click="openStat('all')">
@@ -766,6 +769,8 @@ onMounted(() => {
         </p>
       </div>
     </div>
+    </template>
+
 
     <!-- 未启用时说清楚删除按钮的实际行为，免得以为删了其实没删 -->
     <p v-if="!deleteEnabled" class="rounded-lg bg-amber-950/40 px-3 py-2 text-xs text-amber-300">
@@ -1418,7 +1423,7 @@ onMounted(() => {
       class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
       @click.self="confirming = null"
     >
-      <div class="card max-h-[80vh] w-full max-w-lg space-y-3 overflow-y-auto">
+      <div class="card max-h-[80dvh] w-full max-w-lg space-y-3 overflow-y-auto">
         <p class="text-sm font-medium text-gray-200">
           联动删除 <span class="font-mono text-brand">{{ confirming.code }}</span>
         </p>
@@ -1590,7 +1595,7 @@ onMounted(() => {
       class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
       @click.self="reviewPanel = null"
     >
-      <div class="card max-h-[80vh] w-full max-w-lg space-y-3 overflow-y-auto">
+      <div class="card max-h-[80dvh] w-full max-w-lg space-y-3 overflow-y-auto">
         <p class="text-sm font-medium text-gray-200">
           {{ reviewPanel.code }} 的 AI 看点
         </p>
@@ -1648,7 +1653,7 @@ onMounted(() => {
       class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
       @click.self="recoverPreview = null"
     >
-      <div class="card max-h-[80vh] w-full max-w-lg space-y-3 overflow-y-auto">
+      <div class="card max-h-[80dvh] w-full max-w-lg space-y-3 overflow-y-auto">
         <p class="text-sm font-medium text-gray-200">重建缺失的关联记录</p>
         <p class="text-[11px] text-gray-500">
           按番号从下载历史里找回源文件路径。补的是「纳入管理」配不上的那批 ——
@@ -1715,5 +1720,5 @@ onMounted(() => {
       </div>
     </div>
     <ScrapeMetadataDetail v-model:open="detailOpen" :row="detailRow" kind="link" :status-label="detailRow ? (detailRow.link_exists ? '硬链接存在' : '硬链接缺失') + ' · ' + (detailRow.source_exists === false || detailRow.source_gone ? '源文件已删' : '源文件存在') : ''" />
-  </div>
+  </PagePanel>
 </template>

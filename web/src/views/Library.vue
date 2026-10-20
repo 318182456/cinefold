@@ -1,4 +1,5 @@
 <script setup>
+import PagePanel from '@/components/PagePanel.vue'
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import http, { codeCover, getConfig, saveConfig } from '@/api'
@@ -91,8 +92,12 @@ function clearFilters() {
 onMounted(() => perform(reloadCollections))
 </script>
 <template>
-  <div class="space-y-5">
+  <PagePanel content-class="space-y-5">
+    <template #header>
+
     <div class="flex flex-wrap items-center justify-between gap-3"><div><h1 class="text-xl font-semibold">媒体库</h1><p class="mt-1 text-sm text-gray-500">管理本地收藏与片单，在 Emby 中观看。</p></div><div class="flex flex-wrap gap-2"><button class="btn-ghost" @click="configureEmby">同步 Emby</button><button class="btn-primary" @click="newCollection()">新建片单</button></div></div>
+    </template>
+
     <section class="card space-y-3" aria-label="合集与片单">
       <div class="flex items-center justify-between"><h2 class="text-sm font-medium text-gray-300">合集与片单 <span class="ml-2 text-xs text-gray-500">{{ collections.length + systemCollections.length }} 个片单 · {{ embyCollections.length }} 个 Emby 合集</span></h2><button class="text-xs text-brand" @click="reloadCollections">刷新列表</button></div>
       <div class="grid grid-cols-2 gap-2 lg:grid-cols-4"><button v-for="item in systemCollections" :key="item.key" class="rounded-lg border p-3 text-left" :class="filters.collection_id === `system:${item.key}` ? 'border-brand/60 bg-brand/5' : 'border-gray-800 hover:bg-gray-800/50'" @click="chooseCollection(`system:${item.key}`)"><p class="text-sm text-gray-300">{{ item.name }}</p><p class="mt-1 text-xs text-gray-500">{{ item.description }}</p></button></div>
@@ -149,5 +154,5 @@ onMounted(() => perform(reloadCollections))
     </ModalDialog>
     <ModalDialog v-model:open="collectionOpen" title="片单" size="xl" scrollable><form class="space-y-4" @submit.prevent="saveCollection"><label><span class="label">名称</span><input v-model="collectionForm.name" class="input" required maxlength="128"></label><select v-model="collectionForm.kind" class="input" :disabled="!!collectionEditing"><option value="manual">手动收录</option><option value="smart">按条件自动收录</option></select><template v-if="collectionForm.kind === 'smart'"><MetadataConditions v-model="collectionForm.conditions" /><div class="grid gap-3 sm:grid-cols-2"><label><span class="label">条件组合</span><select v-model="collectionForm.conditions.op" class="input" aria-label="片单条件组合"><option value="AND">全部满足（AND）</option><option value="OR">满足任一（OR）</option></select></label><label><span class="label">最低个人评分</span><input v-model.number="collectionForm.conditions.min_rating" type="number" min="0" max="10" step="0.5" class="input" aria-label="最低个人评分" placeholder="不限"></label><label><span class="label">片单排序</span><select v-model="collectionForm.conditions.sort" class="input" aria-label="片单排序"><option v-for="[key,label] in [['recent','最近更新'],['added','最近入库'],['rating','个人评分'],['plays','播放最多'],['casts','出演人数'],['release','最新发行'],['size','文件体积']]" :key="key" :value="key">{{ label }}</option></select></label></div><div class="flex flex-wrap gap-4"><label v-for="[key,label] in [['favorite','本地收藏'],['watch_later','想看'],['watched','已看完'],['unwatched','未看完']]" :key="key" class="flex items-center gap-2 text-sm"><input type="checkbox" :checked="(collectionForm.conditions.states || []).includes(key)" @change="setCollectionState(key,$event.target.checked)">{{ label }}</label></div><p class="text-xs text-gray-500">最低评分单独生效；其余非空条件按组合方式匹配。片单自动更新，无需指定影片个数。</p></template><button class="btn-primary">保存片单</button></form></ModalDialog>
     <ModalDialog v-model:open="embyOpen" title="同步 Emby 观看状态"><div class="space-y-4"><p class="text-sm text-gray-400">选择用于统计的 Emby 用户。同步只读取 Emby，不修改播放进度；之后每 30 分钟自动更新。</p><select v-model="embyUser" class="input"><option value="">选择用户</option><option v-for="u in embyUsers" :key="u.id" :value="u.id">{{ u.name }}</option></select><button class="btn-primary" :disabled="embySyncing || !embyUser" @click="syncEmby">{{ embySyncing ? '同步中…' : '保存并同步' }}</button></div></ModalDialog>
-  </div>
+  </PagePanel>
 </template>

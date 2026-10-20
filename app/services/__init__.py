@@ -931,7 +931,6 @@ def _scrape_just_completed(client, hashes: list[str]) -> None:
 
     from pathlib import Path
 
-    from app.services import scrape as scrape_service
     from app.services.medialink import is_adoptable_video
     from app.utils import mediafile
 
@@ -963,11 +962,13 @@ def _scrape_just_completed(client, hashes: list[str]) -> None:
         else:
             logger.warning(f"[刮削] 认不出番号，跳过: {info.path}")
 
-    for code, items in groups.items():
-        try:
-            scrape_service.scrape_group(code, items)
-        except Exception as exc:
-            logger.warning(f"[{code}] 自动刮削失败: {exc}")
+    if groups:
+        from app.services.scrapehistory import AutomaticTask
+        with AutomaticTask(groups, get_settings(), 'download') as task:
+            for code, items in groups.items():
+                result = task.process(code, items)
+                if not result.ok:
+                    logger.warning(f"[{code}] 自动刮削失败: {result.error}")
 
 
 def _limit_bt_upload(client, hashes: list[str]) -> None:

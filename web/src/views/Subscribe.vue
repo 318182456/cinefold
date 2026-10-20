@@ -1,4 +1,5 @@
 <script setup>
+import PagePanel from '@/components/PagePanel.vue'
 import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { listCodes } from '@/api'
@@ -60,7 +61,9 @@ watch(page, load)
 </script>
 
 <template>
-  <div class="space-y-4">
+  <PagePanel content-class="space-y-4">
+    <template #header>
+
     <div class="flex flex-wrap gap-2">
       <button
         v-for="tab in TABS"
@@ -74,6 +77,8 @@ watch(page, load)
     </div>
 
     <SelectionBar v-if="items.length" :sel="sel" action="cancel" />
+    </template>
+
 
     <LoadingBlock v-if="loading" :rows="4" />
 
@@ -102,5 +107,5 @@ watch(page, load)
     </template>
 
     <EmptyState v-else text="这里还没有内容" hint="可以在搜索页添加订阅" />
-  </div>
+  </PagePanel>
 </template>

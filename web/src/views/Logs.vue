@@ -54,8 +54,8 @@ onUnmounted(() => clearInterval(timer))
 </script>
 
 <template>
-  <div class="flex flex-col gap-3 lg:h-full">
-    <div class="flex flex-wrap items-center gap-2">
+  <div class="flex h-full min-h-0 min-w-0 flex-col gap-3 overflow-hidden">
+    <div class="flex max-h-[45%] shrink-0 flex-wrap items-center gap-2 overflow-auto">
       <input
         v-model="keyword"
         class="input w-full sm:w-64"
@@ -83,7 +83,9 @@ onUnmounted(() => clearInterval(timer))
     <div
       v-if="filtered.length"
       ref="box"
-      class="h-[60vh] overflow-auto rounded-xl border border-gray-800 bg-black/40 p-3 lg:h-auto lg:min-h-0 lg:flex-1"
+      class="min-h-0 flex-1 overflow-auto overscroll-contain rounded-xl border border-gray-800 bg-black/40 p-3"
+      tabindex="0"
+      aria-label="日志内容"
     >
       <pre
         v-for="(line, index) in filtered"

@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import time
 import threading
+import uuid
 
 from loguru import logger
 from sqlalchemy import func, select
@@ -16,6 +17,57 @@ from app.utils import get_true_code
 
 _ACTIVE = {'running', 'checking', 'quarantine', 'backup', 'clearing', 'rebuilding'}
 _INDEX_LOCK = threading.Lock()
+_AUTOMATIC_LOCK = threading.Lock()
+_AUTOMATIC = set()
+
+
+class AutomaticTask:
+    """Persist automatic batches through the same history contract as manual tasks."""
+    def __init__(self, groups, settings, trigger):
+        self.groups = groups
+        self.job_id = uuid.uuid4().hex
+        self.options = dict(overwrite=settings.scrape_overwrite, refresh_metadata=False,
+                            fetch_meta=True, force=False, trigger=trigger)
+        self.state = dict(job_id=self.job_id, phase='running', total=len(groups), done=0, ok=0)
+
+    def __enter__(self):
+        with _AUTOMATIC_LOCK:
+            _AUTOMATIC.add(self.job_id)
+        try:
+            begin(self.job_id, 'automatic', [dict(path=str(item.path), code=code)
+                for code, items in self.groups.items() for item in items], self.options, len(self.groups))
+            return self
+        except BaseException:
+            with _AUTOMATIC_LOCK:
+                _AUTOMATIC.discard(self.job_id)
+            raise
+
+    def process(self, code, items, **kwargs):
+        from app.services import scrape, scrapesources
+        scrapesources.record_attempt(items, code, status='running', job_id=self.job_id)
+        try:
+            result = scrape.scrape_group(code, items, **kwargs)
+        except Exception as exc:
+            logger.exception(f'[{code}] 自动刮削失败')
+            result = scrape.ScrapeResult(code=code, error=str(exc) or type(exc).__name__)
+        scrapesources.record_attempt(items, code, status='succeeded' if result.ok else 'failed',
+                                    job_id=self.job_id, error=result.error)
+        record(self.job_id, dict(code=code, ok=result.ok, paths=[str(item.path) for item in items],
+            links=[str(path) for path in result.links], error=result.error, warnings=result.warnings,
+            sources=result.sources, nfo_written=result.nfo_written, images_written=result.images_written))
+        self.state['done'] += 1
+        self.state['ok'] += int(result.ok)
+        sync(self.state, 'automatic')
+        return result
+
+    def __exit__(self, exc_type, exc, traceback):
+        try:
+            phase = 'failed' if exc_type else 'completed' if self.state['done']==self.state['ok']==self.state['total'] else 'partial'
+            sync({**self.state, 'phase':phase, 'finished_at':time.time(),
+                  'error':str(exc) if exc else ''}, 'automatic')
+        finally:
+            with _AUTOMATIC_LOCK:
+                _AUTOMATIC.discard(self.job_id)
 
 
 def _best_effort(function):
@@ -78,7 +130,9 @@ def _live():
     from app.services import scraperebuild, scrapesources
     rebuild = scraperebuild.state()
     manual = scrapesources.state()
-    return {row.get('job_id') or '__preview__' for row in (rebuild, manual) if row.get('running')}
+    with _AUTOMATIC_LOCK:
+        automatic = set(_AUTOMATIC)
+    return automatic | {row.get('job_id') or '__preview__' for row in (rebuild, manual) if row.get('running')}
 
 
 def _legacy():
@@ -111,8 +165,8 @@ def _plain(row, live):
     return {key:getattr(row,key) for key in ('job_id','kind','parent_id','total','done','ok','error',
             'quarantine_dir','started_at','finished_at')} | {
         'phase':phase, 'running':running, 'failed':max(0,row.done-row.ok), 'pending':max(0,row.total-row.done),
-        'can_resume':not running and phase != 'completed' and (row.kind=='manual' or bool(row.quarantine_dir)),
-        'can_retry_failed':not running and row.done>row.ok and (row.kind=='manual' or bool(row.quarantine_dir))}
+        'can_resume':not running and phase != 'completed' and (row.kind in ('manual','automatic') or bool(row.quarantine_dir)),
+        'can_retry_failed':not running and row.done>row.ok and (row.kind in ('manual','automatic') or bool(row.quarantine_dir))}
 
 
 def listing(page=1, size=20):

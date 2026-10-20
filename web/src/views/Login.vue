@@ -93,9 +93,8 @@ onMounted(async () => {
 </script>
 
 <template>
-  <!-- min-h 而不是 h：移动端 #app 没有确定高度，h-full 会塌成 0 -->
-  <div class="flex min-h-screen items-center justify-center px-4 lg:h-full lg:min-h-0 lg:overflow-y-auto">
-    <div class="w-full max-w-sm">
+  <div class="flex h-full min-h-0 overflow-auto px-4 py-6">
+    <div class="m-auto w-full max-w-sm shrink-0">
       <div class="mb-8 flex flex-col items-center gap-3">
         <AppLogo :size="48" />
         <h1 class="text-xl font-semibold tracking-tight">cinefold</h1>

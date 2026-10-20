@@ -1,4 +1,5 @@
 <script setup>
+import PagePanel from '@/components/PagePanel.vue'
 import { computed, onMounted, ref, watch } from 'vue'
 import { getBrands, getBrandCodes } from '@/api'
 import { useToast } from '@/composables/useToast'
@@ -109,7 +110,9 @@ onMounted(load)
 </script>
 
 <template>
-  <div class="space-y-4">
+  <PagePanel content-class="space-y-4">
+    <template #header>
+
     <!-- 厂牌切换 -->
     <div class="flex flex-wrap gap-2">
       <button
@@ -123,6 +126,8 @@ onMounted(load)
         {{ brand.label }}
       </button>
     </div>
+    </template>
+
 
     <LoadingBlock v-if="loading && !brands.length" :rows="3" />
 
@@ -243,5 +248,5 @@ onMounted(load)
         </span>
       </div>
     </div>
-  </div>
+  </PagePanel>
 </template>

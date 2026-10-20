@@ -1,4 +1,5 @@
 <script setup>
+import PagePanel from '@/components/PagePanel.vue'
 import { computed, onMounted, ref, watch } from 'vue'
 import { getRecommend } from '@/api'
 import { useToast } from '@/composables/useToast'
@@ -45,10 +46,14 @@ onMounted(load)
 </script>
 
 <template>
-  <div class="space-y-4">
+  <PagePanel content-class="space-y-4">
+    <template #header>
+
     <p class="text-xs text-gray-500">按评分排序的未订阅番号</p>
 
     <SelectionBar v-if="items.length" :sel="sel" />
+    </template>
+
 
     <LoadingBlock v-if="loading" :rows="4" />
 
@@ -77,5 +82,5 @@ onMounted(load)
     </template>
 
     <EmptyState v-else text="暂无推荐" hint="等待抓取任务补全番号评分后会出现" />
-  </div>
+  </PagePanel>
 </template>

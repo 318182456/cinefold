@@ -1,4 +1,5 @@
 <script setup>
+import PagePanel from '@/components/PagePanel.vue'
 import { onMounted, ref } from 'vue'
 import http from '@/api'
 import { useToast } from '@/composables/useToast'
@@ -27,8 +28,12 @@ async function remove(type, row) { if (!window.confirm(`删除「${row.name}」�
 onMounted(() => perform(load))
 </script>
 <template>
-  <div class="space-y-6">
+  <PagePanel content-class="space-y-6">
+    <template #header>
+
     <div class="flex flex-wrap items-center justify-between gap-3"><div><h1 class="text-xl font-semibold">条件订阅</h1><p class="mt-1 text-sm text-gray-500">从资料库匹配新片，随订阅下载任务自动执行。多条规则命中时使用最早创建的规则。</p></div><button class="btn-primary" :disabled="busy" @click="edit('rule')">新建规则</button></div>
+    </template>
+
     <div class="card space-y-3">
       <p v-if="!rules.length" class="text-sm text-gray-500">还没有规则。可以追踪标签、厂牌、系列或番号前缀。</p>
       <div v-for="row in rules" :key="row.id" class="flex flex-wrap items-center gap-3 border-b border-gray-800 py-3 last:border-0">
@@ -64,5 +69,5 @@ onMounted(() => perform(load))
         <div class="flex justify-end gap-2"><button type="button" class="btn-ghost" @click="open = false">取消</button><button class="btn-primary" :disabled="busy">保存</button></div>
       </form>
     </ModalDialog>
-  </div>
+  </PagePanel>
 </template>

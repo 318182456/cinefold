@@ -1,4 +1,5 @@
 <script setup>
+import PagePanel from '@/components/PagePanel.vue'
 import { onMounted, onUnmounted, reactive, ref } from 'vue'
 import { getImageCacheStats, bulkCancelSubscribe, getDashboard, redetectPortrait, getRedetectProgress } from '@/api'
 import { useToast } from '@/composables/useToast'
@@ -135,7 +136,7 @@ onUnmounted(stopPortraitPolling)
 </script>
 
 <template>
-  <div class="space-y-4">
+  <PagePanel content-class="space-y-4">
     <!-- 图片缓存概览 -->
     <div v-if="imageCache" class="card space-y-1">
       <p class="text-sm font-medium text-gray-300">图片缓存</p>
@@ -265,5 +266,5 @@ onUnmounted(stopPortraitPolling)
       </div>
     </div>
 
-  </div>
+  </PagePanel>
 </template>

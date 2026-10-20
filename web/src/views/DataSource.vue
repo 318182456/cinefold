@@ -1,4 +1,5 @@
 <script setup>
+import PagePanel from '@/components/PagePanel.vue'
 import { computed, onMounted, ref } from 'vue'
 import {
   checkAllDataSources, checkDataSource, createDataSource, deleteDataSource,
@@ -313,7 +314,9 @@ onMounted(load)
 </script>
 
 <template>
-  <div class="space-y-4">
+  <PagePanel content-class="space-y-4">
+    <template #header>
+
     <div class="flex flex-wrap items-center gap-2">
       <p class="text-xs text-gray-500">点击卡片可改地址、请求间隔与 Cookie</p>
       <button class="btn-ghost ml-auto px-3 py-1.5 text-xs" @click="openCreate">
@@ -327,6 +330,8 @@ onMounted(load)
         {{ checkingAll ? '测试中…' : '测试全部' }}
       </button>
     </div>
+    </template>
+
 
     <LoadingBlock v-if="loading" :rows="4" />
 
@@ -704,5 +709,5 @@ onMounted(load)
         </div>
       </div>
     </div>
-  </div>
+  </PagePanel>
 </template>

@@ -82,10 +82,10 @@ onBeforeUnmount(() => {
       @click.self="onBackdrop"
     >
       <div
-        class="card w-full space-y-3"
+        class="card w-full space-y-3 overflow-y-auto overscroll-contain"
+        :style="{ maxHeight: scrollable ? '85dvh' : 'calc(100dvh - 2rem)' }"
         :class="[
           SIZES[size] || SIZES.md,
-          scrollable ? 'max-h-[85vh] overflow-y-auto' : '',
         ]"
       >
         <!-- 标题栏。给了 title 就渲染，否则整块交给 default 插槽 -->

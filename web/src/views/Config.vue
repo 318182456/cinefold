@@ -1157,13 +1157,12 @@ onUnmounted(stopUpgradePoll)
 </script>
 
 <template>
-  <div class="gap-4 lg:flex lg:items-start">
+  <div class="flex h-full min-h-0 min-w-0 flex-col gap-4 overflow-hidden lg:flex-row">
     <!-- 分组导航。窄屏横向滚动一排，宽屏收成左侧竖栏。
          宽屏时右侧内容很长，导航 sticky 钉在顶上不跟着滚；自身超过一屏才内部滚动 -->
     <nav
-      class="-mx-1 mb-4 flex gap-4 overflow-x-auto px-1 pb-2 lg:sticky lg:top-0 lg:mx-0 lg:mb-0
-             lg:max-h-[calc(100vh-3rem)] lg:w-44 lg:shrink-0 lg:flex-col lg:gap-4
-             lg:overflow-y-auto lg:pb-0"
+      class="flex max-h-[35%] shrink-0 gap-4 overflow-auto overscroll-contain px-1 pb-2 lg:max-h-full
+             lg:w-44 lg:flex-col lg:pb-0"
     >
       <div v-for="cat in CATEGORIES" :key="cat.key" class="shrink-0 lg:shrink">
         <p class="mb-1.5 px-1 text-[11px] font-medium uppercase tracking-wide text-gray-600">
@@ -1183,7 +1182,7 @@ onUnmounted(stopUpgradePoll)
       </div>
     </nav>
 
-    <div class="min-w-0 flex-1 space-y-4">
+    <div class="min-h-0 min-w-0 flex-1 space-y-4 overflow-auto overscroll-contain" tabindex="0" aria-label="设置内容">
     <LoadingBlock v-if="loading" :rows="6" />
 
     <template v-else>

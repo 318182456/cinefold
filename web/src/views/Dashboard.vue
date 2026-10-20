@@ -1,4 +1,5 @@
 <script setup>
+import PagePanel from '@/components/PagePanel.vue'
 import { onMounted, ref } from 'vue'
 import { getDashboard, getReleaseToday, downloadAll } from '@/api'
 import { useToast } from '@/composables/useToast'
@@ -60,7 +61,9 @@ onMounted(load)
 </script>
 
 <template>
-  <div class="space-y-6">
+  <PagePanel content-class="space-y-6">
+    <template #header>
+
     <!-- 统计 -->
     <div class="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
       <RouterLink v-for="tile in TILES" :key="tile.key" :to="tile.to" class="card transition hover:border-brand/60 hover:bg-brand/5 focus-visible:outline focus-visible:outline-brand" :aria-label="`查看${tile.label} ${stats?.[tile.key] ?? ''}`" :title="`查看${tile.label}明细`">
@@ -77,6 +80,8 @@ onMounted(load)
       </button>
       <button class="btn-ghost" @click="load">刷新</button>
     </div>
+    </template>
+
 
     <!-- 今日上新 -->
     <section>
@@ -98,5 +103,5 @@ onMounted(load)
       </div>
       <EmptyState v-else text="今天还没有新片" hint="数据来自定时抓取任务" />
     </section>
-  </div>
+  </PagePanel>
 </template>

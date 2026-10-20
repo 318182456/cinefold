@@ -1,4 +1,5 @@
 <script setup>
+import PagePanel from '@/components/PagePanel.vue'
 import { computed, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { getRank, getRankSubscription, refreshRank, subscribeRank, subscribeCode } from '@/api'
@@ -116,7 +117,9 @@ onUnmounted(() => { disposed=true; request++; pollRequest++; clearTimeout(timer)
 </script>
 
 <template>
-  <div class="space-y-4">
+  <PagePanel content-class="space-y-4">
+    <template #header>
+
     <div class="flex flex-wrap items-center gap-2">
       <button
         v-for="type in TYPES"
@@ -132,6 +135,8 @@ onUnmounted(() => { disposed=true; request++; pollRequest++; clearTimeout(timer)
         {{ subscribing || subscription.running ? '正在订阅…' : '一键订阅当前榜单' }}
       </button>
     </div>
+    </template>
+
 
     <div v-if="rankInfo.refreshing || rankInfo.fetched_at || rankInfo.error || rankError" class="rounded-lg border border-gray-800 p-3 text-xs text-gray-400 space-y-2"><p v-if="rankInfo.refreshing" class="text-brand">正在后台读取{{ TYPES.find(item => item.value === rankType)?.label }}，可以离开此页。{{ items.length ? '先显示已有榜单，获取成功后自动更新。' : '正在获取排名，缺少的影片资料会随后补齐。' }}</p><p v-if="rankInfo.fetched_at">榜单获取时间：{{ new Date(rankInfo.fetched_at*1000).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai'}) }}<span v-if="rankInfo.stale" class="text-amber-400"> · 旧快照</span></p><p v-if="rankInfo.error || rankError" class="text-amber-400">{{ rankError || rankInfo.error }}{{ items.length ? '，当前保留上次榜单。' : '' }}</p></div>
     <div v-if="subscription.phase !== 'idle' || subscriptionError" class="card space-y-2 text-xs text-gray-400"><p>{{ ({queued:'排队中',running:'正在订阅',completed:'订阅处理完成',partial:'部分订阅失败',interrupted:'任务已中断',failed:'任务失败'})[subscription.phase] || subscription.phase }}<span v-if="subscription.total != null"> · {{ subscription.done || 0 }} / {{ subscription.total }} 部 · 新增 {{ subscription.subscribed || 0 }} · 已订阅/下载中/已入库 {{ subscription.existing || 0 }} · 被过滤 {{ subscription.filtered || 0 }}</span></p><p v-if="subscription.current" class="text-brand">{{ subscription.current }}</p><p v-if="subscription.error || subscriptionError" class="text-red-400">{{ subscription.error || subscriptionError }}</p><p v-for="row in subscription.failures || []" :key="row.code" class="text-red-400">{{ row.code }} · {{ row.error }}</p><p v-if="subscription.running">任务在后台执行，完成后卡片会自动更新；也可以离开此页。</p></div>
@@ -192,5 +197,5 @@ onUnmounted(() => { disposed=true; request++; pollRequest++; clearTimeout(timer)
       :text="rankInfo.refreshing ? '正在获取榜单' : rankError || rankInfo.error ? '榜单暂时无法更新' : '暂无榜单'"
       :hint="rankInfo.refreshing ? '后台完成后自动显示，无需反复刷新' : '源站不可达时保留旧榜单；可点击刷新榜单重试，并检查代理与过盾服务'"
     />
-  </div>
+  </PagePanel>
 </template>

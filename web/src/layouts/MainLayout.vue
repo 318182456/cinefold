@@ -75,8 +75,7 @@ const groups = [{ title: '工作区', items: [
 ] }]
 const activeWorkspace = computed(() => groups[0].items.find(item => item.name === route.name || item.pages.some(page => page.name === route.name)))
 
-// 移动端整页可滚后，抽屉打开时背景还能跟着滑。锁住 body 的滚动，
-// 关掉再放开。桌面 body 本来就不滚，这条无影响
+// 抽屉打开时保持页面外壳锁定。
 watch(menuOpen, (open) => {
   document.body.classList.toggle('overflow-hidden', open)
 })
@@ -105,7 +104,7 @@ onMounted(async () => {
 </script>
 
 <template>
-  <div class="lg:flex lg:h-full lg:overflow-hidden">
+  <div class="flex h-full min-h-0 overflow-hidden">
     <!-- 移动端遮罩 -->
     <div
       v-if="menuOpen"
@@ -169,10 +168,8 @@ onMounted(async () => {
     </aside>
 
     <!-- 主区 -->
-    <div class="flex min-w-0 flex-1 flex-col">
-      <!-- 移动端整页滚动，头部改成 sticky 才能跟着留在顶上；桌面外壳不滚，
-           sticky 无副作用。h 用 min-h + 顶部安全区内边距：装成 PWA 后状态栏
-           是半透明的，内容会顶到它下面，不留这段就被系统时间盖住 -->
+    <div class="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+      <!-- 顶部导航保留安全区，内容在下方局部滚动。 -->
       <header
         class="sticky top-0 z-20 flex min-h-14 shrink-0 items-center gap-3 border-b border-gray-800 bg-gray-950/90 px-4 pt-[env(safe-area-inset-top)] backdrop-blur lg:px-6"
       >
@@ -187,12 +184,12 @@ onMounted(async () => {
         <PrivacyToggle class="ml-auto" />
       </header>
 
-      <!-- 滚动容器只在桌面生效，移动端交给 body 滚。
-           pb 留出底部安全区，免得内容被 iPhone 的 home indicator 压住 -->
-      <main class="flex-1 p-4 pb-[calc(1rem+env(safe-area-inset-bottom))] lg:min-h-0 lg:overflow-y-auto lg:p-6">
-        <nav v-if="activeWorkspace?.pages.length > 1" class="mb-5 flex gap-1 overflow-x-auto rounded-xl border border-gray-800 bg-gray-900/50 p-1" :aria-label="`${activeWorkspace.label}功能`">
+      <!-- 工作区导航固定，路由页面负责自己的内容滚动。 -->
+      <main class="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden p-4 pb-[calc(1rem+env(safe-area-inset-bottom))] lg:p-6">
+        <nav v-if="activeWorkspace?.pages.length > 1" class="mb-5 flex shrink-0 gap-1 overflow-x-auto rounded-xl border border-gray-800 bg-gray-900/50 p-1" :aria-label="`${activeWorkspace.label}功能`">
           <RouterLink v-for="page in activeWorkspace.pages" :key="page.name" :to="{ name: page.name }" class="shrink-0 rounded-lg px-3 py-2 text-sm transition" :class="route.name === page.name ? 'bg-brand/10 text-brand' : 'text-gray-500 hover:bg-gray-800 hover:text-gray-300'" :aria-current="route.name === page.name ? 'page' : undefined">{{ page.label }}</RouterLink>
         </nav>
+        <div class="min-h-0 min-w-0 flex-1 overflow-hidden">
         <RouterView v-slot="{ Component }">
           <Transition
             enter-active-class="transition duration-150"
@@ -202,6 +199,7 @@ onMounted(async () => {
             <component :is="Component" />
           </Transition>
         </RouterView>
+        </div>
       </main>
     </div>
 

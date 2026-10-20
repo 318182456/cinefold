@@ -1,4 +1,5 @@
 <script setup>
+import PagePanel from '@/components/PagePanel.vue'
 import { computed, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
@@ -232,7 +233,7 @@ onUnmounted(() => { disposed = true; clearTimeout(photoTimer); directoryRequest 
 </script>
 
 <template>
-  <div class="space-y-5">
+  <PagePanel content-class="space-y-5">
     <div v-if="photos.running || photos.done || photoError" class="flex flex-wrap items-center gap-3 rounded-lg bg-gray-800/40 p-3 text-xs text-gray-400">
       <span>{{ photos.running ? '后台补全姓名与头像' : '姓名与头像补全结果' }} · {{ photos.done || 0 }}/{{ photos.total || 0 }} · 头像成功 {{ photos.ok || 0 }} · 头像未找到 {{ photos.failed || 0 }}</span>
       <span v-if="photos.updated_at">更新于 {{ new Date(photos.updated_at * 1000).toLocaleTimeString() }}</span>
@@ -302,5 +303,5 @@ onUnmounted(() => { disposed = true; clearTimeout(photoTimer); directoryRequest 
         <div v-if="worksTotal" class="flex items-center justify-end gap-3 text-xs text-gray-500"><span>{{ worksPage }} / {{ worksPages }} 页 · {{ worksTotal }} 部</span><button class="btn-ghost !text-xs" :disabled="profileLoading || worksPage <= 1" @click="turnWorksPage(-1)">上一页</button><button class="btn-ghost !text-xs" :disabled="profileLoading || worksPage >= worksPages" @click="turnWorksPage(1)">下一页</button></div>
       </section>
     </template>
-  </div>
+  </PagePanel>
 </template>
