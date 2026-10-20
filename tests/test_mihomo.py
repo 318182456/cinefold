@@ -20,6 +20,9 @@ from app.services.mihomo import Mihomo
 def manager(tmp_path, monkeypatch):
     value = Mihomo(tmp_path)
     monkeypatch.setattr(mihomo, "_instance", value)
+    from app.modules.ladysite import base
+    monkeypatch.setattr(base, "_BYPASS_RECOVERY", {})
+    monkeypatch.setattr(base, "_BYPASS_QUEUES", {})
     yield value
     value.shutdown()
 
@@ -596,3 +599,54 @@ def test_saving_replacement_subscription_refreshes_nodes_and_keeps_group_rule(ma
     assert manager.config["selected"] == "JP-new"
     assert manager.config["source_groups"] == {"dmm": "日本节点"}
     assert Mihomo(manager.root).status()["default_groups"]["日本节点"] == ["JP-new"]
+
+
+def test_failed_site_requeues_behind_waiting_site_between_proxy_attempts(manager, monkeypatch):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    from app.modules.ladysite import base
+    from app.modules.ladysite.transport import BrowserQueue
+    from tests.test_bypass_queue import queued
+
+    manager.nodes = nodes()
+    manager.config.update(enabled=True, selected="Japan")
+    gate = BrowserQueue(1)
+    monkeypatch.setattr(base, "_BYPASS_QUEUES", {"http://trawl/v1": gate})
+    slow_entered, release_slow = threading.Event(), threading.Event()
+    order = []
+
+    def respond(request):
+        host = httpx.URL(json.loads(request.content)["url"]).host
+        order.append(host)
+        if len(order) == 1:
+            slow_entered.set()
+            assert release_slow.wait(2)
+            return httpx.Response(500, json={"status": "error", "message": "goto: Timeout 30000ms exceeded."})
+        return httpx.Response(200, json={"status": "ok", "solution": {"status": 200, "response": "good"}})
+
+    with httpx.Client(transport=httpx.MockTransport(respond)) as c, ThreadPoolExecutor(2) as pool:
+        slow = pool.submit(base._fetch_bypass_response, c, "http://trawl/v1", "https://slow.example/", "", 90000)
+        try:
+            assert slow_entered.wait(1)
+            healthy = pool.submit(base._fetch_bypass_response, c, "http://trawl/v1", "https://healthy.example/", "", 90000)
+            queued(gate, 1)
+        finally:
+            release_slow.set()
+        assert slow.result(timeout=3) == healthy.result(timeout=3) == "good"
+    assert order == ["slow.example", "healthy.example", "slow.example"]
+    assert gate.active == 0 and not manager.allocated
+
+
+def test_quick_check_gives_one_node_the_full_short_solve_window(manager):
+    from app.modules.ladysite import base
+    manager.nodes = nodes()
+    manager.config.update(enabled=True, selected="Japan")
+    requests = []
+
+    def respond(request):
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, json={"status": "ok", "solution": {"status": 200, "response": "good"}})
+
+    with httpx.Client(transport=httpx.MockTransport(respond)) as c:
+        assert base._fetch_bypass_response(c, "http://trawl/v1", "https://check.example/", "", 20000, quick=True) == "good"
+    assert len(requests) == 1 and 19000 <= requests[0]["maxTimeout"] <= 20000

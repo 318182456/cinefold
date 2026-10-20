@@ -24,10 +24,9 @@ DETAIL_SITES = (
     "avmoo", "dmm", "airav", "7mmtv", "hbox", "xchina",
 )
 
-# 一次抓取最多同时问几个站。源多了不能全铺开：过盾服务本身是串行的
-# （base._BYPASS_LOCK），排在后面的过盾请求只会干等；线程再多也没用，
-# 反而把连接数与内存吃掉。取最快结果的策略下，前几个站命中即可返回。
-MAX_PARALLEL_SITES = 6
+# 每部影片限制同时查询三个源，避免批量补全将浏览器队列一次铺满。
+# 直连请求仍可并行；浏览器请求由 transport.BrowserQueue 统一调度。
+MAX_PARALLEL_SITES = 3
 DETAIL_TIMEOUT_SECONDS = 120.0
 
 # 实现了 search_actor 的源。其余源查演员必然空手而归，
@@ -208,13 +207,15 @@ def get_code_detail(code: str) -> dict:
     光看结果分不清是"番号不存在"还是"源被规则过滤光了/全都超时"，
     没有这些日志只能靠猜。
     """
+    from app.modules.ladysite.transport import DetailResult
+
     if not code:
-        return {}
+        return DetailResult()
 
     sites = _sites_for_code(code)
     if not sites:
         logger.warning(f"[{code}] 没有可用数据源，检查数据源开关与番号规则")
-        return {}
+        return DetailResult()
 
     logger.info(f"[{code}] 检索数据源（共 {len(sites)} 个）：{', '.join(sites)}")
     started = time.perf_counter()
@@ -223,13 +224,14 @@ def get_code_detail(code: str) -> dict:
     from app.modules.ladysite.transport import FetchBudget, FetchCancelled
 
     budget = FetchBudget(started + DETAIL_TIMEOUT_SECONDS)
+    retryable = False
 
     def fetch(name):
         try:
             with budget.activate():
                 return _fetch_detail(name, code)
         except FetchCancelled:
-            return {}
+            return DetailResult()
 
     pool = ThreadPoolExecutor(max_workers=min(len(sites), MAX_PARALLEL_SITES))
     try:
@@ -238,6 +240,7 @@ def get_code_detail(code: str) -> dict:
         while pending:
             done, pending = wait(pending, timeout=budget.remaining(), return_when=FIRST_COMPLETED)
             if not done:
+                retryable = True
                 logger.warning(f"[{code}] 详情查询达到总时限，取消剩余请求")
                 break
             for future in done:
@@ -245,18 +248,20 @@ def get_code_detail(code: str) -> dict:
                 try:
                     detail = future.result()
                 except Exception as exc:
+                    retryable = True
                     logger.info(f"[{code}] ← {name} 抓取异常: {exc}")
                     continue
                 if detail:
                     _log_detail_result(code, name, detail, started, sites)
                     return detail
+                retryable = retryable or getattr(detail, "retryable", True)
     finally:
         budget.cancel()
         # 已经拿到结果就不等剩下的站点
         pool.shutdown(wait=False, cancel_futures=True)
 
     _log_detail_result(code, "", {}, started, sites)
-    return {}
+    return DetailResult(retryable=retryable)
 
 
 def _log_detail_result(
@@ -288,17 +293,21 @@ def _log_detail_result(
 
 def _fetch_detail(site_name: str, code: str) -> dict:
     """单站抓详情，失败返回空字典。"""
+    from app.modules.ladysite.transport import DetailResult, FetchReport
+
     started = time.perf_counter()
     site = _get_site(site_name)
     if site is None:
         logger.info(f"[{code}] ← {site_name} 初始化失败（源不存在或被停用）")
-        return {}
+        return DetailResult()
+    report = FetchReport()
     try:
-        info = site.crawler_original(code)
+        with report.activate():
+            info = site.crawler_original(code)
     except Exception as exc:
         elapsed = time.perf_counter() - started
         logger.info(f"[{code}] ← {site_name} 抓取失败（{elapsed:.1f}s）: {exc}")
-        return {}
+        return DetailResult()
 
     elapsed = time.perf_counter() - started
     if info and info.title:
@@ -308,12 +317,12 @@ def _fetch_detail(site_name: str, code: str) -> dict:
             getattr(client, 'last_page', ''), getattr(client, 'last_url', ''), code)
         if not same_code(info.code, code) or not verified:
             logger.warning(f'[{code}] ← {site_name} 身份校验失败，丢弃全部字段')
-            return {}
+            return DetailResult()
         logger.info(f"[{code}] ← {site_name} 返回详情（{elapsed:.1f}s）：{info.title[:40]}")
         return info.to_dict()
 
     logger.info(f"[{code}] ← {site_name} 未取得有效详情（可能未收录、请求失败或超时；{elapsed:.1f}s）")
-    return {}
+    return DetailResult(retryable=report.failed or not report.responses)
 
 
 def search_code(keyword: str) -> list[dict]:

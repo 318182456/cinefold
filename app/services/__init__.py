@@ -1331,10 +1331,14 @@ def fill_lack_codes(limit: int = 50) -> int:
     except ImportError:
         return 0
 
+    from app.services import metadataretry
+
     with session_scope() as session:
         codes = session.scalars(
             select(Code.code)
             .where((Code.title.is_(None)) | (Code.title == ""))
+            .where(metadataretry.eligible(Code.code))
+            .order_by(Code.code)
             .limit(limit)
         ).all()
 
@@ -1342,11 +1346,7 @@ def fill_lack_codes(limit: int = 50) -> int:
 
 
 def fill_lack_codes_by_list(codes: list[str]) -> int:
-    """并发抓取番号详情并批量入库。
-
-    每个番号要跨境抓 1~4 次（多站 fallback），串行 50 个能跑好几分钟。
-    抓取放线程池，写库合并成一个事务。
-    """
+    """自动补全：跳过冷却/执行中的番号，每个结果独立落库。"""
     if not codes:
         return 0
     try:
@@ -1356,36 +1356,51 @@ def fill_lack_codes_by_list(codes: list[str]) -> int:
         return 0
 
     from concurrent.futures import ThreadPoolExecutor
+    from app.services import metadataretry
 
-    def fetch(code: str) -> tuple[str, dict]:
-        try:
-            return code, ladysite.get_code_detail(code)
-        except Exception as exc:
-            logger.debug(f"[{code}] 抓取详情失败: {exc}")
-            return code, {}
-
-    workers = min(DETAIL_FETCH_WORKERS, len(codes))
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        results = [(c, d) for c, d in pool.map(fetch, codes) if d]
-
-    if not results:
+    # Filter before submission as well: listing pages share the scheduler's backoff.
+    with session_scope() as session:
+        codes = list(session.scalars(select(Code.code).where(
+            Code.code.in_(list(dict.fromkeys(codes))),
+            metadataretry.eligible(Code.code),
+        )).all())
+    if not codes:
         return 0
 
-    count = 0
-    with session_scope() as session:
-        for code, detail in results:
-            row = session.get(Code, code)
-            if row is None:
-                continue
-            for key, value in detail.items():
-                # code 是主键，且各站返回的番号未必和查询用的一致
-                # （theporndb 会把 HMN-918 规范成 HMDNV-918）。
-                # 写回去等于改主键，撞上已存在的行会让整批回滚
-                if key == "code":
-                    continue
-                if value and hasattr(row, key):
-                    setattr(row, key, value)
-            count += 1
+    def fetch(code: str) -> int:
+        if not metadataretry.claim(code):
+            return 0
+        try:
+            detail = ladysite.get_code_detail(code)
+            if not detail or not detail.get("title"):
+                until = metadataretry.defer(code, retryable=getattr(detail, "retryable", True))
+                logger.info(f"[{code}] 自动补全未取得详情，下次尝试不早于 {until:%m-%d %H:%M}")
+                return 0
+            with session_scope() as session:
+                row = session.get(Code, code)
+                if row is not None and not _has_detail(row.to_dict()):
+                    for key, value in detail.items():
+                        # Never replace the query's primary key with a source alias.
+                        if key != "code" and value and hasattr(row, key) and not getattr(row, key):
+                            setattr(row, key, value)
+                    saved = 1
+                else:
+                    saved = 0
+                if row is not None and not _has_detail(row.to_dict()):
+                    # A title-only response must not cause every page view to
+                    # fetch the still-missing artwork again.
+                    metadataretry.defer(code, retryable=False, session=session)
+                else:
+                    metadataretry.clear(session, code)
+            return saved
+        except Exception as exc:
+            logger.debug(f"[{code}] 抓取详情失败: {exc}")
+            metadataretry.defer(code)
+            return 0
+
+    workers = min(DETAIL_FETCH_WORKERS, 2 if get_settings().bypass_url else DETAIL_FETCH_WORKERS, len(codes))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        count = sum(pool.map(fetch, codes))
 
     if count:
         logger.info(f"已补全 {count} 个番号详情")
@@ -1569,10 +1584,15 @@ def enrich_codes(codes: list[str], fetch_limit: int | None = None) -> list[dict]
         # 先确保这些番号在库里，后续补全和订阅都依赖行存在
         _ensure_codes(missing)
 
-        # 每个番号要跨境抓 1~4 次，串行下来榜单页首次打开要等几十秒。
-        # 这是用户直接等待的路径，并发抓完再统一写库
-        if limit > 0 and fill_lack_codes_by_list(missing[:limit]):
-            known = _rows_by_code(codes)
+        if limit > 0:
+            from app.services import metadataretry
+            with session_scope() as session:
+                eligible = set(session.scalars(select(Code.code).where(
+                    Code.code.in_(missing), metadataretry.eligible(Code.code),
+                )).all())
+            candidates = [code for code in missing if code in eligible][:limit]
+            if fill_lack_codes_by_list(candidates):
+                known = _rows_by_code(codes)
 
     out = []
     for code in codes:

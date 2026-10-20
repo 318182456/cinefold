@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+from collections import deque
 from contextlib import contextmanager
 from contextvars import ContextVar
 import threading
@@ -19,13 +20,83 @@ class FetchCancelled(TimeoutError):
     pass
 
 
+class BrowserQueue:
+    """FIFO admission to a bounded browser pool, with cancellable queue waits."""
+    def __init__(self, capacity=2):
+        self.capacity = capacity
+        self.active = 0
+        self.waiting = deque()
+        self.condition = threading.Condition()
+
+    @contextmanager
+    def acquire(self, timeout, budget=None):
+        deadline = time.perf_counter() + timeout
+        ticket = object()
+        with self.condition:
+            self.waiting.append(ticket)
+            try:
+                while True:
+                    if budget:
+                        budget.check()
+                    remaining = deadline - time.perf_counter()
+                    if remaining <= 0:
+                        raise TimeoutError("bypass 排队超时，服务繁忙")
+                    if self.waiting[0] is ticket and self.active < self.capacity:
+                        self.waiting.popleft()
+                        self.active += 1
+                        self.condition.notify_all()
+                        break
+                    self.condition.wait(min(0.05, remaining))
+            except BaseException:
+                self.waiting.remove(ticket)
+                self.condition.notify_all()
+                raise
+        try:
+            yield
+        finally:
+            with self.condition:
+                self.active -= 1
+                self.condition.notify_all()
+
+
 _budget: ContextVar[FetchBudget | None] = ContextVar("scrape_fetch_budget", default=None)
+_report: ContextVar[FetchReport | None] = ContextVar("scrape_fetch_report", default=None)
 _loop: asyncio.AbstractEventLoop | None = None
 _loop_lock = threading.Lock()
 
 
 def current_budget() -> FetchBudget | None:
     return _budget.get()
+
+
+class FetchReport:
+    """Observe final request outcomes without treating outages as missing metadata."""
+    def __init__(self):
+        self.responses = 0
+        self.failed = False
+
+    @contextmanager
+    def activate(self):
+        token = _report.set(self)
+        try:
+            yield self
+        finally:
+            _report.reset(token)
+
+
+def report_response(page):
+    report = _report.get()
+    if report is not None:
+        report.responses += 1
+        if not page and getattr(page, "status", None) not in (404, 410):
+            report.failed = True
+
+
+class DetailResult(dict):
+    """An empty dict can still carry a retry hint; existing callers stay compatible."""
+    def __init__(self, *args, retryable=True, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.retryable = retryable
 
 
 class FetchBudget:

@@ -18,7 +18,7 @@ from loguru import logger
 
 from app.core.config import get_settings
 from app.utils import clean_header_value
-from app.modules.ladysite.transport import FetchCancelled, current_budget, http_client
+from app.modules.ladysite.transport import BrowserQueue, FetchCancelled, current_budget, http_client, report_response
 from app.services.mihomo import source_context, proxy_lease
 
 # bypass 服务类型探测结果缓存：{base_url: 是否讲 FlareSolverr 协议}
@@ -38,8 +38,10 @@ CONNECT_RETRIES = 1
 # 这类服务每个会话独占一个浏览器实例，并发请求会互相拖慢甚至超时，
 # 因此同一时刻只允许一个请求进入。
 _BYPASS_LOCK = threading.Lock()
-_MIHOMO_BYPASS_SLOTS = threading.BoundedSemaphore(2)
+_BYPASS_QUEUES: dict[str, BrowserQueue] = {}
+_BYPASS_QUEUE_LOCK = threading.Lock()
 BYPASS_QUEUE_TIMEOUT = 20.0
+BYPASS_MANAGED_QUEUE_TIMEOUT = 60.0
 BYPASS_RECOVERY_SECONDS = 30.0
 _BYPASS_RECOVERY: dict[str, float] = {}
 
@@ -47,10 +49,26 @@ _BYPASS_RECOVERY: dict[str, float] = {}
 @contextmanager
 def _bypass_slot(base: str, quick: bool):
     """Bound queue time even for callers without a scrape budget."""
-    deadline = time.perf_counter() + (2.0 if quick else BYPASS_QUEUE_TIMEOUT)
     budget = current_budget()
     from app.services.mihomo import get_manager
-    slot = _MIHOMO_BYPASS_SLOTS if get_manager().config["enabled"] else _BYPASS_LOCK
+    managed = get_manager().config["enabled"]
+    if _BYPASS_RECOVERY.get(base, 0) > time.perf_counter():
+        raise FetchCancelled("bypass 服务连接中断，恢复等待中")
+    timeout = 2.0 if quick else BYPASS_MANAGED_QUEUE_TIMEOUT if managed else BYPASS_QUEUE_TIMEOUT
+    deadline = time.perf_counter() + timeout
+    if managed:
+        with _BYPASS_QUEUE_LOCK:
+            queue = _BYPASS_QUEUES.setdefault(base, BrowserQueue(2))
+        with queue.acquire(timeout, budget):
+            if _BYPASS_RECOVERY.get(base, 0) > time.perf_counter():
+                raise FetchCancelled("bypass 服务连接中断，恢复等待中")
+            try:
+                yield
+            except httpx.RemoteProtocolError:
+                _BYPASS_RECOVERY[base] = time.perf_counter() + BYPASS_RECOVERY_SECONDS
+                raise
+        return
+    slot = _BYPASS_LOCK
     while True:
         if budget:
             budget.check()
@@ -256,7 +274,9 @@ class SiteClient:
 
     def get(self, path: str, params: dict | None = None, timeout: float = 15.0, bypass_first: bool | None = None, allow_bypass: bool = True, **kwargs) -> str:
         with source_context(self.source_key):
-            return self._get(path, params, timeout, bypass_first, allow_bypass, **kwargs)
+            page = self._get(path, params, timeout, bypass_first, allow_bypass, **kwargs)
+            report_response(page)
+            return page
 
     def _get(self, path: str, params: dict | None = None, timeout: float = 15.0, bypass_first: bool | None = None, allow_bypass: bool = True, **kwargs) -> str:
         """GET 请求，返回文本。失败返回空串。
@@ -318,7 +338,7 @@ class SiteClient:
                 if not allow_bypass and (status == 429 or status >= 500) and attempt < CONNECT_RETRIES:
                     continue
                 logger.warning(f"请求 {url} 失败: {status}")
-                return ""
+                return FetchedPage("", url, status=status)
             except httpx.TimeoutException as exc:
                 _note_proxy_result(url, request_proxy, False)
                 # 超时不重试直连：站点本来就慢，再等一轮只会拖住后面的站点。
@@ -384,7 +404,7 @@ class SiteClient:
                     if allow_bypass and settings.bypass_url and (status == 403 or status >= 500):
                         return bypass()
                     if status not in (421, 429) and status < 500:
-                        return ""
+                        return FetchedPage("", url, status=status)
                     retry_after = exc.response.headers.get("Retry-After")
                 except (httpx.TransportError, ssl.SSLError) as exc:
                     _note_proxy_result(url, request_proxy, False)
@@ -431,9 +451,10 @@ def _cookie_pairs(cookie: str) -> list[dict]:
 
 
 class FetchedPage(str):
-    def __new__(cls, text: str, url: str):
+    def __new__(cls, text: str, url: str, status: int = 200):
         value = super().__new__(cls, text)
         value.url = url
+        value.status = status
         return value
 
 
@@ -476,14 +497,13 @@ def fetch_via_bypass(
 
     try:
         budget = current_budget()
-        with _bypass_slot(base, quick):
-            if budget:
-                solver_timeout = min(solver_timeout, max(1, int(budget.remaining() * 1000)))
-                client_timeout = min(client_timeout, budget.remaining())
-            with http_client(
-                timeout=client_timeout, verify=False, trust_env=False
-            ) as client:
-                return _fetch_bypass_response(client, base, url, cookie, solver_timeout)
+        if budget:
+            solver_timeout = min(solver_timeout, max(1, int(budget.remaining() * 1000)))
+            client_timeout = min(client_timeout, budget.remaining())
+        with http_client(
+            timeout=client_timeout, verify=False, trust_env=False
+        ) as client:
+            return _fetch_bypass_response(client, base, url, cookie, solver_timeout, quick=quick)
     except Exception as exc:
         if not isinstance(exc, FetchCancelled):
             reason = str(exc) or type(exc).__name__
@@ -497,22 +517,27 @@ def fetch_via_bypass(
         return ""
 
 
-def _solver_request(client, endpoint, body):
+def _solver_request(client, endpoint, body, quick=False):
     from app.services.mihomo import get_manager
     manager = get_manager()
     automatic = manager.config["enabled"] and manager.config["automatic"]
-    attempts = min(3, len(manager.nodes)) if automatic else 1
+    attempts = max(1, min(3, len(manager.nodes), max(1, body["maxTimeout"] // 20000))) if automatic else 1
     deadline = time.perf_counter() + body["maxTimeout"] / 1000
     for attempt in range(max(1, attempts)):
-        with manager.lease(remote=True, url=body["url"], timeout=min(20, max(0, deadline-time.perf_counter()))) as proxy:
+        # Re-enter the FIFO queue for each exit attempt, so a slow site's
+        # complete retry chain cannot monopolize a browser slot.
+        with _bypass_slot(endpoint, quick), manager.lease(remote=True, url=body["url"], timeout=min(20, max(0, deadline-time.perf_counter()))) as proxy:
             request = dict(body)
             if proxy:
                 request["proxy"] = {"url": proxy}
-            if automatic:
-                remaining = deadline - time.perf_counter()
-                if remaining <= 0:
-                    raise TimeoutError("bypass 节点重试达到总时限")
-                request["maxTimeout"] = max(1, int(remaining * 1000 / (attempts - attempt)))
+            remaining = deadline - time.perf_counter()
+            budget = current_budget()
+            if budget:
+                remaining = min(remaining, budget.remaining())
+            if remaining <= 0:
+                raise FetchCancelled("bypass 排队及节点重试达到总时限")
+            remaining_attempts = min(attempts - attempt, max(1, int(remaining // 20))) if automatic else 1
+            request["maxTimeout"] = max(1, int(remaining * 1000 / remaining_attempts))
             # A service disconnection is not a failure of the target's exit.
             response = client.post(endpoint, json=request)
             try:
@@ -534,7 +559,7 @@ def _solver_request(client, endpoint, body):
         return response
 
 
-def _fetch_bypass_response(client, base, url, cookie, solver_timeout):
+def _fetch_bypass_response(client, base, url, cookie, solver_timeout, quick=False):
     if base.endswith("/v1") or _is_flaresolverr(base):
         endpoint = base if base.endswith("/v1") else f"{base}/v1"
         budget = current_budget()
@@ -547,7 +572,7 @@ def _fetch_bypass_response(client, base, url, cookie, solver_timeout):
         pairs = _cookie_pairs(clean_header_value(cookie))
         if pairs:
             body["cookies"] = pairs
-        response = _solver_request(client, endpoint, body)
+        response = _solver_request(client, endpoint, body, quick=quick)
         response.raise_for_status()
         payload = response.json()
         solution = payload.get("solution") or {}
@@ -560,7 +585,7 @@ def _fetch_bypass_response(client, base, url, cookie, solver_timeout):
         status = solution.get("status")
         if isinstance(status, int) and status >= 400:
             logger.warning(f"bypass 抓取 {url.split('?')[0]} 目标站返回 HTTP {status}")
-            return ""
+            return FetchedPage("", url, status=status)
         # 浏览器访问 JSON API 时会包成 HTML 的 <pre>；还原给 JSON 解析器。
         if html.lstrip().startswith("<"):
             from pyquery import PyQuery
@@ -575,7 +600,8 @@ def _fetch_bypass_response(client, base, url, cookie, solver_timeout):
         return FetchedPage(html, solution.get('url') or url)
 
     # cloudflare-bypass-for-scraping 风格
-    response = client.get(f"{base}/html", params={"url": url})
+    with _bypass_slot(base, quick):
+        response = client.get(f"{base}/html", params={"url": url})
     response.raise_for_status()
     return FetchedPage(response.text, url)
 

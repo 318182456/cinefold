@@ -373,7 +373,9 @@ def test_solver_http_failure_log_contains_target_and_reason(monkeypatch):
 def test_unbudgeted_solver_queue_has_deadline(monkeypatch):
     monkeypatch.setattr(base, "get_settings", lambda: SimpleNamespace(bypass_url="http://queue-test/v1"))
     monkeypatch.setattr(base, "BYPASS_QUEUE_TIMEOUT", 0.05)
-    monkeypatch.setattr(base, "http_client", lambda **kw: pytest.fail("queue timeout must not start HTTP"))
+    original_client = httpx.Client
+    monkeypatch.setattr(base, "http_client", lambda **kw: original_client(transport=httpx.MockTransport(
+        lambda request: pytest.fail("queue timeout must not send HTTP"))))
     started = time.perf_counter()
     base._BYPASS_LOCK.acquire()
     try:
