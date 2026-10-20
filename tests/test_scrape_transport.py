@@ -218,7 +218,7 @@ def test_direct_timeout_does_not_start_expensive_solver(mock_http, monkeypatch):
     assert requests[0].url.host == "source.test"
 
 
-def test_bypass_preserves_final_url_cookie_and_selected_proxy(mock_http, monkeypatch):
+def test_bypass_preserves_final_url_cookie_without_sending_proxy(mock_http, monkeypatch):
     bodies = []
 
     async def handler(request):
@@ -232,5 +232,5 @@ def test_bypass_preserves_final_url_cookie_and_selected_proxy(mock_http, monkeyp
     assert call(client, FetchBudget(time.perf_counter() + 2)) == "detail"
     assert client.last_url == "https://source.test/detail"
     assert bodies[0]["cookies"] == [{"name": "age", "value": "1"}]
-    assert bodies[0]["proxy"] == {"url": "http://proxy:9999", "username": "user", "password": "pass"}
+    assert "proxy" not in bodies[0]
     assert all("proxy" not in option for option in options)

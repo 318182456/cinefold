@@ -492,7 +492,7 @@ def _check_direct(url: str, timeout: float, key: str = "") -> tuple[str, str]:
     return "ok", ""
 
 
-def _check_via_bypass(url: str, proxy_url: str | None = None) -> tuple[str, str]:
+def _check_via_bypass(url: str) -> tuple[str, str]:
     """走过盾服务测一个地址，返回 (status, message)。
 
     抓取链路对 bypass_first 的站就是这么取页面的，测试必须走同一条路，
@@ -501,7 +501,7 @@ def _check_via_bypass(url: str, proxy_url: str | None = None) -> tuple[str, str]
     from app.modules.ladysite.base import fetch_via_bypass
 
     try:
-        html = fetch_via_bypass(url, quick=True, **({'proxy_url': proxy_url} if proxy_url else {}))
+        html = fetch_via_bypass(url, quick=True)
     except Exception as exc:
         return "fail", f"绕过服务异常：{type(exc).__name__}: {exc}"[:200]
 
@@ -540,7 +540,7 @@ def check_source(key: str, timeout: float = 12.0) -> dict:
     url = f"{host}{CHECK_PATH.get(key, '')}"
 
     if source.get("bypass_first") and has_bypass:
-        status, message = _check_via_bypass(url, source.get('proxy')) if source.get('proxy') else _check_via_bypass(url)
+        status, message = _check_via_bypass(url)
     else:
         status, message = _check_direct(url, timeout, key)
         # 直连被拦，抓取链路此时会改走过盾服务，测试也照做
@@ -548,7 +548,7 @@ def check_source(key: str, timeout: float = 12.0) -> dict:
             if not has_bypass:
                 message = f"{message}。需配置反爬绕过服务"
             else:
-                bypass_status, bypass_message = _check_via_bypass(url, source.get('proxy')) if source.get('proxy') else _check_via_bypass(url)
+                bypass_status, bypass_message = _check_via_bypass(url)
                 status = bypass_status
                 message = (
                     bypass_message if bypass_status == "ok"

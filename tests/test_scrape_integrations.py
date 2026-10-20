@@ -215,18 +215,19 @@ def test_reverse_identity_prefers_registered_source_without_downloader(db, monke
     assert SourceIdentityResolver().resolve(source) == 'SOE-422'
 
 
-def test_bypass_retains_final_url_and_sends_structured_proxy(monkeypatch):
+def test_bypass_retains_final_url_without_sending_proxy(monkeypatch):
     import httpx
     from app.core import config
     from app.modules.ladysite.base import fetch_via_bypass
     settings = config.get_settings()
     monkeypatch.setattr(settings, 'bypass_url', 'http://solver.test/v1')
+    monkeypatch.setattr(settings, 'proxy', 'http://user:pass@[::1]:8888')
     def post(self, url, **kwargs):
-        assert kwargs['json']['proxy'] == {'url': 'http://[::1]:8888', 'username': 'user', 'password': 'pass'}
+        assert 'proxy' not in kwargs['json']
         assert 'session' not in kwargs['json']
         return httpx.Response(200, json={'status': 'ok', 'solution': {'response': '<h1>ABF-134</h1>', 'url': 'https://site.test/ABF-134'}}, request=httpx.Request('POST', url))
     monkeypatch.setattr(httpx.Client, 'post', post)
-    page = fetch_via_bypass('https://site.test/ABW-306', proxy_url='http://user:pass@[::1]:8888')
+    page = fetch_via_bypass('https://site.test/ABW-306')
     assert page.url.endswith('/ABF-134')
     assert not validate_page(page, page.url, 'ABW-306')
 

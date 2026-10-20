@@ -17,6 +17,7 @@ import json
 from loguru import logger
 
 from app.modules.ladysite.base import CodeInfo, SiteClient, join_list
+from app.modules.ladysite.identity import same_code
 from app.utils import get_true_code
 
 HOST = "https://api.theporndb.net"
@@ -61,6 +62,8 @@ class ThePornDb:
         raw = self.client.get(
             "/jav",
             params={"parse": normalized},
+            # bypass 不支持 Authorization，不能将 token 当 Cookie 交给浏览器。
+            allow_bypass=False,
             headers={
                 "Authorization": f"Bearer {token}",
                 "Accept": "application/json",
@@ -85,13 +88,24 @@ def json_to_code(raw: str, code: str = "") -> CodeInfo | None:
         return None
 
     data = payload.get("data")
-    # /jav?parse= 返回单个对象，列表端点返回数组
+    # /jav?parse= 返回数组；兼容详情端点的单对象响应。
     if isinstance(data, list):
-        data = data[0] if data else None
+        for item in data:
+            info = json_to_code(json.dumps({"data": item}), code)
+            if info is not None:
+                return info
+        return None
     if not isinstance(data, dict) or not data:
         return None
 
-    info = CodeInfo(code=get_true_code(data.get("external_id") or code))
+    actual = data.get("external_id")
+    if not isinstance(actual, str) or not actual.strip():
+        return None
+    if code and not same_code(actual, code):
+        return None
+    info = CodeInfo(code=get_true_code(actual))
+    # 身份证据来自返回字段；列表响应不能由通用页面校验器直接验证。
+    info.identity_verified = True
     info.title = (data.get("title") or "").strip()
     info.release_date = (data.get("date") or "")[:10]
 

@@ -204,12 +204,13 @@ class SiteClient:
                 budget.wait(delay) if budget else time.sleep(delay)
             state[1] = time.time()
 
-    def get(self, path: str, params: dict | None = None, timeout: float = 15.0, bypass_first: bool | None = None, **kwargs) -> str:
+    def get(self, path: str, params: dict | None = None, timeout: float = 15.0, bypass_first: bool | None = None, allow_bypass: bool = True, **kwargs) -> str:
         """GET 请求，返回文本。失败返回空串。
 
         默认超时偏短：抓取由定时任务驱动，单站不通时应尽快让位给下一个站点。
         配置了 BYPASS_URL 时，直连遇到 403/503 会自动改走该服务重试一次；
         站点声明了 bypass_first 则跳过直连，直接走该服务。
+        需要自定义鉴权头的 API 应设 allow_bypass=False：浏览器服务不支持传递该头。
         """
         settings = get_settings()
         # 补斜杠而不是直接拼：少一个斜杠拼出来的是 example.comsubs/x，
@@ -217,13 +218,13 @@ class SiteClient:
         url = path if path.startswith("http") else absolute_url(path, self.host)
 
         if current_budget() is not None:
-            return self._get_budgeted(url, params, timeout, bypass_first, **kwargs)
+            return self._get_budgeted(url, params, timeout, bypass_first, allow_bypass=allow_bypass, **kwargs)
 
         # 直连必被拦的站点，配了 bypass 就不必先撞一次 403。
         # Cookie 必须一并带过去：mgstage 的 adc、dmm 的 age_check_done
         # 都是年龄门，丢了的话过盾拿回来的永远是确认页
-        if (self.bypass_first if bypass_first is None else bypass_first) and settings.bypass_url:
-            return self._remember(fetch_via_bypass(url, params, timeout, cookie=self.cookie, **({'proxy_url': self.proxy} if self.proxy is not None else {})), url)
+        if allow_bypass and (self.bypass_first if bypass_first is None else bypass_first) and settings.bypass_url:
+            return self._remember(fetch_via_bypass(url, params, timeout, cookie=self.cookie), url)
 
         headers = self.headers(kwargs.pop("headers", None))
 
@@ -245,17 +246,19 @@ class SiteClient:
                 status = exc.response.status_code
                 # 403/503 是典型的挑战页；502/504 多半是站点前面的防护层
                 # 掐了直连。两类都值得让 bypass 服务再试一次
-                if status in (403, 503) or status >= 500:
+                if allow_bypass and (status in (403, 503) or status >= 500):
                     logger.info(f"{url} 返回 {status}，尝试通过 bypass 服务获取")
-                    return self._remember(fetch_via_bypass(url, params, timeout, cookie=self.cookie, **({'proxy_url': self.proxy} if self.proxy is not None else {})), url)
+                    return self._remember(fetch_via_bypass(url, params, timeout, cookie=self.cookie), url)
+                if not allow_bypass and (status == 429 or status >= 500) and attempt < CONNECT_RETRIES:
+                    continue
                 logger.warning(f"请求 {url} 失败: {status}")
                 return ""
             except httpx.TimeoutException as exc:
                 # 超时不重试直连：站点本来就慢，再等一轮只会拖住后面的站点。
                 # 但部分站点是对直连静默丢包而非返回挑战页，配了 bypass 就交给它
-                if settings.bypass_url:
+                if allow_bypass and settings.bypass_url:
                     logger.info(f"{url} 直连超时，尝试通过 bypass 服务获取")
-                    return self._remember(fetch_via_bypass(url, params, timeout, cookie=self.cookie, **({'proxy_url': self.proxy} if self.proxy is not None else {})), url)
+                    return self._remember(fetch_via_bypass(url, params, timeout, cookie=self.cookie), url)
                 logger.warning(f"请求 {url} 超时: {exc}")
                 return ""
             except (httpx.TransportError, ssl.SSLError) as exc:
@@ -269,7 +272,7 @@ class SiteClient:
                 return ""
         return ""
 
-    def _get_budgeted(self, url, params, timeout, bypass_first, **kwargs):
+    def _get_budgeted(self, url, params, timeout, bypass_first, allow_bypass=True, **kwargs):
         """Use one deadline for direct requests, retry waits and browser fallback."""
         budget = current_budget()
         settings = get_settings()
@@ -279,12 +282,11 @@ class SiteClient:
             budget.check()
             return self._remember(fetch_via_bypass(
                 url, params, timeout, cookie=self.cookie,
-                **({'proxy_url': self.proxy} if self.proxy is not None else {}),
             ), url)
 
         try:
             budget.check()
-            if (self.bypass_first if bypass_first is None else bypass_first) and settings.bypass_url:
+            if allow_bypass and (self.bypass_first if bypass_first is None else bypass_first) and settings.bypass_url:
                 return bypass()
             for attempt in range(CONNECT_RETRIES + 1):
                 self._throttle()
@@ -302,7 +304,7 @@ class SiteClient:
                     return ""
                 except httpx.HTTPStatusError as exc:
                     status = exc.response.status_code
-                    if settings.bypass_url and (status == 403 or status >= 500):
+                    if allow_bypass and settings.bypass_url and (status == 403 or status >= 500):
                         return bypass()
                     if status != 429 and status < 500:
                         return ""
@@ -356,7 +358,6 @@ def fetch_via_bypass(
     timeout: float = 60.0,
     quick: bool = False,
     cookie: str = "",
-    proxy_url: str | None = None,
 ) -> str:
     """通过用户自建的 bypass 服务抓取页面。
 
@@ -367,6 +368,7 @@ def fetch_via_bypass(
 
     通过 BYPASS_URL 配置服务地址；未配置时直接返回空串。
     quick=True 用更短的过盾上限，供连通性测试这类有人在等的场景。
+    bypass 使用自身的代理配置，不传递全局或数据源代理。
     cookie 会转交给 FlareSolverr（mgstage 的年龄门就靠它）；
     GET /html 风格的服务没有传 Cookie 的口子，只能丢弃。
     """
@@ -395,14 +397,14 @@ def fetch_via_bypass(
             with http_client(
                 timeout=client_timeout, verify=False, trust_env=False
             ) as client:
-                return _fetch_bypass_response(client, base, url, cookie, proxy_url, solver_timeout, settings)
+                return _fetch_bypass_response(client, base, url, cookie, solver_timeout)
     except Exception as exc:
         if not isinstance(exc, FetchCancelled):
             logger.warning(f"bypass 服务请求失败: {exc}")
         return ""
 
 
-def _fetch_bypass_response(client, base, url, cookie, proxy_url, solver_timeout, settings):
+def _fetch_bypass_response(client, base, url, cookie, solver_timeout):
     if base.endswith("/v1") or _is_flaresolverr(base):
         endpoint = base if base.endswith("/v1") else f"{base}/v1"
         budget = current_budget()
@@ -410,14 +412,6 @@ def _fetch_bypass_response(client, base, url, cookie, proxy_url, solver_timeout,
             budget.check()
             solver_timeout = min(solver_timeout, max(1, int(budget.remaining() * 1000)))
         body: dict = {"cmd": "request.get", "url": url, "maxTimeout": solver_timeout}
-        selected_proxy = settings.proxy if proxy_url is None else proxy_url
-        if selected_proxy:
-            from urllib.parse import urlsplit, unquote
-            proxy = urlsplit(selected_proxy)
-            address = f'{proxy.scheme}://{proxy.netloc.rsplit("@", 1)[-1]}'
-            body['proxy'] = {'url': address}
-            if proxy.username:
-                body['proxy'].update(username=unquote(proxy.username), password=unquote(proxy.password or ''))
         # Byparr 的 LinkRequest 没有 cookies 字段，多给不会报错（被忽略），
         # 代价只是它过不了 mgstage 那种靠 Cookie 的年龄门。
         pairs = _cookie_pairs(clean_header_value(cookie))

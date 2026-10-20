@@ -1338,6 +1338,90 @@ TPDB_JSON = """
 
 
 class TestThePornDbParse:
+    def test_search_selects_matching_result_and_verifies_identity(self):
+        import json
+        from app.modules.ladysite.theporndb import json_to_code
+
+        match = json.loads(TPDB_JSON)["data"]
+        other = {**match, "external_id": "SSIS-002", "title": "Wrong title"}
+        raw = json.dumps({"data": [None, other, match]})
+        info = json_to_code(raw, "ssis001")
+        assert info.title == "Test Title"
+        assert info.code == "SSIS-001"
+        assert info.identity_verified is True
+
+    def test_search_result_passes_detail_boundary(self, monkeypatch):
+        import json
+        from app.modules import ladysite
+        from app.modules.ladysite.theporndb import ThePornDb
+
+        site = ThePornDb(host="https://api.theporndb.net", cookie="test-token")
+        data = json.loads(TPDB_JSON)["data"]
+        raw = json.dumps({"data": [{**data, "external_id": "SSIS-002"}, data]})
+        monkeypatch.setattr(site.client, "get", lambda *a, **kw: raw)
+        monkeypatch.setattr(ladysite, "_get_site", lambda name: site)
+        detail = ladysite._fetch_detail("theporndb", "SSIS-001")
+        assert detail["code"] == "SSIS-001"
+        assert detail["title"] == "Test Title"
+
+    @pytest.mark.parametrize("data", [
+        {"external_id": "SSIS-002", "title": "Wrong title"},
+        {"title": "No identity"},
+        {"external_id": 123, "title": "Invalid identity"},
+        [{"external_id": "SSIS-002", "title": "Wrong title"}],
+    ])
+    def test_unmatched_or_missing_identity_rejected(self, data):
+        import json
+        from app.modules.ladysite.theporndb import json_to_code
+
+        assert json_to_code(json.dumps({"data": data}), "SSIS-001") is None
+
+    @pytest.mark.parametrize("budgeted", [False, True])
+    @pytest.mark.parametrize("failure", [403, 503, "timeout"])
+    def test_authenticated_requests_never_use_browser_bypass(self, monkeypatch, budgeted, failure):
+        import time
+        from contextlib import nullcontext
+        from types import SimpleNamespace
+        import httpx
+        from app.modules.ladysite import base
+        from app.modules.ladysite.theporndb import ThePornDb
+        from app.modules.ladysite.transport import FetchBudget
+
+        site = ThePornDb(host="https://api.theporndb.net", cookie="secret-token")
+        # 即使旧配置打开 bypass_first，也必须发起带鉴权的直连。
+        site.client.bypass_first = True
+        monkeypatch.setattr(site.client, "_throttle", lambda: None)
+        monkeypatch.setattr(base, "get_settings", lambda: SimpleNamespace(bypass_url="http://solver", proxy=""))
+        monkeypatch.setattr(base, "fetch_via_bypass", lambda *a, **kw: pytest.fail("API 不应进入浏览器 bypass"))
+        requests = []
+
+        def respond(request):
+            requests.append(request)
+            assert request.headers["Authorization"] == "Bearer secret-token"
+            assert "cookie" not in request.headers
+            assert request.url.path == "/jav"
+            assert request.url.params["parse"] == "SSIS-001"
+            if len(requests) == 1:
+                if failure == "timeout":
+                    raise httpx.ReadTimeout("test timeout", request=request)
+                return httpx.Response(failure)
+            return httpx.Response(200, text=TPDB_JSON)
+
+        original_client = httpx.Client
+        factory = lambda **kw: original_client(transport=httpx.MockTransport(respond))
+        monkeypatch.setattr(base.httpx, "Client", factory)
+        monkeypatch.setattr(base, "http_client", factory)
+        scope = FetchBudget(time.perf_counter() + 10).activate() if budgeted else nullcontext()
+        with scope:
+            info = site.crawler_original("SSIS-001")
+        if failure == 503 or (budgeted and failure == "timeout"):
+            assert info is not None
+            assert info.title == "Test Title"
+            assert len(requests) == 2
+        else:
+            assert info is None
+            assert len(requests) == 1
+
     def test_json_fields(self):
         from app.modules.ladysite.theporndb import json_to_code
 
