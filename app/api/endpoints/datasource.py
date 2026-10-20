@@ -263,6 +263,9 @@ def update_datasource(
         for field, value in updates.items():
             if field == "host" and value:
                 value = value.rstrip("/")
+                if key == "theporndb":
+                    from app.modules.ladysite.theporndb import api_host
+                    value = api_host(value)
             # 番号规则清空要存空串而不是 NULL：NULL 会被
             # backfill_builtin_rules 当成"还没补过"，下次启动又把默认规则
             # 写回去，用户的"不限制"就被悄悄撤销了

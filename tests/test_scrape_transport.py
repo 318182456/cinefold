@@ -234,3 +234,137 @@ def test_bypass_preserves_final_url_cookie_without_sending_proxy(mock_http, monk
     assert bodies[0]["cookies"] == [{"name": "age", "value": "1"}]
     assert "proxy" not in bodies[0]
     assert all("proxy" not in option for option in options)
+
+
+@pytest.mark.parametrize("budgeted", [False, True])
+@pytest.mark.parametrize("tls_reason", ["SSLV3_ALERT_HANDSHAKE_FAILURE", "TLSV1_UNRECOGNIZED_NAME", "UNEXPECTED_EOF_WHILE_READING"])
+@pytest.mark.parametrize("mode", ["bypass", "disabled", "unconfigured"])
+def test_tls_retry_falls_back_to_solver_only_when_allowed(monkeypatch, budgeted, tls_reason, mode):
+    import ssl
+    from contextlib import nullcontext
+
+    requests, bodies = [], []
+    original_client = httpx.Client
+
+    def respond(request):
+        requests.append(request)
+        if request.url.host == "source.test":
+            tls = ssl.SSLError(f"[SSL: {tls_reason}] test failure")
+            raise httpx.ConnectError("wrapped transport failure", request=request) from tls
+        assert request.url.host == "solver"
+        body = json.loads(request.content)
+        bodies.append(body)
+        assert "proxy" not in body
+        assert body["cookies"] == [{"name": "age", "value": "1"}]
+        assert body["url"] == "https://source.test/api?lng=zh-TW"
+        return httpx.Response(200, json={"status": "ok", "solution": {"response": "recovered", "url": "https://source.test/detail"}})
+
+    def factory(**kwargs):
+        return original_client(transport=httpx.MockTransport(respond))
+
+    monkeypatch.setattr(base.httpx, "Client", factory)
+    monkeypatch.setattr(base, "http_client", factory)
+    monkeypatch.setattr(base, "get_settings", lambda: SimpleNamespace(proxy="http://global:8888", bypass_url="" if mode == "unconfigured" else "http://solver/v1"))
+    client = base.SiteClient("https://source.test", cookie="age=1")
+    client.proxy = "http://source-proxy:8888"
+    monkeypatch.setattr(client, "_throttle", lambda: None)
+    budget = FetchBudget(time.perf_counter() + 3)
+    monkeypatch.setattr(budget, "wait", lambda seconds: budget.check())
+    with budget.activate() if budgeted else nullcontext():
+        result = client.get("/api", params={"lng": "zh-TW"}, allow_bypass=mode != "disabled")
+    assert sum(request.url.host == "source.test" for request in requests) == 2
+    if mode == "bypass":
+        assert result == "recovered"
+        assert len(bodies) == 1
+        assert client.last_url == "https://source.test/detail"
+    else:
+        assert result == ""
+        assert bodies == []
+
+
+def test_source_connection_check_uses_solver_after_tls_failure(monkeypatch):
+    import ssl
+    from app.database import models  # noqa: F401
+    from app.database.base import DBBase
+    from app.database.session import engine
+    from app.modules.ladysite import sources
+
+    DBBase.metadata.create_all(engine)
+    original_client = httpx.Client
+    bodies = []
+
+    def respond(request):
+        if request.url.host == "source.test":
+            raise httpx.ConnectError("[SSL: TLSV1_UNRECOGNIZED_NAME] test failure", request=request) from ssl.SSLError("test")
+        bodies.append(json.loads(request.content))
+        return httpx.Response(200, json={"status": "ok", "solution": {"response": "detail"}})
+
+    monkeypatch.setattr(base.httpx, "Client", lambda **kw: original_client(transport=httpx.MockTransport(respond)))
+    from app.core import config
+    monkeypatch.setattr(config, "get_settings", lambda: SimpleNamespace(proxy="", bypass_url="http://solver/v1"))
+    monkeypatch.setattr(base, "get_settings", config.get_settings)
+    monkeypatch.setattr(sources, "get_source", lambda key: {"host": "https://source.test", "proxy": "http://source-proxy:8888", "enabled": False})
+    result = sources.check_source("tls-test")
+    assert result["status"] == "ok"
+    assert len(bodies) == 1
+    assert "proxy" not in bodies[0]
+
+
+@pytest.mark.parametrize("budgeted", [False, True])
+@pytest.mark.parametrize("recover", [True, False])
+@pytest.mark.parametrize("allow_bypass", [False, True])
+def test_misdirected_request_reconnects_before_solver(monkeypatch, budgeted, recover, allow_bypass):
+    from contextlib import nullcontext
+    requests = []
+    original_client = httpx.Client
+
+    def respond(request):
+        requests.append(request)
+        if len(requests) == 1 or not recover and request.url.host == "source.test":
+            return httpx.Response(421)
+        if request.url.host == "solver":
+            return httpx.Response(200, json={"status": "ok", "solution": {"response": "solver detail"}})
+        return httpx.Response(200, text="direct detail")
+
+    factory = lambda **kw: original_client(transport=httpx.MockTransport(respond))
+    monkeypatch.setattr(base.httpx, "Client", factory)
+    monkeypatch.setattr(base, "http_client", factory)
+    monkeypatch.setattr(base, "get_settings", lambda: SimpleNamespace(proxy="", bypass_url="http://solver/v1"))
+    client = base.SiteClient("https://source.test")
+    monkeypatch.setattr(client, "_throttle", lambda: None)
+    budget = FetchBudget(time.perf_counter() + 3)
+    monkeypatch.setattr(budget, "wait", lambda seconds: budget.check())
+    with budget.activate() if budgeted else nullcontext():
+        result = client.get("/movie", allow_bypass=allow_bypass)
+    assert [r.url.host for r in requests[:2]] == ["source.test", "source.test"]
+    if recover:
+        assert result == "direct detail" and len(requests) == 2
+    elif allow_bypass:
+        assert result == "solver detail" and len(requests) == 3
+    else:
+        assert result == "" and len(requests) == 2
+
+
+@pytest.mark.parametrize("payload,expected", [
+    ({"status": "ok", "solution": {"status": 404, "response": "<h1>Not found</h1>"}}, ""),
+    ({"status": "error", "message": "Scrape deadline exceeded", "solution": {"response": "partial content"}}, ""),
+    ({"status": "ok", "solution": {"status": 200, "response": '<html><body><pre>{"data":{"barcode":"SSIS-001"}}</pre></body></html>'}}, '{"data": {"barcode": "SSIS-001"}}'),
+])
+def test_solver_response_status_and_json_wrapping(monkeypatch, payload, expected):
+    original_client = httpx.Client
+    factory = lambda **kw: original_client(transport=httpx.MockTransport(lambda request: httpx.Response(200, json=payload)))
+    monkeypatch.setattr(base, "http_client", factory)
+    monkeypatch.setattr(base, "get_settings", lambda: SimpleNamespace(bypass_url="http://solver/v1"))
+    assert base.fetch_via_bypass("https://source.test/api") == expected
+
+
+def test_solver_http_failure_log_contains_target_and_reason(monkeypatch):
+    original_client = httpx.Client
+    factory = lambda **kw: original_client(transport=httpx.MockTransport(lambda request: httpx.Response(500, json={"status": "error", "message": "Scrape deadline exceeded"})))
+    monkeypatch.setattr(base, "http_client", factory)
+    monkeypatch.setattr(base, "get_settings", lambda: SimpleNamespace(bypass_url="http://solver/v1"))
+    messages = []
+    monkeypatch.setattr(base.logger, "warning", messages.append)
+    assert base.fetch_via_bypass("https://source.test/works/date") == ""
+    assert "https://source.test/works/date" in messages[0]
+    assert "Scrape deadline exceeded" in messages[0]

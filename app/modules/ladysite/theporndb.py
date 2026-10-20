@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import json
+from urllib.parse import urlsplit
 
 from loguru import logger
 
@@ -23,6 +24,14 @@ from app.utils import get_true_code
 HOST = "https://api.theporndb.net"
 
 
+def api_host(host: str) -> str:
+    """兼容误填的官网/Stash 地址，保留自定义 REST 镜像。"""
+    host = (host or HOST).strip().rstrip("/")
+    if urlsplit(host).hostname in {"theporndb.net", "www.theporndb.net", "api.theporndb.net"}:
+        return HOST
+    return host
+
+
 class ThePornDb:
     name = "theporndb"
 
@@ -31,9 +40,10 @@ class ThePornDb:
             client = SiteClient.from_source(self.name)
             if client is not None:
                 self.client = client
+                self.client.host = api_host(self.client.host)
                 return
 
-        self.client = SiteClient(host or HOST, cookie, interval=1.5)
+        self.client = SiteClient(api_host(host), cookie, interval=1.5)
 
     def _token(self) -> str:
         """从 cookie 栏取 API Token，兼容裸 token 与整行 Authorization。"""
@@ -98,7 +108,9 @@ def json_to_code(raw: str, code: str = "") -> CodeInfo | None:
     if not isinstance(data, dict) or not data:
         return None
 
-    actual = data.get("external_id")
+    # SKU 是作品番号；external_id 在部分站点只是纯数字的内部 ID。
+    sku = data.get("sku")
+    actual = sku if isinstance(sku, str) and get_true_code(sku) else data.get("external_id")
     if not isinstance(actual, str) or not actual.strip():
         return None
     if code and not same_code(actual, code):
@@ -132,7 +144,10 @@ def json_to_code(raw: str, code: str = "") -> CodeInfo | None:
         info.publisher = (site.get("network", {}) or {}).get("name", "") or ""
 
     # 图分 poster / background 两类，各取一张
-    for item in data.get("posters") or []:
+    posters = data.get("posters") or []
+    if isinstance(posters, dict):
+        posters = [posters]
+    for item in posters:
         if isinstance(item, dict) and item.get("full"):
             info.poster = item["full"]
             break

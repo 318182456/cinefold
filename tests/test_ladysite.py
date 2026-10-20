@@ -841,6 +841,44 @@ DMM_SEARCH = """
 
 
 class TestDmmParse:
+    def test_detail_404_falls_back_to_path_search(self, monkeypatch):
+        import httpx
+        from app.modules.ladysite import base
+        from app.modules.ladysite.dmm import Dmm
+
+        site = Dmm(host="https://www.dmm.co.jp", cookie="foo=bar")
+        monkeypatch.setattr(site.client, "_throttle", lambda: None)
+        seen = []
+
+        def respond(request):
+            seen.append(request)
+            assert "age_check_done=1" in request.headers["cookie"]
+            assert "foo=bar" in request.headers["cookie"]
+            if len(seen) == 1:
+                return httpx.Response(404)
+            if len(seen) == 2:
+                assert request.url.path == "/search/=/searchstr=SSIS001/"
+                assert not request.url.query
+                return httpx.Response(200, text=DMM_SEARCH)
+            assert request.url.path == "/digital/videoa/-/detail/=/cid=ssis00001/"
+            return httpx.Response(200, text=DMM_DETAIL)
+
+        original_client = httpx.Client
+        monkeypatch.setattr(base.httpx, "Client", lambda **kw: original_client(transport=httpx.MockTransport(respond)))
+        info = site.crawler_original("ssis001")
+        assert len(seen) == 3
+        assert info.title == "テスト作品タイトル"
+        assert info.release_date == "2021-02-19"
+        assert site.client.last_page == DMM_DETAIL
+        assert site.client.last_url.endswith("/cid=ssis00001/")
+
+    def test_empty_search_code_does_not_request(self, monkeypatch):
+        from app.modules.ladysite.dmm import Dmm
+
+        site = Dmm(host="https://www.dmm.co.jp")
+        monkeypatch.setattr(site.client, "get", lambda *a, **kw: pytest.fail("无效番号不应发起搜索"))
+        assert site.search_detail_url("") == ""
+
     def test_detail_fields(self):
         from app.modules.ladysite.dmm import html_to_code
 
@@ -1338,6 +1376,46 @@ TPDB_JSON = """
 
 
 class TestThePornDbParse:
+    def test_sku_and_object_poster_from_official_schema(self):
+        import json
+        from app.modules.ladysite.theporndb import json_to_code
+
+        data = json.loads(TPDB_JSON)["data"]
+        data.update(external_id="30668", sku="SSIS-001", posters={"full": "https://tpdb/official-poster.jpg"})
+        info = json_to_code(json.dumps({"data": [data]}), "SSIS-001")
+        assert info.code == "SSIS-001"
+        assert info.poster == "https://tpdb/official-poster.jpg"
+        data["sku"] = "SSIS-002"
+        assert json_to_code(json.dumps({"data": [data]}), "SSIS-001") is None
+
+    @pytest.mark.parametrize("host", [
+        "https://theporndb.net", "https://www.theporndb.net/",
+        "https://theporndb.net/graphql?type=JAV", "https://api.theporndb.net/jav",
+    ])
+    def test_website_and_stash_hosts_resolve_to_rest_api(self, host):
+        from app.modules.ladysite.theporndb import ThePornDb
+
+        site = ThePornDb(host=host, cookie="test-token")
+        assert site.client.host == "https://api.theporndb.net"
+
+    def test_existing_source_host_is_corrected_without_losing_settings(self, monkeypatch):
+        from app.modules.ladysite.base import SiteClient
+        from app.modules.ladysite.theporndb import ThePornDb
+
+        client = SiteClient("https://theporndb.net", "test-token", interval=7)
+        client.proxy = "http://proxy.invalid:8888"
+        monkeypatch.setattr(SiteClient, "from_source", lambda key: client)
+        site = ThePornDb()
+        assert site.client is client
+        assert client.host == "https://api.theporndb.net"
+        assert client.cookie == "test-token"
+        assert client.interval == 7 and client.proxy == "http://proxy.invalid:8888"
+
+    def test_custom_rest_mirror_is_preserved(self):
+        from app.modules.ladysite.theporndb import ThePornDb
+
+        assert ThePornDb(host="https://mirror.invalid/api", cookie="test").client.host == "https://mirror.invalid/api"
+
     def test_search_selects_matching_result_and_verifies_identity(self):
         import json
         from app.modules.ladysite.theporndb import json_to_code

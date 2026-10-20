@@ -46,6 +46,17 @@ DEFAULT_UA = (
 MIN_INTERVAL_SECONDS = 1.0
 
 
+def is_tls_error(exc: BaseException) -> bool:
+    """识别 SSL 异常及 httpx/httpcore 包装后的 TLS 失败。"""
+    seen = set()
+    while exc is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        if isinstance(exc, ssl.SSLError) or "[SSL:" in str(exc).upper():
+            return True
+        exc = exc.__cause__ or exc.__context__
+    return False
+
+
 @dataclass
 class CodeInfo:
     """抓取到的番号信息。字段与 database.models.Code 对齐。"""
@@ -244,6 +255,12 @@ class SiteClient:
                     return self._remember(response.text, str(response.url))
             except httpx.HTTPStatusError as exc:
                 status = exc.response.status_code
+                # 421 需要重建连接，不能在同一次失败后立即判为无此作品。
+                if status == 421:
+                    if attempt < CONNECT_RETRIES:
+                        continue
+                    if allow_bypass and settings.bypass_url:
+                        return self._remember(fetch_via_bypass(url, params, timeout, cookie=self.cookie), url)
                 # 403/503 是典型的挑战页；502/504 多半是站点前面的防护层
                 # 掐了直连。两类都值得让 bypass 服务再试一次
                 if allow_bypass and (status in (403, 503) or status >= 500):
@@ -266,6 +283,9 @@ class SiteClient:
                 if attempt < CONNECT_RETRIES:
                     logger.debug(f"请求 {url} 连接异常，重试: {exc}")
                     continue
+                if allow_bypass and settings.bypass_url and is_tls_error(exc):
+                    logger.info(f"{url} TLS 重试失败，尝试通过 bypass 服务获取")
+                    return self._remember(fetch_via_bypass(url, params, timeout, cookie=self.cookie), url)
                 logger.warning(f"请求 {url} 异常: {exc}")
             except Exception as exc:
                 logger.warning(f"请求 {url} 异常: {exc}")
@@ -304,13 +324,17 @@ class SiteClient:
                     return ""
                 except httpx.HTTPStatusError as exc:
                     status = exc.response.status_code
+                    if status == 421 and attempt >= CONNECT_RETRIES:
+                        return bypass() if allow_bypass and settings.bypass_url else ""
                     if allow_bypass and settings.bypass_url and (status == 403 or status >= 500):
                         return bypass()
-                    if status != 429 and status < 500:
+                    if status not in (421, 429) and status < 500:
                         return ""
                     retry_after = exc.response.headers.get("Retry-After")
-                except (httpx.TransportError, ssl.SSLError):
-                    pass
+                except (httpx.TransportError, ssl.SSLError) as exc:
+                    if attempt >= CONNECT_RETRIES and allow_bypass and settings.bypass_url and is_tls_error(exc):
+                        logger.info(f"{url} TLS 重试失败，尝试通过 bypass 服务获取")
+                        return bypass()
                 if attempt >= CONNECT_RETRIES:
                     return ""
                 delay = 0.5 * (2 ** attempt) + random.uniform(0, 0.2)
@@ -400,7 +424,14 @@ def fetch_via_bypass(
                 return _fetch_bypass_response(client, base, url, cookie, solver_timeout)
     except Exception as exc:
         if not isinstance(exc, FetchCancelled):
-            logger.warning(f"bypass 服务请求失败: {exc}")
+            reason = str(exc) or type(exc).__name__
+            if isinstance(exc, httpx.HTTPStatusError):
+                try:
+                    error = exc.response.json()
+                    reason = f"HTTP {exc.response.status_code}: {error.get('message') or error.get('msg') or reason}"
+                except (ValueError, AttributeError):
+                    pass
+            logger.warning(f"bypass 抓取 {url.split('?')[0]} 失败: {type(exc).__name__}: {reason[:240]}")
         return ""
 
 
@@ -425,12 +456,26 @@ def _fetch_bypass_response(client, base, url, cookie, solver_timeout):
         payload = response.json()
         solution = payload.get("solution") or {}
         html = solution.get("response") or ""
-        # 三家都填 status="ok"，但 Byparr 的老版本会漏掉这个字段。
-        # 只要 HTML 到手就认，别为一个缺字段丢掉已经抓回来的内容。
-        if payload.get("status") not in ("ok", None) and not html:
+        # Byparr 老版本可能漏掉 status；兼容缺失值，但拒绝明确的失败响应。
+        if payload.get("status") not in ("ok", None):
             message = payload.get("message") or payload.get("msg") or ""
-            logger.warning(f"bypass 返回失败: {str(message)[:120]}")
+            logger.warning(f"bypass 抓取 {url.split('?')[0]} 返回失败: {str(message)[:120]}")
             return ""
+        status = solution.get("status")
+        if isinstance(status, int) and status >= 400:
+            logger.warning(f"bypass 抓取 {url.split('?')[0]} 目标站返回 HTTP {status}")
+            return ""
+        # 浏览器访问 JSON API 时会包成 HTML 的 <pre>；还原给 JSON 解析器。
+        if html.lstrip().startswith("<"):
+            from pyquery import PyQuery
+            import json
+            try:
+                text = PyQuery(html)("body > pre").text()
+                data = json.loads(text)
+                if isinstance(data, (dict, list)):
+                    html = json.dumps(data, ensure_ascii=False)
+            except (ValueError, TypeError):
+                pass
         return FetchedPage(html, solution.get('url') or url)
 
     # cloudflare-bypass-for-scraping 风格

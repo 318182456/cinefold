@@ -46,6 +46,36 @@ def auth(token):
     return {"Authorization": f"Bearer {token}"}
 
 
+class TestTpdbSourceHost:
+    @pytest.mark.parametrize("host,expected", [
+        ("https://theporndb.net/graphql?type=JAV", "https://api.theporndb.net"),
+        ("https://mirror.invalid/api", "https://mirror.invalid/api"),
+    ])
+    def test_saved_host_is_returned_and_used_after_reload(self, client, auth, host, expected):
+        from app.modules.ladysite.theporndb import ThePornDb
+        from app.database.models import DataSource
+        from app.database.session import session_scope
+        from sqlalchemy import select
+
+        client.get("/api/v1/datasources", headers=auth)
+        with session_scope() as session:
+            row = session.scalar(select(DataSource).where(DataSource.key == "theporndb"))
+            original = {k: getattr(row, k) for k in ("host", "cookie", "enabled")}
+        try:
+            saved = client.put("/api/v1/datasources/theporndb", headers=auth, json={"host": host, "cookie": "test-token", "enabled": True})
+            assert saved.json()["code"] == 200
+            listing = client.get("/api/v1/datasources", headers=auth).json()["data"]["items"]
+            source = next(item for item in listing if item["key"] == "theporndb")
+            assert source["host"] == expected
+            assert source["has_cookie"] is True
+            assert ThePornDb().client.host == expected
+        finally:
+            with session_scope() as session:
+                row = session.scalar(select(DataSource).where(DataSource.key == "theporndb"))
+                for key, value in original.items():
+                    setattr(row, key, value)
+
+
 class TestHealth:
     def test_health_no_auth(self, client):
         response = client.get("/api/health")

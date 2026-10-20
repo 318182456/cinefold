@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import re
+from urllib.parse import quote
 
 from loguru import logger
 from pyquery import PyQuery
@@ -88,10 +89,13 @@ class Dmm:
         return html_to_code(html, normalized)
 
     def search_detail_url(self, code: str) -> str:
-        html = self.client.get(
-            "/search/", params={"searchstr": code.replace("-", "")}
-        )
-        return html_to_detail_url(html, code) if html else ""
+        normalized = get_true_code(code)
+        if not normalized:
+            return ""
+        # DMM 搜索词属于路径参数；/search/?searchstr=... 会返回 404。
+        keyword = quote(normalized.replace("-", ""), safe="")
+        html = self.client.get(f"/search/=/searchstr={keyword}/")
+        return html_to_detail_url(html, normalized) if html else ""
 
 
 def _to_cid(code: str) -> str:

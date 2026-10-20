@@ -455,7 +455,7 @@ def _check_direct(url: str, timeout: float, key: str = "") -> tuple[str, str]:
     import httpx
 
     from app.core.config import get_settings
-    from app.modules.ladysite.base import DEFAULT_UA, SiteClient
+    from app.modules.ladysite.base import DEFAULT_UA, SiteClient, is_tls_error
 
     settings = get_settings()
     client_obj = SiteClient.from_source(key) if key else None
@@ -476,10 +476,12 @@ def _check_direct(url: str, timeout: float, key: str = "") -> tuple[str, str]:
     except httpx.TimeoutException:
         return "fail", f"连接超时（{timeout:.0f}s）"
     except Exception as exc:
+        if is_tls_error(exc):
+            return "blocked", f"TLS 连接失败：{type(exc).__name__}"[:200]
         return "fail", f"{type(exc).__name__}: {exc}"[:200]
 
     code = response.status_code
-    if code in (403, 503):
+    if code in (403, 421, 503):
         return "blocked", f"HTTP {code}，被反爬拦截"
     if code >= 400:
         return "fail", f"HTTP {code}"
