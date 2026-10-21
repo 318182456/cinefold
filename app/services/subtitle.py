@@ -23,9 +23,11 @@ from pathlib import Path
 
 from loguru import logger
 from sqlalchemy import select, update
+from sqlalchemy.orm import aliased
+from datetime import datetime
 
 from app.core.config import get_settings
-from app.database.models import MediaLink
+from app.database.models import Cache, MediaLink
 from app.database.session import session_scope
 from app.utils import get_true_code
 
@@ -35,6 +37,7 @@ LANG_SUFFIX = ".zh-CN"
 # 已存在的字幕认这些后缀 —— 别人手工放的、刮削工具带的都算数，
 # 不该被我们覆盖
 _EXISTING_SUFFIXES = (".srt", ".ass", ".ssa", ".vtt", ".sub")
+RETRY_NAMESPACE = "subtitle-retry"
 
 
 def fetch_for_code(code: str, force: bool = False, manual: bool = False) -> int:
@@ -71,6 +74,8 @@ def fetch_for_code(code: str, force: bool = False, manual: bool = False) -> int:
             return 0
 
     from app.modules import subtitle as subtitle_module
+    from app.modules.ladysite.transport import FetchReport
+    from app.services import metadataretry
 
     written = 0
     done: list[Path] = []
@@ -80,18 +85,37 @@ def fetch_for_code(code: str, force: bool = False, manual: bool = False) -> int:
     by_part: dict[int, list[Path]] = {}
     for info in infos:
         by_part.setdefault(info.part, []).append(info.path)
-    for part, videos in by_part.items():
-        item = subtitle_module.search(code, part=part) if part else subtitle_module.search(code)
-        if item is None:
-            continue
-        for video in videos:
-            if _write_beside(video, item):
-                written += 1
-                done.append(video)
+    automatic = not manual and not force
+    if automatic and not metadataretry.claim(code, namespace=RETRY_NAMESPACE, lease_seconds=1800):
+        logger.debug(f"[字幕] {code} 冷却或抓取中，跳过自动补漏")
+        return 0
+    report = FetchReport()
+    try:
+        with report.activate():
+            for part, videos in by_part.items():
+                item = subtitle_module.search(code, part=part) if part else subtitle_module.search(code)
+                if item is None:
+                    continue
+                for video in videos:
+                    if _write_beside(video, item):
+                        written += 1
+                        done.append(video)
+                    else:
+                        report.failed = True
+    except Exception:
+        if automatic:
+            metadataretry.defer(code, namespace=RETRY_NAMESPACE)
+        raise
 
     if written:
         _mark_subtitled(done)
         logger.info(f"[字幕] {code} 已按分段写入 {written} 处")
+    if written == len(targets):
+        with session_scope() as session:
+            metadataretry.clear(session, code, namespace=RETRY_NAMESPACE)
+    else:
+        until = metadataretry.defer(code, retryable=report.failed or not report.responses or bool(written), namespace=RETRY_NAMESPACE)
+        logger.info(f"[字幕] {code} 尚有缺失，下次自动尝试不早于 {until:%m-%d %H:%M}")
     return written
 
 
@@ -165,12 +189,15 @@ def _codes_lacking_subtitle(limit: int) -> list[str]:
     会被当成全都缺字幕。
     """
     with session_scope() as session:
+        retry = aliased(Cache)
         rows = session.execute(
             select(MediaLink.code, MediaLink.link_path)
+            .outerjoin(retry, (retry.namespace == RETRY_NAMESPACE) & (retry.key == MediaLink.code))
             .where(MediaLink.code.is_not(None), MediaLink.code != "")
             .where(MediaLink.has_subtitle.is_not(True))
+            .where((retry.id.is_(None)) | (retry.create_time <= datetime.now()))
             # 未探测的排前面：这些是升级后第一轮要补的正主
-            .order_by(MediaLink.has_subtitle.is_(None).desc(), MediaLink.code)
+            .order_by(retry.create_time.asc().nullsfirst(), MediaLink.has_subtitle.is_(None).desc(), MediaLink.code)
         ).all()
 
     seen: set[str] = set()
@@ -179,7 +206,6 @@ def _codes_lacking_subtitle(limit: int) -> list[str]:
     for code, link_path in rows:
         if not code or code in seen:
             continue
-        seen.add(code)
         # 列说 False 也仍要复核：字幕可能是用户手工放进去的，
         # 那种情况下列不会被更新。
         # 只认外挂 —— 与 fetch_for_code 的跳过判据必须同口径，
@@ -190,6 +216,7 @@ def _codes_lacking_subtitle(limit: int) -> list[str]:
         except OSError:
             continue
         out.append(code)
+        seen.add(code)
         if len(out) >= limit:
             break
     return out

@@ -463,6 +463,16 @@ onMounted(load)
                 已停用
               </span>
               <button
+                class="ml-auto shrink-0"
+                :aria-label="`${item.enabled ? '停用' : '启用'}${item.name}`"
+                :title="item.enabled ? '已启用' : '已停用'"
+                @click.stop="toggle(item)"
+              >
+                <span class="flex h-4 w-8 items-center rounded-full px-0.5 transition-colors" :class="item.enabled ? 'bg-brand' : 'bg-gray-700'">
+                  <span class="h-3 w-3 rounded-full bg-white transition-transform" :class="item.enabled ? 'translate-x-4' : ''" />
+                </span>
+              </button>
+              <button
                 class="btn-ghost ml-auto shrink-0 px-2 py-0.5 text-[11px]"
                 :disabled="checking === item.key"
                 @click.stop="check(item)"

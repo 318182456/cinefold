@@ -172,6 +172,8 @@ class SubtitleCat:
                 response.raise_for_status()
                 raw = response.content
         except Exception as exc:
+            from app.modules.ladysite.transport import report_response
+            report_response("")
             logger.debug(f"[字幕] 下载失败 {url}: {exc}")
             return ""
 

@@ -121,6 +121,9 @@ SOURCES: tuple[dict, ...] = (
     # parser 留空是有意的：详情抓取只认有 parser 的源
     # （enabled_parser_sources），留空才不会被拉进查番号详情那条链路。
     # 解析实现在 modules/subtitle 下，按 key 取地址
+    {"key": "xunlei", "name": "迅雷字幕库",
+     "host": "https://api-shoulei-ssl.xunlei.com", "kind": "subtitle",
+     "parser": "", "bypass_first": False, "interval": 1.0},
     {"key": "javsub", "name": "JavSub.ai（字幕）",
      "host": "https://javsub.ai", "kind": "subtitle",
      "parser": "", "bypass_first": True, "interval": 2.0},
@@ -165,7 +168,10 @@ VERIFY_MARKS: tuple[str, ...] = ("age_check", "age-check", "driver-verify")
 # 首页挂了前置校验、但内容页正常的源：测首页会误报不可用。
 # javbus 首页固定跳 /doc/driver-verify（过盾也一样），而详情页可直接抓，
 # 所以拿一个真实番号页当探针。
-CHECK_PATH: dict[str, str] = {"javbus": "/SSIS-001"}
+CHECK_PATH: dict[str, str] = {
+    "javbus": "/SSIS-001",
+    "xunlei": "/oracle/subtitle?gcid=&cid=&name=SSNI-497",
+}
 
 # 抓取优先级的默认顺序（越靠前越优先）。不能沿用 SOURCES 的字母序：
 # 首批并发位有限（见 ladysite.MAX_PARALLEL_SITES），直连可用的主力源

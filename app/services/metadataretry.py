@@ -21,29 +21,29 @@ ERROR_SECONDS = 10 * 60
 LEASE_SECONDS = 5 * 60  # Longer than get_code_detail's 120-second network budget.
 
 
-def eligible(column, now=None):
+def eligible(column, now=None, *, namespace=NAMESPACE):
     """Exclude cooling/in-flight entries before applying a batch's LIMIT."""
     return ~exists().where(
-        Cache.namespace == NAMESPACE,
+        Cache.namespace == namespace,
         Cache.key == column,
         Cache.create_time > (now or datetime.now()),
     )
 
 
-def _statement(session, code, until, reason):
+def _statement(session, code, until, reason, namespace=NAMESPACE):
     insert = sqlite_insert if session.get_bind().dialect.name == "sqlite" else pg_insert
     statement = insert(Cache).values(
-        namespace=NAMESPACE, key=code, create_time=until,
+        namespace=namespace, key=code, create_time=until,
         content=json.dumps({"reason": reason, "retry_at": until.isoformat()}),
     )
     return statement
 
 
-def claim(code):
+def claim(code, *, namespace=NAMESPACE, lease_seconds=LEASE_SECONDS):
     """An atomic expiring lease also deduplicates concurrent processes/tasks."""
     now = datetime.now()
     with session_scope() as session:
-        statement = _statement(session, code, now + timedelta(seconds=LEASE_SECONDS), "inflight")
+        statement = _statement(session, code, now + timedelta(seconds=lease_seconds), "inflight", namespace)
         statement = statement.on_conflict_do_update(
             index_elements=[Cache.namespace, Cache.key],
             set_={"content": statement.excluded.content, "create_time": statement.excluded.create_time},
@@ -52,11 +52,11 @@ def claim(code):
         return session.scalar(statement) is not None
 
 
-def defer(code, retryable=True, session=None):
+def defer(code, retryable=True, session=None, *, namespace=NAMESPACE):
     seconds = ERROR_SECONDS if retryable else EMPTY_SECONDS
     until = datetime.now() + timedelta(seconds=seconds)
     with (nullcontext(session) if session is not None else session_scope()) as session:
-        statement = _statement(session, code, until, "error" if retryable else "empty")
+        statement = _statement(session, code, until, "error" if retryable else "empty", namespace)
         session.execute(statement.on_conflict_do_update(
             index_elements=[Cache.namespace, Cache.key],
             set_={"content": statement.excluded.content, "create_time": statement.excluded.create_time},
@@ -64,6 +64,6 @@ def defer(code, retryable=True, session=None):
     return until
 
 
-def clear(session, code):
+def clear(session, code, *, namespace=NAMESPACE):
     """Release only in the same transaction that saves the successful details."""
-    session.execute(delete(Cache).where(Cache.namespace == NAMESPACE, Cache.key == code))
+    session.execute(delete(Cache).where(Cache.namespace == namespace, Cache.key == code))

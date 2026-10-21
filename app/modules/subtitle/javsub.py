@@ -209,6 +209,8 @@ class JavSub:
                         if looks_like_subtitle(text):
                             return text
         except Exception as exc:
+            from app.modules.ladysite.transport import report_response
+            report_response("")
             logger.debug(f"[字幕] javsub 直连下载 {url} 失败: {exc}")
 
         # 若直连受限，尝试通过 SiteClient (可走 bypass 绕过服务) 获取

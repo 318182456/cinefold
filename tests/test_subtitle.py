@@ -112,9 +112,11 @@ def clean_links():
     DBBase.metadata.create_all(engine)
 
     def _clear():
+        from app.database.models import Cache
         with session_scope() as session:
             for row in session.query(MediaLink).all():
                 session.delete(row)
+            session.query(Cache).filter(Cache.namespace == service.RETRY_NAMESPACE).delete()
     _clear()
     yield
     _clear()

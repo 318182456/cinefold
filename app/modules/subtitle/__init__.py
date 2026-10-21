@@ -16,14 +16,15 @@ from app.modules.subtitle.base import SubtitleItem
 from app.utils import get_true_code
 
 # 抓取顺序。本地字幕库排第一 —— 命中就不必跨境请求，且那里放的是
-# 人工挑过的字幕；javsub 与 subtitlecat 作网络主力；
+# 人工挑过的字幕；迅雷 API 优先于需要网页解析的网络源；
 # GitHub 字幕仓库按番号命名、地址稳定，作它跑路时的兜底
-SUBTITLE_SITES: tuple[str, ...] = ("subtitlelocal", "javsub", "subtitlecat", "subtitlegh")
+SUBTITLE_SITES: tuple[str, ...] = ("subtitlelocal", "xunlei", "javsub", "subtitlecat", "subtitlegh")
 
 # key → (模块, 类名)。与 ladysite 一样延迟导入，避免把 pyquery
 # 的解析开销拉进那些根本不抓字幕的调用路径
 _SITE_CLASSES: dict[str, tuple[str, str]] = {
     "subtitlelocal": ("local", "LocalSubtitle"),
+    "xunlei": ("xunlei", "XunleiSubtitle"),
     "javsub": ("javsub", "JavSub"),
     "subtitlecat": ("subtitlecat", "SubtitleCat"),
     "subtitlegh": ("github", "GithubSubtitle"),
@@ -37,6 +38,11 @@ def _build(key: str):
         return None
     module_name, class_name = entry
     try:
+        if key != "subtitlelocal":
+            from app.modules.ladysite.sources import get_source
+            source = get_source(key)
+            if source is None or not source.get("enabled", True):
+                return None
         module = import_module(f"app.modules.subtitle.{module_name}")
         site = getattr(module, class_name)()
     except Exception as exc:
@@ -64,6 +70,10 @@ def search(code: str, part: int = 0) -> SubtitleItem | None:
     if not code:
         return None
 
+    from app.modules.scrape.merge import base_code
+    from app.modules.ladysite.transport import report_response
+    lookup = base_code(code) or code
+
     for key in SUBTITLE_SITES:
         # 尚未提供逐段字幕的网络源不能把整片字幕复制给每一段。
         if part and key != 'subtitlelocal':
@@ -72,12 +82,17 @@ def search(code: str, part: int = 0) -> SubtitleItem | None:
         if site is None:
             continue
         try:
-            item = site.search(code, part=part) if part else site.search(code)
+            # The local library may have edition-specific files; online
+            # catalogues index the original work, not local -C/-UC editions.
+            query = code if key == "subtitlelocal" else lookup
+            item = site.search(query, part=part) if part else site.search(query)
         except Exception as exc:
             # 单站不通不该影响后面的站
             logger.warning(f"[字幕] {key} 抓取 {code} 失败: {exc}")
+            report_response("")
             continue
         if item is not None and item.content:
+            item.code = code
             logger.info(f"[字幕] {code} 命中 {key}（{item.filename}）")
             return item
 
