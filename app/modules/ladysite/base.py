@@ -530,7 +530,7 @@ def _solver_request(client, endpoint, body, quick=False):
     for attempt in range(max(1, attempts)):
         # Re-enter the FIFO queue for each exit attempt, so a slow site's
         # complete retry chain cannot monopolize a browser slot.
-        with _bypass_slot(endpoint, quick), manager.lease(remote=True, url=body["url"], timeout=min(20, max(0, deadline-time.perf_counter()))) as proxy:
+        with manager.lease(remote=True, url=body["url"], timeout=min(20, max(0, deadline-time.perf_counter()))) as proxy, _bypass_slot(endpoint, quick):
             node_name = manager.proxy_name(proxy)
             request = dict(body)
             if proxy:

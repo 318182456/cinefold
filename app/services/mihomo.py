@@ -124,6 +124,7 @@ class Mihomo:
                        "groups": {}, "source_groups": {},
                        **_read(root / "settings.json", {})}
         self.health = {}
+        self.probes = {}
         self.winners = {}
         self.credentials = _read(root / "credentials.json", {})
         self.nodes = _read(root / "nodes.json", [])
@@ -184,6 +185,7 @@ class Mihomo:
                     "automatic": self.config["automatic"],
                     "routes": [{"host": key, "node": value[0]} for key, value in self.winners.items()
                                if time.monotonic() - value[1] < 600],
+                    "preflight": self._probe_status(),
                     "installed": self.binary.exists(), "version": self.version,
                     "running": self.process is not None and self.process.poll() is None,
                     "nodes": [{"name": node["name"], "type": node["type"]} for node in self.nodes],
@@ -242,6 +244,7 @@ class Mihomo:
         with self.lock:
             if self.process is not None and self.process.poll() is None:
                 return
+            self.probes.clear()
             command = [str(self.binary), "-d", str(self.root), "-f", str(self.root / "config.json")]
             if sys.platform.startswith("linux"):
                 command = [sys.executable, str(Path(__file__).with_name("mihomorunner.py")), str(os.getpid()), *command]
@@ -292,6 +295,7 @@ class Mihomo:
         _write(self.root / "provider-cache.json", loader.next_cache)
         with self.lock:
             self.health.clear()
+            self.probes.clear()
             self.winners.clear()
 
     @traffic_update
@@ -419,6 +423,7 @@ class Mihomo:
                     with self.lock:
                         self.config = config
                         self.health.clear()
+                        self.probes.clear()
                         self.winners.clear()
                     _write(self.root / "settings.json", self.config)
                 if action == "check":
@@ -496,6 +501,14 @@ class Mihomo:
                               and now - self.health.get((route, identities[name]), -1e9) >= 120]
                 if not candidates:
                     raise RuntimeError("此数据源的候选节点近期均失败，请稍后重试或更换订阅")
+                from app.services.mihomoprobe import origin, TTL
+                target = origin(url)
+                # Verified candidates win over subscription order; among them,
+                # prefer lower measured connection latency.
+                def rank(name):
+                    checked = self.probes.get((target, identities[name]))
+                    return (0, checked[2]) if checked and checked[0] and now - checked[1] < TTL else (1, 0)
+                candidates.sort(key=rank)
                 selected = candidates[0]
             index = next((i for i, node in enumerate(self.nodes) if node["name"] == selected), None)
             if index is None:
@@ -525,7 +538,7 @@ class Mihomo:
                 self.available.notify_all()
 
     @contextmanager
-    def lease(self, remote=False, source_key="", url="", timeout=20):
+    def _reserve(self, remote=False, source_key="", url="", timeout=20):
         """Spread bursts: distinct active nodes, at most two starts per 10 seconds."""
         from app.modules.ladysite.transport import current_budget
         deadline = time.monotonic() + timeout
@@ -573,6 +586,93 @@ class Mihomo:
                     self.allocated.discard(name)
                     self.available.notify_all()
 
+    def _probe_key(self, proxy, url):
+        from app.services.mihomoprobe import origin
+        index = (urlparse(proxy).port or 0) - FIRST_PORT
+        return origin(url), self._identity(self.nodes[index])
+
+    def _preflight_needed(self, proxy, url):
+        from app.services.mihomoprobe import TTL
+        with self.lock:
+            result = self.probes.get(self._probe_key(proxy, url))
+            return not (result and result[0] and time.monotonic() - result[1] < TTL)
+
+    @contextmanager
+    def lease(self, remote=False, source_key="", url="", timeout=20):
+        """Reserve first, verify unknown exits in parallel, then yield a proven one."""
+        import asyncio
+        from app.modules.ladysite.transport import current_budget, FetchBudget
+        from app.services.mihomoprobe import race, BATCH_SIZE
+
+        deadline = time.monotonic() + timeout
+        while True:
+            reservations, proxies = [], []
+            selected = None
+            try:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("代理节点预检达到总时限，未找到可连接的节点")
+                reservation = self._reserve(remote, source_key, url, remaining)
+                proxy = reservation.__enter__()
+                reservations.append(reservation)
+                proxies.append(proxy)
+                if not proxy or not url or not self._preflight_needed(proxy, url):
+                    selected = 0
+                else:
+                    if self.config["automatic"]:
+                        for _ in range(BATCH_SIZE - 1):
+                            extra = self._reserve(remote, source_key, url, min(0.01, max(0.001, deadline-time.monotonic())))
+                            try:
+                                extra_proxy = extra.__enter__()
+                            except (RuntimeError, TimeoutError):
+                                budget = current_budget()
+                                if budget:
+                                    budget.check()
+                                break
+                            reservations.append(extra)
+                            proxies.append(extra_proxy)
+                            if not extra_proxy:
+                                extra.__exit__(None, None, None)
+                                reservations.pop()
+                                proxies.pop()
+                                break
+                            if not self._preflight_needed(extra_proxy, url):
+                                selected = len(proxies) - 1
+                                break
+                    if selected is None:
+                        budget = current_budget() or FetchBudget(time.perf_counter() + max(0, deadline-time.monotonic()))
+                        try:
+                            selected = budget.run(race(self, proxies, url, min(budget.remaining(), max(0, deadline-time.monotonic()))))
+                        except asyncio.TimeoutError as exc:
+                            raise TimeoutError("代理节点预检达到总时限") from exc
+                    budget = current_budget()
+                    if budget:
+                        budget.check()
+                if selected is not None:
+                    # Probes are fully finished/cancelled before releasing losers;
+                    # runtime updates cannot remap ports while a probe is in flight.
+                    for index, candidate in enumerate(reservations):
+                        if index != selected:
+                            candidate.__exit__(None, None, None)
+                            reservations[index] = None
+                    yield proxies[selected]
+                    return
+                if not self.config["automatic"]:
+                    raise RuntimeError("指定代理节点无法连接目标站，预检失败")
+            finally:
+                for reservation in reservations:
+                    if reservation is not None:
+                        reservation.__exit__(None, None, None)
+
+    def _probe_status(self):
+        from app.services.mihomoprobe import TTL
+        names = {self._identity(node): node["name"] for node in self.nodes}
+        now = time.monotonic()
+        return [{"host": urlparse(target).netloc, "node": names[identity],
+                 "reachable": value[0], "delay_ms": value[2], "status_code": value[3]}
+                for (target, identity), value in sorted(self.probes.items(), key=lambda item: item[1][1], reverse=True)
+                if identity in names and now - value[1] < TTL][:20]
+
     def proxy_name(self, proxy):
         """A log-safe label: never return the authenticated listener URL."""
         if not proxy:
@@ -597,8 +697,14 @@ class Mihomo:
             if success:
                 self.winners[route] = (name, time.monotonic())
                 self.health.pop((route, identity), None)
+                if url:
+                    key = self._probe_key(proxy, url)
+                    previous = self.probes.get(key)
+                    self.probes[key] = (True, time.monotonic(), previous[2] if previous else 9999, None)
             else:
                 self.health[(route, identity)] = time.monotonic()
+                if url:
+                    self.probes.pop(self._probe_key(proxy, url), None)
                 winner = self.winners.get(route, (None,))[0]
                 if any(node["name"] == winner and self._identity(node) == identity for node in self.nodes):
                     self.winners.pop(route, None)

@@ -168,6 +168,12 @@ onUnmounted(() => { disposed = true; clearInterval(timer) })
     <div v-if="state?.providers?.length" class="max-h-40 space-y-1 overflow-auto text-xs text-gray-500">
       <p v-for="(provider, index) in state.providers" :key="index" :class="provider.status === 'ok' ? '' : 'text-amber-400'">{{ provider.name }}：{{ provider.count }} 个节点，{{ provider.status === 'ok' ? '已更新' : provider.status === 'cached' ? '拉取失败，保留缓存' : '拉取失败' }}</p>
     </div>
+    <div v-if="state?.preflight?.length" class="max-h-40 space-y-1 overflow-auto text-xs text-gray-500">
+      <p>近期节点连接检测（连接成功后仍可能需要过盾）</p>
+      <p v-for="check in state.preflight" :key="`${check.host}:${check.node}`" :class="check.reachable ? '' : 'text-amber-400'">
+        {{ check.host }} → {{ check.node }}：{{ check.reachable ? '可连接' : '连接失败' }} · {{ check.delay_ms }}ms<span v-if="check.status_code === 403"> · 目标站验证</span>
+      </p>
+    </div>
     <div v-if="state?.routes?.length" class="max-h-32 overflow-auto text-xs text-gray-500">
       <p v-for="route in state.routes" :key="route.host">{{ route.host }} → {{ route.node }}</p>
     </div>

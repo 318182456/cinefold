@@ -19,6 +19,9 @@ from app.services.mihomo import Mihomo
 @pytest.fixture
 def manager(tmp_path, monkeypatch):
     value = Mihomo(tmp_path)
+    # Existing routing tests isolate health I/O; preflight integration has its
+    # own tests with actual asynchronous HTTP responses/cancellation.
+    monkeypatch.setattr(value, "_preflight_needed", lambda proxy, url: False)
     monkeypatch.setattr(mihomo, "_instance", value)
     from app.modules.ladysite import base
     monkeypatch.setattr(base, "_BYPASS_RECOVERY", {})

@@ -113,5 +113,5 @@ def test_proxy(body: ProxyTest):
                 response = client.get(body.url)
                 response.raise_for_status()
         return ResponseEntity.ok({"success": True, "message": "目标站连接成功"})
-    except (httpx.HTTPError, RuntimeError):
+    except (httpx.HTTPError, RuntimeError, TimeoutError):
         return ResponseEntity.fail("目标站连接失败，请检查节点或切换测试地址", code=400)
