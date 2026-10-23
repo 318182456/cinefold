@@ -162,11 +162,19 @@ def report(month: str, user_id: str = '', day: str = '', page: int = 1, size: in
     end = (begin.replace(day=28) + timedelta(days=4)).replace(day=1)
     start_utc, end_utc = (x.astimezone(timezone.utc).replace(tzinfo=None) for x in (begin, end))
     now = _now()
+    plugin_error = ''
+    if settings.playback_reporting_enabled and settings.emby_url and settings.emby_api_key:
+        from app.services.playbackreporting import plugin_report
+        try:
+            return plugin_report(settings, month, tz, user_id, day, page, size)
+        except Exception as exc:
+            plugin_error = str(exc) if isinstance(exc, ValueError) else type(exc).__name__
+            logger.warning(f'[播放统计] Playback Reporting 不可用，显示本地观测记录: {type(exc).__name__}')
     days = {f'{month}-{i:02d}': {'date': f'{month}-{i:02d}', 'seconds': 0.0, 'plays': 0} for i in range(1, calendar.monthrange(year, number)[1] + 1)}
     memberships = defaultdict(set)
     with session_scope() as session:
         conditions = [PlaybackSession.server == _server(settings)]
-        selected_user = user_id or settings.emby_user_id
+        selected_user = settings.emby_user_id or user_id
         if selected_user:
             conditions.append(PlaybackSession.user_id == selected_user)
         rows = session.scalars(select(PlaybackSession).where(*conditions, PlaybackSession.started_at < end_utc,
@@ -199,7 +207,7 @@ def report(month: str, user_id: str = '', day: str = '', page: int = 1, size: in
             record['emby_url'] = emby_link(row.item_id)
             records.append(record)
         users = [dict(user_id=uid, name=name or uid) for uid, name in session.execute(select(PlaybackSession.user_id, PlaybackSession.user_name).where(PlaybackSession.server == _server(settings)).distinct()) if not settings.emby_user_id or uid == settings.emby_user_id]
-    return {'enabled': settings.playback_tracking_enabled, 'timezone': str(tz), 'month': month, 'days': list(days.values()),
+    return {'enabled': settings.playback_tracking_enabled, 'source': 'local', 'source_error': plugin_error, 'timezone': str(tz), 'month': month, 'days': list(days.values()),
             'plays': len(set().union(*memberships.values())) if memberships else 0, 'seconds': sum(d['seconds'] for d in days.values()), 'active_days': sum(d['plays'] > 0 for d in days.values()),
             'records': records, 'total': len(visible), 'page': page, 'size': size, 'users': users,
             'note': '从启用后开始记录。时长为观测到的播放活动估算，排除已观测的暂停与断连空档；跳转不按进度差累加。短于轮询间隔的播放可能漏记，Webhooks 可补充起止事件。'}

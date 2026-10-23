@@ -254,8 +254,9 @@ export const subscribeActorWorks = (name) => http.post('/actors/profile/subscrib
 // ---------------------------------------------------------------- 系统
 export const getConfig = () => http.get('/config')
 export const saveConfig = (config) => http.post('/config', { config })
-export const getLogs = (lines = 300, keyword = '') =>
-  http.get('/logs', { params: { lines, keyword } })
+export const getLogs = (lines = 300, keyword = '', filename = '', level = '', signal) =>
+  http.get('/logs', { params: { lines, keyword, filename, level }, signal })
+export const getLogFiles = () => http.get('/logs/files')
 export const listCron = () => http.get('/cron')
 export const runTask = (jobId, restart = false) => http.post('/task', null, { params: { job_id: jobId, ...(restart ? { restart: true } : {}) } })
 // 排班：preview 只翻译不保存，update 才落盘

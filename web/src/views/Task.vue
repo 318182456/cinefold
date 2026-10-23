@@ -1,7 +1,7 @@
 <script setup>
 import PagePanel from '@/components/PagePanel.vue'
 import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
-import { listCron, previewSchedule, runTask, translateTitles, updateSchedule } from '@/api'
+import { listCron, previewSchedule, runTask, updateSchedule } from '@/api'
 import http from '@/api'
 import { useToast } from '@/composables/useToast'
 import EmptyState from '@/components/EmptyState.vue'
@@ -11,6 +11,20 @@ const toast = useToast()
 const jobs = ref([])
 const loading = ref(false)
 const running = ref('')
+const taskStateKnown = ref(false), taskError = ref('')
+let taskRequest = 0
+const taskPhases = { idle: '未执行', queued: '排队中', running: '执行中', finished: '执行结束', failed: '执行失败', interrupted: '上次中断' }
+const activeJob = job => ['queued', 'running'].includes(job.execution?.phase) || (job.id === COLLECTION_JOB && collection.value.running)
+const timeText = value => value ? new Date(value * 1000).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' }) : '—'
+const durationText = execution => {
+  const value = execution?.duration ?? (execution?.started_at ? (Date.now()/1000 - execution.started_at) : null)
+  return value == null ? '—' : `${Math.max(0, value).toFixed(1)} 秒`
+}
+const taskSummary = computed(() => ({
+  running: jobs.value.filter(job => job.execution?.phase === 'running' || (job.id === COLLECTION_JOB && collection.value.running)).length,
+  queued: jobs.value.filter(job => job.execution?.phase === 'queued').length,
+  failed: jobs.value.filter(job => ['failed', 'interrupted'].includes(job.execution?.phase)).length,
+}))
 let timer = null
 const COLLECTION_JOB = 'auto_emby_collections'
 const collection = ref({ running:false, phase:'idle', groups:[], done:0, total:0 })
@@ -91,18 +105,26 @@ const hints = computed(() => {
 })
 
 async function load() {
+  clearTimeout(timer)
+  const request = ++taskRequest
   loading.value = true
   try {
     const data = await listCron()
+    if (disposed || request !== taskRequest) return
     jobs.value = data.jobs || []
+    taskStateKnown.value = true; taskError.value = ''
   } catch (err) {
-    toast.error(err.message)
+    if (!disposed && request === taskRequest) { taskStateKnown.value = false; taskError.value = err.message }
   } finally {
-    loading.value = false
+    if (!disposed && request === taskRequest) {
+      loading.value = false
+      timer = setTimeout(load, jobs.value.some(activeJob) ? 2000 : 10000)
+    }
   }
 }
 
 async function trigger(jobId, restart = false) {
+  if (!taskStateKnown.value || running.value || jobs.value.some(job => job.id === jobId && activeJob(job))) return
   if (jobId===COLLECTION_JOB && (!collectionKnown.value || collection.value.running)) return
   running.value = jobId
   if (jobId===COLLECTION_JOB) { clearTimeout(collectionTimer); collectionRequest++ }
@@ -111,7 +133,8 @@ async function trigger(jobId, restart = false) {
     if (jobId===COLLECTION_JOB) {
       if (!disposed) acceptCollection(state)
       toast.success('AI 全库合集任务已在后台启动')
-    } else toast.success('任务已触发，执行情况见日志页')
+    } else toast.success('任务已提交，执行状态将在此页更新')
+    if (!disposed) await load()
   } catch (err) {
     toast.error(err.message)
   } finally {
@@ -121,12 +144,7 @@ async function trigger(jobId, restart = false) {
 }
 
 async function doTranslate() {
-  try {
-    await translateTitles()
-    toast.success('翻译任务已触发')
-  } catch (err) {
-    toast.error(err.message)
-  }
+  await trigger('translate_titles')
 }
 
 function startEdit(job) {
@@ -185,12 +203,10 @@ async function save(job) {
 onMounted(() => {
   load()
   pollCollection()
-  // 下次执行时间会随时间推移，定期刷新
-  timer = setInterval(load, 60000)
 })
 onUnmounted(() => {
-  disposed=true; collectionRequest++; clearTimeout(collectionTimer)
-  clearInterval(timer)
+  disposed=true; taskRequest++; collectionRequest++; clearTimeout(collectionTimer)
+  clearTimeout(timer)
   clearTimeout(previewTimer)
 })
 </script>
@@ -201,18 +217,26 @@ onUnmounted(() => {
 
     <div class="flex flex-wrap gap-2">
       <button class="btn-ghost px-3 py-1.5 text-xs" @click="load">刷新</button>
-      <button class="btn-ghost px-3 py-1.5 text-xs" @click="doTranslate">立即翻译标题</button>
+      <button class="btn-ghost px-3 py-1.5 text-xs" :disabled="!taskStateKnown || !!running || jobs.some(job => job.id === 'translate_titles' && activeJob(job))" @click="doTranslate">立即翻译标题</button>
     </div>
     </template>
 
 
     <LoadingBlock v-if="loading && !jobs.length" :rows="4" />
 
-    <div v-else-if="jobs.length" class="space-y-2">
+    <p v-if="taskError" class="rounded-lg border border-amber-700/30 p-3 text-xs text-amber-300">状态读取失败：{{ taskError }}。保留上次结果，恢复连接前暂停手动触发。</p>
+    <div v-if="jobs.length" class="flex flex-wrap gap-4 text-xs text-gray-400" aria-label="任务状态概览">
+      <span>共 {{ jobs.length }} 项</span><span class="text-brand">执行中 {{ taskSummary.running }}</span><span>排队 {{ taskSummary.queued }}</span><span class="text-amber-300">最近失败 / 中断 {{ taskSummary.failed }}</span>
+    </div>
+
+    <div v-if="jobs.length" class="space-y-2">
       <div v-for="job in jobs" :key="job.id" class="card">
         <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div class="min-w-0">
             <p class="text-sm font-medium text-gray-200">{{ job.name }}</p>
+            <p v-if="job.id !== COLLECTION_JOB" class="mt-1 text-xs" :class="activeJob(job) ? 'text-brand' : ['failed','interrupted'].includes(job.execution?.phase) ? 'text-red-400' : 'text-gray-500'">
+              {{ taskPhases[job.execution?.phase || 'idle'] }}<span v-if="job.execution?.source"> · {{ job.execution.source === 'manual' ? '手动触发' : '定时触发' }}</span>
+            </p>
             <p class="mt-0.5 text-xs text-gray-500">
               {{ DESCRIPTIONS[job.id] || job.id }}
             </p>
@@ -240,12 +264,20 @@ onUnmounted(() => {
             </button>
             <button
               class="btn-primary px-3 py-1.5 text-xs"
-              :disabled="running === job.id || (job.id === COLLECTION_JOB && (!collectionKnown || collection.running))"
+              :disabled="!!running || !taskStateKnown || activeJob(job) || (job.id === COLLECTION_JOB && (!collectionKnown || collection.running))"
               @click="trigger(job.id)"
             >
-              {{ running === job.id ? '触发中…' : job.id === COLLECTION_JOB && collection.running ? '运行中' : job.id === COLLECTION_JOB && collection.can_resume ? '继续任务 / 重试失败' : '立即执行' }}
+              {{ running === job.id ? '触发中…' : job.id === COLLECTION_JOB && collection.running ? '运行中' : activeJob(job) ? taskPhases[job.execution?.phase] : job.id === COLLECTION_JOB && collection.can_resume ? '继续任务 / 重试失败' : '立即执行' }}
             </button>
           </div>
+        </div>
+
+        <div v-if="job.id !== COLLECTION_JOB && job.execution?.phase !== 'idle' && job.execution?.phase" class="mt-3 space-y-2 border-t border-gray-800 pt-3 text-xs text-gray-500">
+          <p>提交 {{ timeText(job.execution.queued_at) }} · 开始 {{ timeText(job.execution.started_at) }} · 耗时 {{ durationText(job.execution) }}<span v-if="job.execution.processed != null"> · 返回数量 {{ job.execution.processed }}</span></p>
+          <p v-if="job.execution.error" class="break-all text-red-400">{{ job.execution.error }}</p>
+          <p v-if="activeJob(job)" class="text-gray-400">任务在后台执行，可以离开此页，稍后回来查看结果。</p>
+          <RouterLink :to="{name:'Logs',query:{keyword:job.id}}" class="text-brand">查看任务日志 ↗</RouterLink>
+          <details v-if="job.execution.history?.length"><summary class="cursor-pointer">最近 {{ job.execution.history.length }} 次执行</summary><p v-for="run in [...job.execution.history].reverse()" :key="run.run_id" class="mt-2 break-all">{{ timeText(run.started_at || run.queued_at) }} · {{ taskPhases[run.phase] }} · {{ durationText(run) }}<span v-if="run.error" class="text-red-400"> · {{ run.error }}</span></p></details>
         </div>
 
         <div v-if="job.id === COLLECTION_JOB" class="mt-3 space-y-2 border-t border-gray-800 pt-3 text-xs">
@@ -306,6 +338,6 @@ onUnmounted(() => {
       </div>
     </div>
 
-    <EmptyState v-else text="没有已注册的任务" hint="调度器可能未正常启动" />
+    <EmptyState v-else-if="!loading" text="没有已注册的任务" hint="调度器可能未正常启动" />
   </PagePanel>
 </template>

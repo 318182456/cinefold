@@ -20,7 +20,7 @@ def db(monkeypatch):
     import app.database.session as database
     engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
     DBBase.metadata.create_all(engine)
-    factory = sessionmaker(bind=engine, expire_on_commit=False)
+    factory = sessionmaker(bind=engine, expire_on_commit=False, autoflush=False)
     monkeypatch.setattr(database, "SessionLocal", factory)
     yield factory
     engine.dispose()
@@ -54,6 +54,25 @@ def test_rule_matches_exact_metadata_and_unknown_casts():
     assert not matches(item, {"prefixes": ["SON"]})
     assert not matches({"code": "SONE-123"}, {"max_coactors": 2})
     assert not matches(item, {"earliest_release_date": "2026-01-01"})
+
+
+def test_rule_preview_explains_skips_and_agrees_with_execution(db, monkeypatch):
+    from app.services.rules import preview_rule, run_rules
+    monkeypatch.setattr('app.services.is_filtered_code', lambda *a: '')
+    with db.begin() as session:
+        profile = DownloadProfile(name='no-vr', filters={'exclude_vr': True}, sort='')
+        session.add(profile)
+        session.flush()
+        pid = profile.id
+        session.add(SubscriptionRule(name='test', enabled=True, conditions={'prefixes': ['SONE']}, profile_id=pid))
+        session.add_all([Code(code='SONE-001', status=0), Code(code='SONE-002', status=4),
+                         Code(code='SONE-003', status=0), Code(code='SONE-004', status=0, title='VR video'),
+                         RuleExclusion(code='SONE-003')])
+    result = preview_rule({'prefixes': ['SONE']}, profile_id=pid)
+    assert result['total'] == 4
+    assert [result[k] for k in ('eligible', 'existing', 'excluded', 'filtered')] == [1, 1, 1, 1]
+    assert run_rules() == result['eligible']
+    assert run_rules() == 0
 
 
 def test_rules_assign_profile_once_and_preserve_states(db, monkeypatch):

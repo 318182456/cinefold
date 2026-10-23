@@ -1,6 +1,6 @@
 <script setup>
 import PagePanel from '@/components/PagePanel.vue'
-import { computed, ref, watch } from 'vue'
+import { computed, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { listCodes } from '@/api'
 import { useToast } from '@/composables/useToast'
@@ -18,6 +18,8 @@ const page = ref(1)
 const size = 12
 const status = ref(1)
 const loading = ref(false)
+let request = 0, disposed = false
+onUnmounted(() => { disposed = true; request++ })
 
 const TABS = [
   { value: 0, label: '未订阅' },
@@ -32,17 +34,19 @@ const TABS = [
 const pages = computed(() => Math.max(Math.ceil(total.value / size), 1))
 
 async function load() {
+  const id = ++request
   loading.value = true
   try {
     const params = { page: page.value, size }
     if (status.value !== null) params.status = status.value
     const data = await listCodes(params)
+    if (disposed || id !== request) return
     items.value = data.items || []
     total.value = data.total || 0
   } catch (err) {
-    toast.error(err.message)
+    if (!disposed && id === request) toast.error(err.message)
   } finally {
-    loading.value = false
+    if (!disposed && id === request) loading.value = false
   }
 }
 

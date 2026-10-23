@@ -92,16 +92,28 @@ def effective_profile(code: str) -> DownloadProfile | None:
         return session.get(DownloadProfile, assignment.profile_id) if assignment else None
 
 
-def preview_rule(conditions: dict, limit: int = 50) -> dict:
+def _blocked(row, profile):
+    from app.services import is_filtered_code
+    if profile:
+        return bool(profile.filters.get('exclude_vr') and has_vr(f'{row.code} {row.title or ""}'))
+    return bool(is_filtered_code(row.code, row.title or ''))
+
+
+def preview_rule(conditions: dict, limit: int = 50, profile_id: int | None = None) -> dict:
     conditions = validate_conditions(conditions)
     count, items = 0, []
+    summary = {'eligible': 0, 'existing': 0, 'excluded': 0, 'filtered': 0}
     with session_scope() as session:
-        for row in session.scalars(select(Code).order_by(Code.release_date.desc())).yield_per(500):
+        profile = session.get(DownloadProfile, profile_id) if profile_id else None
+        query = select(Code, exists(select(RuleExclusion.code).where(RuleExclusion.code == Code.code))).order_by(Code.release_date.desc())
+        for row, excluded in session.execute(query).yield_per(500):
             if matches(row.to_dict(), conditions):
                 count += 1
+                reason = 'existing' if row.status != CodeStatus.NONE else 'excluded' if excluded else 'filtered' if _blocked(row, profile) else 'eligible'
+                summary[reason] += 1
                 if len(items) < limit:
-                    items.append(row.to_dict())
-    return {"total": count, "items": items}
+                    items.append({**row.to_dict(), 'eligibility': reason})
+    return {"total": count, "items": items, **summary}
 
 
 def run_rules() -> int:
@@ -115,8 +127,6 @@ def run_rules() -> int:
 
 
 def _run_rules() -> int:
-    from app.services import is_filtered_code
-
     count = 0
     with session_scope() as session:
         rules = session.scalars(select(SubscriptionRule).where(SubscriptionRule.enabled.is_(True)).order_by(SubscriptionRule.id)).all()
@@ -129,11 +139,7 @@ def _run_rules() -> int:
                     continue
                 # 按方案判断 VR，未指定方案时仍遵循全局过滤。
                 profile = session.get(DownloadProfile, rule.profile_id) if rule.profile_id else None
-                if profile:
-                    blocked = profile.filters.get("exclude_vr") and has_vr(f"{row.code} {row.title or ''}")
-                else:
-                    blocked = bool(is_filtered_code(row.code, row.title or ""))
-                if blocked:
+                if _blocked(row, profile):
                     continue
                 changed = session.query(Code).filter(Code.code == row.code, Code.status == CodeStatus.NONE).update({Code.status: CodeStatus.SUBSCRIBED}, synchronize_session=False)
                 if changed and profile:

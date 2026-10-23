@@ -1,6 +1,6 @@
 <script setup>
 import PagePanel from '@/components/PagePanel.vue'
-import { onMounted, ref } from 'vue'
+import { onMounted, ref, watch } from 'vue'
 import http from '@/api'
 import { useToast } from '@/composables/useToast'
 import ModalDialog from '@/components/ModalDialog.vue'
@@ -8,9 +8,20 @@ import MetadataConditions from '@/components/MetadataConditions.vue'
 const toast = useToast()
 const rules = ref([]), profiles = ref([]), busy = ref(false), open = ref(false), kind = ref('rule'), editing = ref(null), form = ref({}), preview = ref(null)
 const assignment = ref({ code: '', profile_id: null })
+let previewRequest = 0
+watch(form, () => { preview.value = null; previewRequest++ }, { deep: true, flush: 'sync' })
+watch(open, () => { previewRequest++ })
+async function previewRule() {
+  const request = ++previewRequest
+  const body = JSON.parse(JSON.stringify({ name: form.value.name || '预览', conditions: form.value.conditions, profile_id: form.value.profile_id }))
+  await perform(async () => {
+    const result = await http.post('/subscription-rules/preview', body)
+    if (open.value && request === previewRequest) preview.value = result
+  })
+}
 const flags = [['only_chinese', '只要中字'], ['only_free', '只要免费'], ['only_uc', '只要无码'], ['exclude_uc', '排除无码'], ['only_uhd', '只要 4K'], ['exclude_uhd', '排除 4K'], ['only_vr', '只要 VR'], ['exclude_vr', '排除 VR']]
 async function load() { [rules.value, profiles.value] = await Promise.all([http.get('/subscription-rules'), http.get('/profiles')]) }
-async function perform(fn) { busy.value = true; try { await fn() } catch (e) { toast.error(e.message) } finally { busy.value = false } }
+async function perform(fn) { if (busy.value) return; busy.value = true; try { await fn() } catch (e) { toast.error(e.message) } finally { busy.value = false } }
 function edit(type, row = null) {
   kind.value = type; editing.value = row?.id || null; preview.value = null
   form.value = row ? JSON.parse(JSON.stringify(row)) : type === 'rule' ? { name: '', enabled: false, conditions: {}, profile_id: null } : { name: '', filters: { exclude_vr: true }, sort: 'free,chinese,seeders' }
@@ -57,8 +68,8 @@ onMounted(() => perform(load))
           <MetadataConditions v-model="form.conditions" />
           <label><span class="label">下载方案</span><select v-model="form.profile_id" class="input"><option :value="null">全局方案</option><option v-for="p in profiles" :key="p.id" :value="p.id">{{ p.name }}</option></select></label>
           <label class="flex items-center gap-2 text-sm"><input v-model="form.enabled" type="checkbox">启用自动订阅</label>
-          <button type="button" class="btn-ghost" :disabled="busy" @click="perform(async () => { preview = await http.post('/subscription-rules/preview', { name: form.name || '预览', conditions: form.conditions }) })">预览匹配</button>
-          <div v-if="preview" class="rounded-lg bg-gray-800 p-3 text-sm"><p>共匹配 {{ preview.total }} 部（预览最多 50 部，包含已订阅影片）</p><p class="mt-2 break-all text-gray-400">{{ preview.items.map(x => x.code).join('、') || '暂无匹配影片' }}</p></div>
+          <button type="button" class="btn-ghost" :disabled="busy" @click="previewRule">预览匹配</button>
+          <div v-if="preview" class="rounded-lg bg-gray-800 p-3 text-sm"><p>共匹配 {{ preview.total }} 部，可新增 {{ preview.eligible }} 部</p><p class="mt-1 text-xs text-gray-500">已有订阅或下载记录 {{ preview.existing }} · 手动排除 {{ preview.excluded }} · 下载方案过滤 {{ preview.filtered }}。预览最多列出 50 部；实际执行还会遵循其他规则的先后顺序。</p><p class="mt-2 break-all text-gray-400">{{ preview.items.map(x => x.code).join('、') || '暂无匹配影片' }}</p></div>
         </template>
         <template v-else>
           <div class="grid grid-cols-2 gap-3"><label v-for="[key, label] in flags" :key="key" class="flex items-center gap-2 text-sm"><input v-model="form.filters[key]" type="checkbox">{{ label }}</label></div>

@@ -225,6 +225,7 @@ const GROUPS = [
           { k: 'emby_api_key', label: 'API Key', t: 'password' },
           { k: 'emby_user_id', label: '观看统计用户 ID', hint: '媒体库页面可选择用户；同步其观看进度与播放次数' },
           { k: 'playback_tracking_enabled', label: '持续记录播放与日历', t: 'bool', hint: '每分钟只读 Emby 会话，不需要播放报告插件；从开启后记录，留空用户 ID 时记录所有用户。短于一分钟的播放可能漏记，可额外配置播放 Webhook 补充' },
+          { k: 'playback_reporting_enabled', label: '优先读取 Playback Reporting 历史', t: 'bool', hint: '已安装插件时读取历史播放，无需重新累计；需要有管理员权限的 Emby API Key。插件不可用时显示本地观测记录和原因' },
           { k: 'playback_timezone', label: '播放日历时区', ph: 'Asia/Shanghai', hint: '按此时区分配每天的观看时间，跨午夜自动拆分' },
         ],
       },

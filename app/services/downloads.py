@@ -10,7 +10,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.core.config import get_settings
 from app.database.models import Cache, Code, DownloadRecord, History
@@ -75,9 +75,9 @@ def live(*, client='', state='', keyword='', code_status=None, page=1, size=30):
             _remember([row for row in rows if not row.get('stale')])
             _LIVE = {'items': rows, 'errors': errors, 'clients': names, 'answered': answered,
                      'updated_at': time.time(), 'signature': signature}
-        result = copy.deepcopy(_LIVE)
-    rows = result.pop('items')
-    result.pop('signature', None)
+        # 完整快照保持只读；只复制当前页，避免每次筛选都深拷贝几千个任务。
+        result = {key: copy.deepcopy(value) for key, value in _LIVE.items() if key not in ('items', 'signature')}
+        rows = list(_LIVE['items'])
     if client:
         rows = [row for row in rows if row['client'] == client]
     if code_status is not None:
@@ -92,15 +92,26 @@ def live(*, client='', state='', keyword='', code_status=None, page=1, size=30):
     if state:
         rows = [row for row in rows if row['group'] == state]
     rows.sort(key=lambda row: (row.get('download_speed') or 0, row.get('added_at') or 0), reverse=True)
-    return {**result, 'total': len(rows), 'page': page, 'size': size, 'items': rows[(page-1)*size:page*size]}
+    return {**result, 'total': len(rows), 'page': page, 'size': size, 'items': copy.deepcopy(rows[(page-1)*size:page*size])}
 
 
 def _remember(rows):
+    if not rows:
+        return
     now = datetime.now()
     with session_scope() as session:
-        known = {row.hash.lower(): row for row in session.scalars(select(History))}
-        statuses = dict(session.execute(select(Code.code, Code.status)).all())
-        records = {row.key: row for row in session.scalars(select(DownloadRecord))}
+        known, statuses, records = {}, {}, {}
+        hashes = list({item['hash'] for item in rows})
+        keys = list({item['key'] for item in rows})
+        for offset in range(0, len(hashes), 400):
+            known.update((row.hash.lower(), row) for row in session.scalars(
+                select(History).where(func.lower(History.hash).in_(hashes[offset:offset+400]))))
+        codes = list({row.code for row in known.values() if row.code})
+        for offset in range(0, len(codes), 400):
+            statuses.update(session.execute(select(Code.code, Code.status).where(Code.code.in_(codes[offset:offset+400]))).all())
+        for offset in range(0, len(keys), 400):
+            records.update((row.key, row) for row in session.scalars(
+                select(DownloadRecord).where(DownloadRecord.key.in_(keys[offset:offset+400]))))
         for item in rows:
             history = known.get(item['hash'])
             item['code'] = history.code if history else ''

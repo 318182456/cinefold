@@ -178,13 +178,17 @@ def tool_list_tasks(_: dict) -> dict:
 
 def tool_read_logs(args: dict) -> dict:
     """查最近日志，可按关键词过滤。排查"为什么没下载"这类问题靠它。"""
-    from app.utils.log import read_logs
+    from app.utils.log import list_log_files, read_logs
+
+    if args.get('list_files'):
+        return {'files': list_log_files()}
 
     keyword = (args.get("keyword") or "").strip()
     # 日志行普遍很长，条数给大了会挤爆上下文
     lines = min(int(args.get("lines") or 50), 120)
-    logs = read_logs(lines, keyword)
-    return {"returned": len(logs), "keyword": keyword, "logs": logs}
+    filename = args.get('filename') or ''
+    logs = read_logs(lines, keyword, filename)
+    return {"returned": len(logs), "keyword": keyword, 'filename': filename or 'cinefold.log', "logs": logs}
 
 
 def tool_list_downloads(args: dict) -> dict:
@@ -435,7 +439,7 @@ TOOL_SCHEMAS = [
         "function": {
             "name": "read_logs",
             "description": (
-                "读最近的运行日志，可按关键词过滤（如番号、'错误'、'失败'）。"
+                "读当前或历史运行日志，可按关键词过滤。list_files=true 先列出保留的日志文件，filename 选择归档。"
                 "排查『为什么没下载』『哪里报错』时用。"
             ),
             "parameters": {
@@ -443,6 +447,8 @@ TOOL_SCHEMAS = [
                 "properties": {
                     "keyword": {"type": "string", "description": "过滤关键词"},
                     "lines": {"type": "integer", "description": "返回行数，最大 120"},
+                    'filename': {'type': 'string', 'description': '日志列表中的文件名，留空读当前日志'},
+                    'list_files': {'type': 'boolean', 'description': '仅列出可读取的当前与历史日志文件'},
                 },
             },
         },

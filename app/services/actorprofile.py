@@ -147,8 +147,12 @@ def directory(*, keyword='', page=1, size=15, subscribed=True):
                     items.setdefault(key, {'name': token, 'name_2': '', 'photo': data.get('photo') or '', 'subscribed': False,
                                            'source': 'profile' if data.get('source_url') else 'casts',
                                            **presentation(token, data.get('aliases', []), data.get('native_name', ''))})
-        found = [item for item in items.values() if not keyword or any(_key(keyword) in _key(value) for value in [item['name'], item['display_name'], *item['aliases']])]
-        found.sort(key=lambda item: (not item.get('subscribed'), _key(item['display_name'])))
+        # 搜索允许姓名片段；身份合并和作品归属仍由完整姓名/已确认别名判定。
+        needle = ''.join(_key(keyword).split())
+        def search_values(item):
+            return [''.join(_key(value).split()) for value in [item['name'], item['display_name'], *item['aliases']]]
+        found = [item for item in items.values() if not needle or any(needle in value for value in search_values(item))]
+        found.sort(key=lambda item: (bool(needle) and needle not in search_values(item), not item.get('subscribed'), _key(item['display_name'])))
         return {'items': found[(page - 1) * size:page * size], 'total': len(found), 'page': page, 'size': size}
 
 

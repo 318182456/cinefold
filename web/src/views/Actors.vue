@@ -115,6 +115,28 @@ function openProfile(name) {
   const value = String(name || '').trim()
   if (value) router.push({ query: { ...route.query, name: value } })
 }
+async function openSearchProfile() {
+  const value = keyword.value.trim()
+  if (!value || loading.value) return
+  const id = ++directoryRequest
+  loading.value = true; directoryError.value = ''; directoryPage.value = 1
+  try {
+    const result = await listActors({ keyword: value, page: 1, size: PAGE_SIZE,
+      subscribed: directoryMode.value === 'subscribed' })
+    if (disposed || id !== directoryRequest) return
+    items.value = result.items || []; directoryTotal.value = result.total || 0
+    const normalize = name => String(name || '').normalize('NFKC').replace(/\s+/g, '').toLocaleLowerCase()
+    const exact = items.value.find(item => [item.name, item.display_name, ...(item.aliases || [])]
+      .some(name => normalize(name) === normalize(value)))
+    if (exact || directoryTotal.value === 1) openProfile((exact || items.value[0]).name)
+    else if (!directoryTotal.value) openProfile(value) // 尚无本地资料时保留完整姓名建档入口。
+    else toast.info(`匹配到 ${directoryTotal.value} 位演员，请在下方选择具体演员。`)
+  } catch (err) {
+    if (!disposed && id === directoryRequest) directoryError.value = err.message
+  } finally {
+    if (!disposed && id === directoryRequest) loading.value = false
+  }
+}
 function backToDirectory() { const query = { ...route.query }; delete query.name; router.push({ query }) }
 function stopSyncPolling() { clearTimeout(syncTimer); syncTimer = undefined; syncEpoch += 1 }
 function scheduleSyncPoll() {
@@ -246,8 +268,8 @@ onUnmounted(() => { disposed = true; clearTimeout(photoTimer); directoryRequest 
         <div class="flex gap-2"><button class="btn-ghost !text-xs" :class="directoryMode === 'all' ? 'text-brand' : ''" :aria-pressed="directoryMode === 'all'" @click="setDirectoryMode('all')">全部演员</button><button class="btn-ghost !text-xs" :class="directoryMode === 'subscribed' ? 'text-brand' : ''" :aria-pressed="directoryMode === 'subscribed'" @click="setDirectoryMode('subscribed')">我的订阅</button></div>
       </div>
       <form class="flex flex-wrap gap-2" @submit.prevent="searchDirectory">
-        <input v-model="keyword" class="input min-w-40 flex-1" placeholder="搜索演员名或别名，也可输入姓名直接打开档案" aria-label="搜索演员姓名或别名" maxlength="200" />
-        <button class="btn-ghost" :disabled="loading">搜索目录</button><button type="button" class="btn-primary" :disabled="!keyword.trim()" @click="openProfile(keyword)">打开演员档案</button>
+        <input v-model="keyword" class="input min-w-40 flex-1" placeholder="输入部分姓名或别名即可搜索" aria-label="搜索演员姓名或别名" maxlength="200" />
+        <button class="btn-ghost" :disabled="loading">搜索目录</button><button type="button" class="btn-primary" :disabled="!keyword.trim() || loading" @click="openSearchProfile">查找并打开档案</button>
       </form>
       <p v-if="directoryError" class="text-xs text-red-400">{{ directoryError }}</p>
       <LoadingBlock v-if="loading" :rows="3" />

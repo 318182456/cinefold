@@ -167,3 +167,44 @@ def test_retry_reconciles_qb_source_already_removed_before_checkpoint(managed, m
     result = seedtransfer.transfer_hashes([A], delete_source=True)
     assert result.transferred == [A] and not result.failed
     assert not qb.deleted and not tr.added
+
+
+@pytest.mark.parametrize('code,kind', [(1, 'tracker_warning'), (2, 'tracker_error'), (3, 'local_error')])
+def test_transmission_error_reason_is_classified_and_redacted(code, kind):
+    from app.modules.downloadclient.transmission import _error_details
+    data = _error_details({'error': code, 'errorString': 'tracker rejected https://user:secret@tracker/secret-passkey?token=hidden passkey=private'})
+    assert data['error_kind'] == kind and data['error_code'] == code
+    assert 'rejected' in data['error_message']
+    assert not any(value in str(data) for value in ['secret', 'hidden', 'private'])
+    assert _error_details({'error': 0, 'errorString': 'obsolete error'})['error_message'] == ''
+
+
+def test_error_reason_survives_history_and_page_edits_do_not_change_snapshot(managed, monkeypatch):
+    monkeypatch.setattr(downloads, '_read', lambda name: [{'hash': A, 'name': 'test', 'progress': 1,
+        'state': 'error', 'error_kind': 'tracker_error', 'error_message': 'unregistered torrent'}] if name == 'transmission' else [])
+    result = downloads.live()
+    result['items'][0]['error_message'] = 'changed by caller'
+    assert downloads.live()['items'][0]['error_message'] == 'unregistered torrent'
+    assert downloads.history()['items'][0]['error_kind'] == 'tracker_error'
+
+
+def test_large_cached_download_page_does_not_copy_entire_snapshot(managed, monkeypatch):
+    import hashlib
+    import json
+    import tracemalloc
+    signature = hashlib.sha256(json.dumps([('qbittorrent', 'http://qb'), ('transmission', 'http://tr')]).encode()).hexdigest()
+    rows = [{'hash': str(i), 'name': f'video-{i}', 'client': 'transmission', 'group': 'seeding',
+             'state': 'seeding', 'added_at': i, 'progress': 1, 'stale': False,
+             'details': {'values': list(range(30))}} for i in range(7000)]
+    monkeypatch.setattr(downloads, '_LIVE', {'signature': signature, 'updated_at': time.time(),
+        'items': rows, 'errors': [], 'clients': ['transmission'], 'answered': ['transmission']})
+    tracemalloc.start()
+    try:
+        result = downloads.live(size=30)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert result['total'] == 7000 and len(result['items']) == 30
+    assert peak < 1_500_000, 'a page must not deep-copy the entire cached torrent list'
+    result['items'][0]['details']['values'].clear()
+    assert len(rows[-1]['details']['values']) == 30

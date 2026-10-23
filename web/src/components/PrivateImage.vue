@@ -44,6 +44,8 @@ const style = computed(() =>
 )
 
 function onError(event) {
+  // 复用组件时旧请求可能迟到；不能让旧图错误隐藏刚换上的新封面。
+  if (event.target?.getAttribute('src') !== props.src) return
   failed.value = true
   emit('error', event)
 }
@@ -52,6 +54,7 @@ function onError(event) {
 <template>
   <img
     v-if="src && !failed"
+    :key="src"
     :src="src"
     :alt="alt"
     :loading="loading"

@@ -1,5 +1,5 @@
 <script setup>
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import {
   codeCover,
   subscribeCode,
@@ -49,6 +49,8 @@ const cover = computed(() => {
   if (!coverVersion.value) return url
   return `${url}${url.includes('?') ? '&' : '?'}_v=${coverVersion.value}`
 })
+watch(cover, () => { imageFailed.value = false })
+watch(() => props.item.code, () => { lightboxOpen.value = false; coverVersion.value = 0 })
 
 // 源站封面常是横版双拼图：一半碟片封套，一半人像正片。图完整存着，
 // 这里把可视窗口挪到人像那半边；判断不出来（portrait_side 为空或 none）

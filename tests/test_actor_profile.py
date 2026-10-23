@@ -71,6 +71,24 @@ def test_directory_deduplicates_known_actor_alias_and_keeps_filters(db):
     assert actorprofile.directory(subscribed=False, keyword='旧甲')['items'][0]['name'] == '甲'
 
 
+def test_actor_directory_matches_name_fragments_and_normalized_aliases(db):
+    with db() as session:
+        session.add_all([Actor(name='三宮つばき', name_2='三宫椿, Tsubaki Sannomiya', subscribed=True),
+                         Actor(name='三上悠亜', name_2='Yua Mikami', subscribed=False),
+                         Actor(name='三宮', subscribed=False),
+                         Code(code='ABP-101', casts='三宮つばき'), Code(code='ABP-102', casts='三上悠亜')])
+        session.commit()
+    result = actorprofile.directory(keyword='三', subscribed=False)
+    assert result['total'] == 3
+    assert actorprofile.directory(keyword='三宮', subscribed=False)['items'][0]['name'] == '三宮'
+    assert actorprofile.directory(keyword='宫椿', subscribed=False)['items'][0]['name'] == '三宮つばき'
+    assert actorprofile.directory(keyword='ＴＳＵＢＡＫＩＳＡＮ', subscribed=False)['items'][0]['name'] == '三宮つばき'
+    assert actorprofile.directory(keyword='三 宮 つ', subscribed=False)['total'] == 1
+    assert actorprofile.directory(keyword='三', subscribed=True)['total'] == 1
+    assert actorprofile.directory(keyword='%', subscribed=False)['total'] == 0
+    assert actorprofile.profile('三宮つばき')['total'] == 1, 'partial directory search must not broaden film ownership'
+
+
 @pytest.mark.parametrize('name', ['', 'x' * 129])
 def test_invalid_actor_name_is_rejected(db, name):
     with pytest.raises(ValueError):

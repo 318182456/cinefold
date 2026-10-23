@@ -42,6 +42,13 @@ _PART_PATTERNS = (
     re.compile(r"[-_\s.]?第\s*(\d{1,2})\s*[集片段部]\s*$"),
 )
 
+# 发布组文件将分段放在画质、来源和编码之前；只放宽明确的 CD/Part/PT 标记。
+_PART_RELEASE = re.compile(
+    r'[-_\s.](?:cd|part|pt)[-_\s]?(\d{1,2})'
+    r'(?=[-_\s.](?:\d{4}|1080p|720p|2160p|4k|8k|DMM|WEB-?DL|WEBRip|BluRay|H[._]?26[45]|x26[45]|AAC)(?:[-_\s.]|$))',
+    re.IGNORECASE,
+)
+
 # 纯数字式分集：ABP-554-1 / ABP-554-2。单独处理，因为它和番号本身的
 # 数字段形状完全一样，必须要求「前面已经是一个完整番号」才认。
 #
@@ -209,7 +216,7 @@ def detect_part(stem: str) -> tuple[int, str]:
         if _VERSION_SUFFIX.search(candidate):
             continue
 
-        for pattern in _PART_PATTERNS:
+        for pattern in (*_PART_PATTERNS, _PART_RELEASE):
             match = pattern.search(candidate)
             if match:
                 number = int(match.group(1))

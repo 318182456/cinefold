@@ -141,7 +141,9 @@ def list_rules():
 
 @router.post("/subscription-rules/preview")
 def preview(body: RuleRequest):
-    return ResponseEntity.ok(preview_rule(checked_conditions(body.conditions)))
+    with session_scope() as session:
+        checked_profile(session, body.profile_id)
+    return ResponseEntity.ok(preview_rule(checked_conditions(body.conditions), profile_id=body.profile_id))
 
 
 @router.post("/subscription-rules/run")

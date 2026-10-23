@@ -110,6 +110,7 @@ class Settings:
     emby_api_key: str = ""
     emby_user_id: str = ""
     playback_tracking_enabled: bool = False
+    playback_reporting_enabled: bool = True
     playback_timezone: str = "Asia/Shanghai"
     discord_webhook_url: str = ""
     zspace_url: str = ""
@@ -527,6 +528,7 @@ def load_settings() -> Settings:
         emby_api_key=_env("EMBY_API_KEY"),
         emby_user_id=_env("EMBY_USER_ID"),
         playback_tracking_enabled=_env_bool("PLAYBACK_TRACKING_ENABLED", False),
+        playback_reporting_enabled=_env_bool("PLAYBACK_REPORTING_ENABLED", True),
         playback_timezone=_env("PLAYBACK_TIMEZONE", "Asia/Shanghai"),
         discord_webhook_url=_env("DISCORD_WEBHOOK_URL"),
         zspace_url=_env("ZSPACE_URL"),

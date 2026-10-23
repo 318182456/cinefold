@@ -91,6 +91,9 @@ class Test分集识别:
             ("ABP-554-1080P-CD2.mp4", 2),
             ("ABP-554-part1.mp4", 1),
             ("ABP-554.pt2.mp4", 2),
+            ('OFJE-447.Part2.1080p.DMM.WEB-DL.AAC2.0.H.264-MTeam.mkv', 2),
+            ('OFJE-447.CD1.2025.1080p.WEB-DL.mkv', 1),
+            ('SSIS-001-C.Part2.2160p.WEB-DL.mkv', 2),
             # 字母式。C 跳过（那是中文字幕），所以 D 是第 4 集
             ("ABP-554-A.mp4", 1),
             ("ABP-554-B.mp4", 2),
@@ -117,6 +120,9 @@ class Test分集识别:
             "ABP-554-1080.mp4",
             # 分集号上限之外
             "ABP-554-2026.mp4",
+            'ABP-554.Part200.1080p.WEB-DL.mkv',
+            'ABP-554.Part0.1080p.WEB-DL.mkv',
+            'ABP-554.Part2.favorite.scene.mkv',
         ],
     )
     def test_不该认成分集(self, filename):

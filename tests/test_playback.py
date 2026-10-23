@@ -18,9 +18,9 @@ def state(monkeypatch):
     import app.database.session as database
     engine = create_engine('sqlite://', connect_args={'check_same_thread': False}, poolclass=StaticPool)
     DBBase.metadata.create_all(engine)
-    factory = sessionmaker(bind=engine, expire_on_commit=False)
+    factory = sessionmaker(bind=engine, expire_on_commit=False, autoflush=False)
     monkeypatch.setattr(database, 'SessionLocal', factory)
-    settings = Settings(emby_url='http://emby.test', emby_api_key='test-key', playback_tracking_enabled=True, playback_timezone='Asia/Shanghai')
+    settings = Settings(emby_url='http://emby.test', emby_api_key='test-key', playback_tracking_enabled=True, playback_reporting_enabled=False, playback_timezone='Asia/Shanghai')
     monkeypatch.setattr(playback, 'get_settings', lambda: settings)
     monkeypatch.setattr(embysync, 'get_settings', lambda: settings)
     now = [datetime(2026, 10, 15, 15, 59, 30)]  # 上海时间 23:59:30

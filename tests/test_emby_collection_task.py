@@ -91,7 +91,7 @@ def test_task_api_returns_actual_state_and_allows_explicit_restart(task_case, mo
     assert wait()['phase']=='published' and calls
 
 
-def test_task_schedule_edit_is_persisted_and_registered(monkeypatch, tmp_path):
+def test_task_schedule_edit_is_persisted_and_registered(monkeypatch, tmp_path, db):
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
     from app import scheduler

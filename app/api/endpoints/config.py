@@ -12,7 +12,7 @@ from app.api.endpoints import get_current_user
 from app.core.config import SENSITIVE_KEYS, Settings, get_settings, save_settings
 from app.core.version import APP_VERSION
 from app.schemas.reponse import ResponseEntity
-from app.utils.log import read_logs
+from app.utils.log import list_log_files, read_logs
 
 router = APIRouter(tags=["config"])
 
@@ -158,9 +158,23 @@ def rollback_upgrade(current_user: str = Depends(get_current_user)):
 def get_logs(
     lines: int = 200,
     keyword: str = "",
+    filename: str = '',
+    level: str = '',
     current_user: str = Depends(get_current_user),
 ):
-    return ResponseEntity.ok({"logs": read_logs(lines, keyword)})
+    try:
+        return ResponseEntity.ok({'logs': read_logs(lines, keyword, filename, level)})
+    except ValueError as exc:
+        return ResponseEntity.fail(str(exc), code=400)
+    except FileNotFoundError:
+        return ResponseEntity.fail('日志文件已不存在，请刷新文件列表', code=404)
+    except OSError:
+        return ResponseEntity.fail('日志文件暂时不可读取', code=503)
+
+
+@router.get('/logs/files')
+def log_files(current_user: str = Depends(get_current_user)):
+    return ResponseEntity.ok({'files': list_log_files()})
 
 
 @router.get("/cron")
@@ -179,9 +193,13 @@ def run_task(job_id: str, restart: bool = False, current_user: str = Depends(get
         except ValueError as exc:
             return ResponseEntity.fail(str(exc), code=409)
     from app.scheduler import push_job
-    if not push_job(job_id):
-        return ResponseEntity.fail(f"未知任务 {job_id}", code=404)
-    return ResponseEntity.ok(message="任务已触发")
+    from app.services.taskruns import states
+    try:
+        if not push_job(job_id):
+            return ResponseEntity.fail(f"未知任务 {job_id}", code=404)
+    except ValueError as exc:
+        return ResponseEntity.fail(str(exc), code=409)
+    return ResponseEntity.ok(states().get(job_id), message="任务已提交")
 
 
 class ScheduleRequest(BaseModel):

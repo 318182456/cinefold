@@ -4,6 +4,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 from fastapi.testclient import TestClient
 
 from app.core.config import Settings
+from tests.test_scrape_reliability import db
 
 
 def test_registry_entries_match_their_trigger_contract():
@@ -17,7 +18,7 @@ def test_registry_entries_match_their_trigger_contract():
         assert not meta.get('interval_key') or hasattr(Settings(), meta['interval_key'])
 
 
-def test_application_lifespan_registers_download_history_as_five_minute_interval(monkeypatch):
+def test_application_lifespan_registers_download_history_as_five_minute_interval(monkeypatch, db):
     import app.api as api
     from app import scheduler
     from app.database.utils import setup

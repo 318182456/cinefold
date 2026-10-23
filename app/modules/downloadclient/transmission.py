@@ -4,6 +4,7 @@
 """
 from __future__ import annotations
 
+import re
 from pathlib import PurePath
 from typing import Sequence
 from urllib.parse import urlparse
@@ -12,6 +13,19 @@ from loguru import logger
 
 from app.core.config import get_settings
 from app.utils import get_magnet_hash, get_torrent_hash
+
+
+def _error_details(fields: dict) -> dict:
+    """保留任务错误的类别与说明，去掉可能包含站点凭据的地址。"""
+    code = int(fields.get('error') or 0)
+    if not code:
+        return {'error_code': 0, 'error_kind': '', 'error_message': ''}
+    message = str(fields.get('errorString') or '')
+    message = re.sub(r'(?i)\b[a-z][a-z0-9+.-]*://[^\s<>"\']+', '[地址已隐藏]', message)
+    message = re.sub(r'(?i)\b(passkey|token|api[_-]?key|password)\s*[=:]\s*[^\s&,;]+',
+                     r'\1=[已隐藏]', message)
+    return {'error_code': code, 'error_kind': {1: 'tracker_warning', 2: 'tracker_error', 3: 'local_error'}.get(code, 'unknown'),
+            'error_message': message[:1000]}
 
 
 def _is_already_exists(exc: BaseException) -> bool:
@@ -257,7 +271,7 @@ class TransmissionClient:
             torrents = self.client.get_torrents(arguments=[
                 'id', 'hashString', 'name', 'percentDone', 'status', 'downloadDir', 'totalSize',
                 'rateDownload', 'rateUpload', 'peersConnected', 'trackerStats', 'downloadedEver',
-                'uploadedEver', 'uploadRatio', 'eta', 'addedDate', 'doneDate', 'error',
+                'uploadedEver', 'uploadRatio', 'eta', 'addedDate', 'doneDate', 'error', 'errorString',
             ])
             rows = []
             for t in torrents:
@@ -268,6 +282,7 @@ class TransmissionClient:
                 rows.append({
                     'hash': t.hash_string, 'name': t.name, 'progress': float(t.percent_done or 0),
                     'state': 'error' if t.fields.get('error') else str(t.status), 'save_path': t.download_dir,
+                    **_error_details(t.fields),
                     'content_path': '', 'size': t.total_size, 'download_speed': t.rate_download,
                     'upload_speed': t.rate_upload, 'seeds_connected': None,
                     'seeds_total': max(seed_counts) if seed_counts else None,

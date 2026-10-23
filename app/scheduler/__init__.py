@@ -612,8 +612,9 @@ def start_scheduler() -> BackgroundScheduler:
             continue
         try:
             _scheduler.add_job(
-                meta["func"],
+                _run_scheduled,
                 CronTrigger.from_crontab(cron, timezone="Asia/Shanghai"),
+                args=[job_id],
                 id=job_id,
                 name=meta["name"],
                 replace_existing=True,
@@ -639,8 +640,9 @@ def start_scheduler() -> BackgroundScheduler:
                 )
 
         _scheduler.add_job(
-            meta["func"],
+            _run_scheduled,
             "interval",
+            args=[job_id],
             minutes=minutes,
             id=job_id,
             name=meta["name"],
@@ -692,6 +694,8 @@ def list_jobs() -> list[dict]:
     from app.services.schedule import describe_cron, describe_interval
 
     settings = get_settings()
+    from app.services.taskruns import states
+    executions = states()
     out = []
     for job in _scheduler.get_jobs():
         item = {
@@ -703,6 +707,7 @@ def list_jobs() -> list[dict]:
             # 默认不可编辑：注册表里查不到的任务（理论上不该有）宁可只读，
             # 也不要给个改不动的输入框
             "editable": False,
+            'execution': executions.get(job.id, {'phase': 'idle', 'history': []}),
         }
 
         if job.id in JOBS:
@@ -724,6 +729,7 @@ def list_jobs() -> list[dict]:
                 editable=bool(INTERVAL_JOBS[job.id].get("interval_key")),
             )
         out.append(item)
+    out.sort(key=lambda item: item['execution'].get('phase') not in ('queued', 'running'))
     return out
 
 
@@ -752,6 +758,14 @@ def schedule_key_of(job_id: str) -> tuple[str, str] | None:
     return None
 
 
+def _run_scheduled(job_id: str):
+    """可被 Redis jobstore 序列化的统一调度入口。"""
+    from app.services.taskruns import scheduled
+    meta = JOBS.get(job_id) or INTERVAL_JOBS.get(job_id)
+    if meta:
+        return scheduled(job_id, meta['func'])
+
+
 def push_job(job_id: str) -> bool:
     """手动触发任务，在后台线程执行。"""
     meta = JOBS.get(job_id) or INTERVAL_JOBS.get(job_id)
@@ -759,7 +773,7 @@ def push_job(job_id: str) -> bool:
         logger.warning(f"未知任务 {job_id}")
         return False
 
-    from app.utils import run_in_background
-    run_in_background(meta["func"])
+    from app.services.taskruns import submit
+    submit(job_id, meta['func'])
     logger.info(f"已手动触发任务 {meta['name']}")
     return True
