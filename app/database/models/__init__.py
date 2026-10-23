@@ -6,6 +6,7 @@ from app.database.models.code import Code, CodeStatus
 from app.database.models.codealias import CodeAlias
 from app.database.models.datasource import DataSource
 from app.database.models.history import History
+from app.database.models.deletionrecord import DeletionRecord
 from app.database.models.downloadrecord import DownloadRecord
 from app.database.models.medialink import MediaLink
 from app.database.models.mediamerge import MediaMerge
@@ -25,6 +26,7 @@ from app.database.models.curation import (
 )
 
 __all__ = [
+    'DeletionRecord',
     "Actor", "ActorProfile", "EmbyCollectionLink", "Cache", "Code", "CodeAlias", "CodeStatus", "DataSource", "History", "DownloadRecord",
     "MediaLink", "MediaMerge", "Passkey", "PendingDelete", "Review", "User", "WatchDir",
     "CodeProfile", "Collection", "CollectionItem", "DownloadProfile", "EmbyWatch",

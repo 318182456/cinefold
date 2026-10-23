@@ -15,7 +15,7 @@ onMounted(() => { load(); poll() })
 onUnmounted(() => { disposed = true; clearTimeout(timer) })
 </script>
 <template>
-  <PagePanel content-class="space-y-6">
+  <PagePanel :collapse-header="false" content-class="space-y-6">
     <template #header>
 
     <div><h1 class="text-xl font-semibold">收藏分析与健康检查</h1><p class="mt-1 text-sm text-gray-500">了解收藏分布，检查缺失文件、多版本和内容重复。</p></div>

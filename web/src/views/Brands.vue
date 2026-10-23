@@ -1,5 +1,6 @@
 <script setup>
 import PagePanel from '@/components/PagePanel.vue'
+import MobileSection from '@/components/MobileSection.vue'
 import { computed, onMounted, ref, watch } from 'vue'
 import { getBrands, getBrandCodes } from '@/api'
 import { useToast } from '@/composables/useToast'
@@ -110,7 +111,7 @@ onMounted(load)
 </script>
 
 <template>
-  <PagePanel content-class="space-y-4">
+  <PagePanel header-label="选择厂牌" content-class="space-y-4">
     <template #header>
 
     <!-- 厂牌切换 -->
@@ -160,6 +161,7 @@ onMounted(load)
         </button>
       </div>
 
+      <MobileSection title="影片筛选" :summary="keyword || '全部影片'">
       <!-- 关键词、订阅状态、抓取区间 -->
       <div class="flex flex-wrap items-center gap-2">
         <input
@@ -184,6 +186,7 @@ onMounted(load)
         </select>
       </div>
 
+      </MobileSection>
       <LoadingBlock v-if="loadingList" :rows="4" />
 
       <div v-else-if="error" class="card space-y-1 border border-red-900/50">

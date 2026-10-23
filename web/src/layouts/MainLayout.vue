@@ -70,7 +70,7 @@ const groups = [{ title: '工作区', items: [
   workspace('Subscribe', '订阅与下载', [['Subscribe', '订阅列表'], ['Downloads', '下载管理与历史'], ['SubscriptionRules', '条件与方案']]),
   workspace('Search', '发现', [['Search', '搜索'], ['Rank', '榜单'], ['Hot', '推荐'], ['Actors', '演员'], ['Brands', '厂牌']]),
   workspace('Scrape', '入库管理'),
-  workspace('Logs', '运行记录', [['Logs', '日志'], ['Task', '任务']]),
+  workspace('Logs', '运行记录', [['Logs', '日志'], ['Task', '任务'], ['DeletionHistory', '删除历史']]),
   workspace('Config', '设置', [['Config', '系统配置'], ['ToolConnections', '工具接入'], ['DataSource', '数据源'], ['Maintenance', '维护'], ['Profile', '账户']]),
 ] }]
 const activeWorkspace = computed(() => groups[0].items.find(item => item.name === route.name || item.pages.some(page => page.name === route.name)))
@@ -171,9 +171,9 @@ onMounted(async () => {
     <div class="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
       <!-- 顶部导航保留安全区，内容在下方局部滚动。 -->
       <header
-        class="sticky top-0 z-20 flex min-h-14 shrink-0 items-center gap-3 border-b border-gray-800 bg-gray-950/90 px-4 pt-[env(safe-area-inset-top)] backdrop-blur lg:px-6"
+        class="app-header sticky top-0 z-20 flex min-h-12 shrink-0 items-center gap-2 border-b border-gray-800 bg-gray-950/90 px-2 pt-[env(safe-area-inset-top)] backdrop-blur sm:min-h-14 sm:gap-3 sm:px-4 lg:px-6"
       >
-        <button class="rounded-lg p-1.5 text-gray-400 hover:bg-gray-800 lg:hidden" @click="menuOpen = true">
+        <button class="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-gray-400 hover:bg-gray-800 lg:hidden" aria-label="打开导航菜单" @click="menuOpen = true">
           <svg class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
             <path stroke-linecap="round" d="M4 6h16M4 12h16M4 18h16" />
           </svg>
@@ -185,8 +185,8 @@ onMounted(async () => {
       </header>
 
       <!-- 工作区导航固定，路由页面负责自己的内容滚动。 -->
-      <main class="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden p-4 pb-[calc(1rem+env(safe-area-inset-bottom))] lg:p-6">
-        <nav v-if="activeWorkspace?.pages.length > 1" class="mb-5 flex shrink-0 gap-1 overflow-x-auto rounded-xl border border-gray-800 bg-gray-900/50 p-1" :aria-label="`${activeWorkspace.label}功能`">
+      <main class="workspace-main flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden p-2 pb-[calc(0.5rem+env(safe-area-inset-bottom))] sm:p-4 lg:p-6">
+        <nav v-if="activeWorkspace?.pages.length > 1" class="workspace-tabs mobile-tabs mb-1.5 flex shrink-0 gap-1 overflow-x-auto rounded-xl border border-gray-800 bg-gray-900/50 p-0.5 sm:mb-5 sm:p-1" :aria-label="`${activeWorkspace.label}功能`">
           <RouterLink v-for="page in activeWorkspace.pages" :key="page.name" :to="{ name: page.name }" class="shrink-0 rounded-lg px-3 py-2 text-sm transition" :class="route.name === page.name ? 'bg-brand/10 text-brand' : 'text-gray-500 hover:bg-gray-800 hover:text-gray-300'" :aria-current="route.name === page.name ? 'page' : undefined">{{ page.label }}</RouterLink>
         </nav>
         <div class="min-h-0 min-w-0 flex-1 overflow-hidden">

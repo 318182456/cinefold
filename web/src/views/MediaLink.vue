@@ -711,11 +711,11 @@ onMounted(() => {
 </script>
 
 <template>
-  <PagePanel content-class="space-y-4">
+  <PagePanel :mobile-summary="`${total} 条${filtering || keyword ? ' · 已筛选' : ''}`" header-label="关联筛选与统计" content-class="space-y-4">
     <template #header>
 
     <!-- 概览 -->
-    <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+    <div class="mobile-stat-grid grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
       <button type="button" class="card text-left transition hover:border-brand/60 focus-visible:outline focus-visible:outline-brand" aria-label="查看关联总数明细" @click="openStat('all')">
         <p class="text-xs text-gray-500">关联总数</p>
         <p class="mt-1 text-xl font-semibold text-gray-200">{{ stats?.total ?? '—' }}</p>
@@ -1511,7 +1511,7 @@ onMounted(() => {
           </div>
 
           <p class="rounded-lg bg-red-950/40 px-3 py-2 text-[11px] text-red-300">
-            文件删除不可撤销。下载历史也会一并清掉，之后订阅可能重新下载该番号。
+            文件删除不可撤销。有效下载关联会清除，删除前的信息和处理结果保留在删除历史中，之后可重新订阅。
           </p>
         </template>
 
@@ -1547,7 +1547,7 @@ onMounted(() => {
             清理刮削附属与空目录 → 清记录。Emby 里对应的影片会消失。
           </p>
           <p class="rounded-lg bg-red-950/40 px-3 py-2 text-[11px] text-red-300">
-            文件删除不可撤销。下载历史也会一并清掉，之后订阅可能重新下载这些番号。
+            文件删除不可撤销。有效下载关联会清除，删除前的信息和处理结果保留在删除历史中，之后可重新订阅。
           </p>
           <p v-if="!deleteEnabled" class="text-[11px] text-amber-300">
             联动删除未启用，本次只会演练，不会真的删除任何文件。

@@ -20,6 +20,7 @@ const routes = [
       { path: 'actors', name: 'Actors', component: () => import('@/views/Actors.vue'), meta: { title: '演员' } },
       { path: 'task', name: 'Task', component: () => import('@/views/Task.vue'), meta: { title: '任务' } },
       { path: 'logs', name: 'Logs', component: () => import('@/views/Logs.vue'), meta: { title: '日志' } },
+      { path: 'deletion-history', name: 'DeletionHistory', component: () => import('@/views/DeletionHistory.vue'), meta: { title: '删除历史' } },
       { path: 'datasource', name: 'DataSource', component: () => import('@/views/DataSource.vue'), meta: { title: '数据源' } },
       { path: 'medialink', name: 'MediaLink', redirect: to => ({ name: 'Scrape', query: { ...to.query, tab: 'links' }, hash: to.hash }) },
       { path: 'watchdir', name: 'WatchDir', redirect: to => ({ name: 'Scrape', query: { ...to.query, tab: 'watch' }, hash: to.hash }) },

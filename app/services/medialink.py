@@ -1441,153 +1441,160 @@ def _handle_media_deleted(
         # 下载器查询可能较慢；真正删种/删文件前再次确认没有恢复。
         _require_missing_callback_link(link_path, links)
 
-    # 1) 处理种子。转种下同一文件对应多个种子，逐个按计划处理；
-    #    文件一律不交给下载器删（转种时保存路径可能不一致，容易误删漏删）
-    from app.modules.downloadclient import get_download_client, list_configured_clients
+    from app.services.deletionhistory import record_deletion
+    with record_deletion(links, result, source='emby' if require_missing else 'cleanup',
+                         plan={'torrents_to_delete': hashes_to_delete, 'torrents_to_keep': hashes_to_keep,
+                               'source_paths': sorted(source_paths), 'link_paths': link_paths}):
+        # 1) 处理种子。转种下同一文件对应多个种子，逐个按计划处理；
+        #    文件一律不交给下载器删（转种时保存路径可能不一致，容易误删漏删）
+        from app.modules.downloadclient import get_download_client, list_configured_clients
 
-    for name in list_configured_clients():
-        client = get_download_client(name)
-        if client is None:
-            continue
-
-        if hashes_to_delete:
-            try:
-                deleted = client.delete_torrent(hashes_to_delete, delete_files=False)
-                result.torrents_deleted.extend(deleted)
-            except Exception as exc:
-                msg = f"{name} 删种异常: {exc}"
-                logger.error(msg)
-                result.errors.append(msg)
-
-        # 合集种子：只把这部片的文件标记为不需要，种子继续做种其余影片。
-        # 不标记的话下载器会发现文件缺失，重新把它下回来
-        for h in hashes_to_keep:
-            unwant = getattr(client, "unwant_torrent_files", None)
-            if unwant is None:
-                continue  # 该下载器未实现（迅雷），只能放着
-            try:
-                marked, remaining = unwant(h, files_by_hash.get(h) or [])
-            except Exception as exc:
-                msg = f"{name} 标记种子 {h} 文件不需要异常: {exc}"
-                logger.error(msg)
-                result.errors.append(msg)
+        for name in list_configured_clients():
+            client = get_download_client(name)
+            if client is None:
                 continue
 
-            if not marked:
-                continue
-            if remaining:
-                result.torrents_kept.append(h)
-                continue
+            if hashes_to_delete:
+                try:
+                    deleted = client.delete_torrent(hashes_to_delete, delete_files=False)
+                    result.torrents_deleted.extend(deleted)
+                except Exception as exc:
+                    msg = f"{name} 删种异常: {exc}"
+                    logger.error(msg)
+                    result.errors.append(msg)
 
-            # 全部文件都标记成不需要了：种子成了空壳，做不了种也占着任务位，
-            # 直接删掉。这种情况出现在合集里的片子被逐部删完之后
-            try:
-                deleted = client.delete_torrent([h], delete_files=False)
-                result.torrents_deleted.extend(deleted)
-                logger.info(f"种子 {h} 已无任何需要的文件，删除该任务")
-            except Exception as exc:
-                msg = f"{name} 删除空壳种子 {h} 异常: {exc}"
-                logger.error(msg)
-                result.errors.append(msg)
+            # 合集种子：只把这部片的文件标记为不需要，种子继续做种其余影片。
+            # 不标记的话下载器会发现文件缺失，重新把它下回来
+            for h in hashes_to_keep:
+                unwant = getattr(client, "unwant_torrent_files", None)
+                if unwant is None:
+                    continue  # 该下载器未实现（迅雷），只能放着
+                try:
+                    marked, remaining = unwant(h, files_by_hash.get(h) or [])
+                except Exception as exc:
+                    msg = f"{name} 标记种子 {h} 文件不需要异常: {exc}"
+                    logger.error(msg)
+                    result.errors.append(msg)
+                    continue
 
-    # 2) 删源文件（占空间的那份），含种子里的全部文件。
-    #
-    # 硬链接保护：此刻硬链接还没删（第 3 步才删），所以源文件的链接数应当是
-    #   1（源文件自己）+ 本次要删的链接数
-    # 超出这个数，说明还有别处引用同一份数据 —— 另一个媒体库、手工建的链接、
-    # 别的整理工具。那种情况下删源文件既释放不了空间（引用计数不到 0），
-    # 又会让那些引用无从追溯，所以宁可留着。
-    #
-    # 未登记的种子内文件（样品图、说明 txt）也要过一遍检查，只是期望值是 1：
-    # 它们本该没有任何硬链接，nlink 超过 1 说明别处正引用着同一份数据 ——
-    # 另一个媒体库、别的整理工具。合集种子里这类文件可能是别的影片的附属，
-    # 删掉会破坏那边的引用。多一次 stat 换掉这个风险是值得的
-    #
-    # 直通模式（link_path == source_path，没有真的建过硬链接）要把自己排除掉，
-    # 否则期望值算成 2 而实际 nlink 只有 1 —— 检查虽不会误拦（只拦超出的），
-    # 但语义上该文件的合法引用数就是 1
-    registered_sources = {row.source_path for row in links if row.source_path}
-    # 直通登记：同一条记录里 link_path 与 source_path 指向同一个文件，
-    # 说明压根没建过硬链接。按记录逐条比对，不拿两个集合求交 ——
-    # 后者会把「A 的源文件恰好是 B 的链接」这种交叉情况也算进来
-    passthrough_paths = {
-        row.link_path for row in links if row.link_path == row.source_path
-    }
-    allowed_links = 1 + len(link_paths) - len(passthrough_paths)
-    for path in sorted(source_paths):
-        expected = allowed_links if path in registered_sources else 1
-        _delete_file(path, result, expected_links=expected)
+                if not marked:
+                    continue
+                if remaining:
+                    result.torrents_kept.append(h)
+                    continue
 
-    # 种子文件删完，任务目录多半空了。只清种子自己那棵目录树，
-    # 边界取种子文件的公共父目录 —— 下载根目录下还有别的任务，不能往上爬
-    if torrent_files:
-        _prune_torrent_dirs(torrent_files, result)
+                # 全部文件都标记成不需要了：种子成了空壳，做不了种也占着任务位，
+                # 直接删掉。这种情况出现在合集里的片子被逐部删完之后
+                try:
+                    deleted = client.delete_torrent([h], delete_files=False)
+                    result.torrents_deleted.extend(deleted)
+                    logger.info(f"种子 {h} 已无任何需要的文件，删除该任务")
+                except Exception as exc:
+                    msg = f"{name} 删除空壳种子 {h} 异常: {exc}"
+                    logger.error(msg)
+                    result.errors.append(msg)
 
-    # 3) 删硬链接。
-    #    直通模式下 link_path 就是刚在第 2 步删掉的那个源文件，跳过 ——
-    #    再走一遍只会在日志里刷「文件已不存在」，并把同一路径重复计一次
-    for path in link_paths:
-        if path in passthrough_paths:
-            result.links_deleted.append(path)
-            continue
-        _delete_file(path, result)
-        result.links_deleted.append(path)
+        # 2) 删源文件（占空间的那份），含种子里的全部文件。
+        #
+        # 硬链接保护：此刻硬链接还没删（第 3 步才删），所以源文件的链接数应当是
+        #   1（源文件自己）+ 本次要删的链接数
+        # 超出这个数，说明还有别处引用同一份数据 —— 另一个媒体库、手工建的链接、
+        # 别的整理工具。那种情况下删源文件既释放不了空间（引用计数不到 0），
+        # 又会让那些引用无从追溯，所以宁可留着。
+        #
+        # 未登记的种子内文件（样品图、说明 txt）也要过一遍检查，只是期望值是 1：
+        # 它们本该没有任何硬链接，nlink 超过 1 说明别处正引用着同一份数据 ——
+        # 另一个媒体库、别的整理工具。合集种子里这类文件可能是别的影片的附属，
+        # 删掉会破坏那边的引用。多一次 stat 换掉这个风险是值得的
+        #
+        # 直通模式（link_path == source_path，没有真的建过硬链接）要把自己排除掉，
+        # 否则期望值算成 2 而实际 nlink 只有 1 —— 检查虽不会误拦（只拦超出的），
+        # 但语义上该文件的合法引用数就是 1
+        registered_sources = {row.source_path for row in links if row.source_path}
+        # 直通登记：同一条记录里 link_path 与 source_path 指向同一个文件，
+        # 说明压根没建过硬链接。按记录逐条比对，不拿两个集合求交 ——
+        # 后者会把「A 的源文件恰好是 B 的链接」这种交叉情况也算进来
+        passthrough_paths = {
+            row.link_path for row in links if row.link_path == row.source_path
+        }
+        allowed_links = 1 + len(link_paths) - len(passthrough_paths)
+        for path in sorted(source_paths):
+            expected = allowed_links if path in registered_sources else 1
+            _delete_file(path, result, expected_links=expected)
 
-    # 4) 删刮削附属（nfo / 海报 / 字幕 / extrafanart），再清掉空掉的目录。
-    #    必须排在删硬链接之后：_other_videos 靠"目录里还剩没剩影片"判断能否
-    #    删目录级 poster.jpg，影片还在时会误判成"还有别的片子"
-    _cleanup_sidecars(link_paths, result)
-    _prune_empty_dirs(link_paths, result)
+        # 种子文件删完，任务目录多半空了。只清种子自己那棵目录树，
+        # 边界取种子文件的公共父目录 —— 下载根目录下还有别的任务，不能往上爬
+        if torrent_files:
+            _prune_torrent_dirs(torrent_files, result)
 
-    # 5) 清关联记录、扣留观察与下载历史
-    with session_scope() as session:
+        # 3) 删硬链接。
+        #    直通模式下 link_path 就是刚在第 2 步删掉的那个源文件，跳过 ——
+        #    再走一遍只会在日志里刷「文件已不存在」，并把同一路径重复计一次
         for path in link_paths:
-            row = session.get(MediaLink, path)
-            if row is not None:
-                session.delete(row)
-            # 扣留观察一并撤销。宽限期的用处是分辨「移动/改名」和「真删除」——
-            # 文件消失后等一段时间，看它会不会以同 inode 在别处出现。删除既然
-            # 已经执行完，这个悬念就没有了，留着扣留有两个害处：页面上会显示
-            # 一条「正在观察、即将删除」但实际永远不删，且要等下一轮对账的
-            # _prune_holds 扫到「关联记录没了」才被动清掉。
-            #
-            # watchdir 自己走完删除后都会 _clear_hold，只有 webhook 这条入口
-            # 没清 —— 它在本模块，而 watchdir 反过来 import 本模块，直接调
-            # 那边的函数会成循环导入，所以按模型自己删。
-            hold = session.get(PendingDelete, path)
-            if hold is not None:
-                session.delete(hold)
-                logger.info(f"[{result.code}] 删除已执行，撤销扣留观察: {path}")
-        # 历史记录一并清掉，否则订阅任务会认为该番号已下载而跳过。
-        #
-        # 依据是「本次的删除计划」而不是 result.torrents_deleted：后者记的是
-        # 下载器实际删掉的数量，种子早已不在下载器时 delete_torrent 返回空表
-        # （见 qbittorrent.delete_torrent 的 `if not hit: return []`），于是
-        # 一行 History 都清不掉 —— 文件、刮削附属、目录全删干净了，只剩
-        # History 留着，这个番号从此再也下不下来，重下一律报「已下载过，跳过」。
-        #
-        # 种子在不在下载器里，跟「这个 hash 与该番号的关联是否结束」是两件事。
-        # 计划里的 hash 无论下载器现状如何，关联都已经结束，行就该清掉。
-        #
-        # 合集种子（hashes_to_keep）不在这个集合里，它的 History 行照旧留着 ——
-        # 那是「这个 hash 存在于下载器」的凭据，删了会让后续对账反复补查
-        for h in hashes_to_delete:
-            row = session.get(History, h)
-            if row is not None:
-                session.delete(row)
-        # 合集种子本身留着做种，但这部片的文件已经删了。它在 History 里
-        # 那条 hash → 本番号 的映射必须清掉，否则重新订阅这部片时会被当成
-        # 「已下载过」直接跳过。种子仍在下载器里，删这行不影响它继续做种
-        for h in result.torrents_kept:
-            row = session.get(History, h)
-            if row is not None and row.code == result.code:
-                session.delete(row)
+            if path in passthrough_paths:
+                result.links_deleted.append(path)
+                continue
+            _delete_file(path, result)
+            result.links_deleted.append(path)
 
-    logger.warning(
-        f"[{result.code}] 联动删除完成 —— 种子 {len(result.torrents_deleted)}"
-        f"{f'（另有 {len(result.torrents_kept)} 个合集种子保留做种）' if result.torrents_kept else ''}，"
-        f"文件 {len(result.files_deleted)}，"
-        f"刮削附属 {len(result.sidecars_deleted)}，"
-        f"目录 {len(result.dirs_deleted)}，错误 {len(result.errors)}"
-    )
-    return result
+        # 4) 删刮削附属（nfo / 海报 / 字幕 / extrafanart），再清掉空掉的目录。
+        #    必须排在删硬链接之后：_other_videos 靠"目录里还剩没剩影片"判断能否
+        #    删目录级 poster.jpg，影片还在时会误判成"还有别的片子"
+        _cleanup_sidecars(link_paths, result)
+        _prune_empty_dirs(link_paths, result)
+
+        # 5) 清关联记录、扣留观察与下载历史
+        with session_scope() as session:
+            for path in link_paths:
+                row = session.get(MediaLink, path)
+                if row is not None:
+                    session.delete(row)
+                # 扣留观察一并撤销。宽限期的用处是分辨「移动/改名」和「真删除」——
+                # 文件消失后等一段时间，看它会不会以同 inode 在别处出现。删除既然
+                # 已经执行完，这个悬念就没有了，留着扣留有两个害处：页面上会显示
+                # 一条「正在观察、即将删除」但实际永远不删，且要等下一轮对账的
+                # _prune_holds 扫到「关联记录没了」才被动清掉。
+                #
+                # watchdir 自己走完删除后都会 _clear_hold，只有 webhook 这条入口
+                # 没清 —— 它在本模块，而 watchdir 反过来 import 本模块，直接调
+                # 那边的函数会成循环导入，所以按模型自己删。
+                hold = session.get(PendingDelete, path)
+                if hold is not None:
+                    session.delete(hold)
+                    logger.info(f"[{result.code}] 删除已执行，撤销扣留观察: {path}")
+            # 历史记录一并清掉，否则订阅任务会认为该番号已下载而跳过。
+            #
+            # 依据是「本次的删除计划」而不是 result.torrents_deleted：后者记的是
+            # 下载器实际删掉的数量，种子早已不在下载器时 delete_torrent 返回空表
+            # （见 qbittorrent.delete_torrent 的 `if not hit: return []`），于是
+            # 一行 History 都清不掉 —— 文件、刮削附属、目录全删干净了，只剩
+            # History 留着，这个番号从此再也下不下来，重下一律报「已下载过，跳过」。
+            #
+            # 种子在不在下载器里，跟「这个 hash 与该番号的关联是否结束」是两件事。
+            # 计划里的 hash 无论下载器现状如何，关联都已经结束，行就该清掉。
+            #
+            # 合集种子（hashes_to_keep）不在这个集合里，它的 History 行照旧留着 ——
+            # 那是「这个 hash 存在于下载器」的凭据，删了会让后续对账反复补查
+            for h in hashes_to_delete:
+                row = session.get(History, h)
+                if row is not None:
+                    session.delete(row)
+            # 合集种子本身留着做种，但这部片的文件已经删了。它在 History 里
+            # 那条 hash → 本番号 的映射必须清掉，否则重新订阅这部片时会被当成
+            # 「已下载过」直接跳过。种子仍在下载器里，删这行不影响它继续做种
+            for h in result.torrents_kept:
+                row = session.get(History, h)
+                if row is not None and row.code == result.code:
+                    session.delete(row)
+
+        from app.services import drop_media_exists_cache
+        drop_media_exists_cache(result.code)
+
+        logger.warning(
+            f"[{result.code}] 联动删除完成 —— 种子 {len(result.torrents_deleted)}"
+            f"{f'（另有 {len(result.torrents_kept)} 个合集种子保留做种）' if result.torrents_kept else ''}，"
+            f"文件 {len(result.files_deleted)}，"
+            f"刮削附属 {len(result.sidecars_deleted)}，"
+            f"目录 {len(result.dirs_deleted)}，错误 {len(result.errors)}"
+        )
+        return result

@@ -212,7 +212,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <PagePanel content-class="space-y-4">
+  <PagePanel :collapse-header="false" content-class="space-y-4">
     <template #header>
 
     <div class="flex flex-wrap gap-2">

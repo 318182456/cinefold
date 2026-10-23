@@ -39,7 +39,7 @@ async function remove(type, row) { if (!window.confirm(`删除「${row.name}」�
 onMounted(() => perform(load))
 </script>
 <template>
-  <PagePanel content-class="space-y-6">
+  <PagePanel :collapse-header="false" content-class="space-y-6">
     <template #header>
 
     <div class="flex flex-wrap items-center justify-between gap-3"><div><h1 class="text-xl font-semibold">条件订阅</h1><p class="mt-1 text-sm text-gray-500">从资料库匹配新片，随订阅下载任务自动执行。多条规则命中时使用最早创建的规则。</p></div><button class="btn-primary" :disabled="busy" @click="edit('rule')">新建规则</button></div>

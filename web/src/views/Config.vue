@@ -1167,7 +1167,7 @@ onUnmounted(stopUpgradePoll)
              lg:w-44 lg:flex-col lg:pb-0"
     >
       <div v-for="cat in CATEGORIES" :key="cat.key" class="shrink-0 lg:shrink">
-        <p class="mb-1.5 px-1 text-[11px] font-medium uppercase tracking-wide text-gray-600">
+        <p class="mb-1.5 hidden px-1 text-[11px] font-medium uppercase tracking-wide text-gray-600 lg:block">
           {{ cat.title }}
         </p>
         <div class="flex gap-2 lg:flex-col lg:gap-1">

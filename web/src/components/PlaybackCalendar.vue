@@ -1,4 +1,5 @@
 <script setup>
+import MobileSection from '@/components/MobileSection.vue'
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import http from '@/api'
 import { revealDetails } from '@/utils/statNavigation'
@@ -55,6 +56,7 @@ onUnmounted(() => { disposed = true; request++; clearInterval(timer) })
     <template v-if="data">
       <p v-if="!data.enabled" class="text-sm text-amber-400">播放记录尚未启用。<RouterLink :to="{ name: 'Config' }" class="text-brand">设置 → 媒体服务器 → Emby</RouterLink> 中开启后开始记录。</p>
       <p v-if="data.source_error" class="text-xs text-amber-400">Playback Reporting 读取失败（{{ data.source_error }}），当前显示本地观测记录。</p>
+      <MobileSection title="月历与统计" :summary="`${data.plays} 次 · ${duration(data.seconds)}`">
       <p class="text-xs text-gray-500">{{ data.note }} 日历时区：{{ data.timezone }}。</p>
       <div class="grid grid-cols-3 gap-3 text-center"><button type="button" class="rounded-lg bg-gray-800/60 p-3 transition hover:bg-gray-700/70 focus-visible:outline focus-visible:outline-brand" title="查看本月播放明细" @click="showMonthDetails"><p class="text-xs text-gray-500">本月播放</p><p class="mt-1 text-lg">{{ data.plays }} 次</p></button><button type="button" class="rounded-lg bg-gray-800/60 p-3 transition hover:bg-gray-700/70 focus-visible:outline focus-visible:outline-brand" title="查看本月播放明细" @click="showMonthDetails"><p class="text-xs text-gray-500">{{ data.source === 'playback_reporting' ? '本月观看时长（插件）' : '本月观看时长（估算）' }}</p><p class="mt-1 text-lg">{{ duration(data.seconds) }}</p></button><button type="button" class="rounded-lg bg-gray-800/60 p-3 transition hover:bg-gray-700/70 focus-visible:outline focus-visible:outline-brand" title="查看本月播放明细" @click="showMonthDetails"><p class="text-xs text-gray-500">活跃天数</p><p class="mt-1 text-lg">{{ data.active_days }} 天</p></button></div>
       <div class="grid grid-cols-7 gap-1.5 sm:gap-2">
@@ -65,6 +67,7 @@ onUnmounted(() => { disposed = true; request++; clearInterval(timer) })
           <p v-if="cell.plays" class="mt-1 text-[10px] text-emerald-300 sm:text-xs">{{ cell.plays }} 次<span class="hidden sm:inline"> · {{ duration(cell.seconds) }}</span></p>
         </button>
       </div>
+      </MobileSection>
       <div id="playback-records" class="flex scroll-mt-4 items-center justify-between"><h3 class="text-sm">{{ day || month }} 播放记录</h3><button v-if="day" class="text-xs text-brand" @click="day = ''">查看整月</button></div>
       <p v-if="!data.records.length" class="text-sm text-gray-500">暂无记录，启用后在 Emby 中播放即可累计。</p>
       <article v-for="row in data.records" :key="row.id" class="flex flex-wrap items-center justify-between gap-2 border-t border-gray-800 pt-3">

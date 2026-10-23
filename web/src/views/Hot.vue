@@ -46,7 +46,7 @@ onMounted(load)
 </script>
 
 <template>
-  <PagePanel content-class="space-y-4">
+  <PagePanel :collapse-header="false" content-class="space-y-4">
     <template #header>
 
     <p class="text-xs text-gray-500">按评分排序的未订阅番号</p>

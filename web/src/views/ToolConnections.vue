@@ -23,7 +23,7 @@ onMounted(() => { load(); timer = setInterval(load, 10000) })
 onUnmounted(() => clearInterval(timer))
 </script>
 <template>
-  <PagePanel content-class="space-y-5">
+  <PagePanel :collapse-header="false" content-class="space-y-5">
     <template #header>
 <div><h1 class="text-xl font-semibold">工具接入</h1><p class="mt-1 text-sm text-gray-500">将支持 MCP 的客户端连接到 cinefold，查询收藏、资源和任务，并提出订阅操作。</p></div>
     </template>

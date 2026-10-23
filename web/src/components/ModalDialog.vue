@@ -78,24 +78,24 @@ onBeforeUnmount(() => {
   >
     <div
       v-if="open"
-      class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+      class="modal-overlay fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-2 sm:p-4"
       @click.self="onBackdrop"
     >
       <div
-        class="card w-full space-y-3 overflow-y-auto overscroll-contain"
+        class="modal-content card w-full space-y-3 overflow-y-auto overscroll-contain"
         :style="{ maxHeight: scrollable ? '85dvh' : 'calc(100dvh - 2rem)' }"
         :class="[
           SIZES[size] || SIZES.md,
         ]"
       >
         <!-- 标题栏。给了 title 就渲染，否则整块交给 default 插槽 -->
-        <div v-if="title || $slots.title" class="flex items-start justify-between gap-3">
+        <div v-if="title || $slots.title" class="modal-heading flex items-start justify-between gap-3">
           <div class="min-w-0">
             <slot name="title">
               <p class="text-sm font-medium text-gray-200">{{ title }}</p>
             </slot>
           </div>
-          <button class="btn-ghost shrink-0 px-2 py-1 text-xs" @click="close">关闭</button>
+          <button class="btn-ghost shrink-0 px-3 py-1 text-xs" @click="close">关闭</button>
         </div>
 
         <slot />

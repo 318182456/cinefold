@@ -314,7 +314,7 @@ onMounted(load)
 </script>
 
 <template>
-  <PagePanel content-class="space-y-4">
+  <PagePanel header-label="数据源选项" content-class="space-y-4">
     <template #header>
 
     <div class="flex flex-wrap items-center gap-2">

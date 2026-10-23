@@ -24,6 +24,7 @@ const emit = defineEmits(['changed', 'detail', 'toggle-select'])
 
 const toast = useToast()
 const busy = ref(false)
+const moreOpen = ref(false)
 const refetching = ref(false)
 const imageFailed = ref(false)
 // 重抓后 URL 不变，浏览器会拿着 30 天缓存不动，靠它逼一次重新请求
@@ -244,7 +245,7 @@ async function reset() {
         >
       </div>
 
-      <div class="mt-2 flex gap-2">
+      <div class="mt-2 flex flex-wrap gap-1.5 sm:gap-2">
         <button
           class="btn px-2.5 py-1 text-xs"
           :class="subscribed ? 'btn-ghost' : 'btn-primary'"
@@ -256,6 +257,9 @@ async function reset() {
         <button class="btn-ghost px-2.5 py-1 text-xs" :disabled="busy" @click.stop="download">
           下载
         </button>
+        <div class="code-card-more" :class="{ 'code-card-more-open': moreOpen }" @click.stop>
+          <button type="button" class="btn-ghost px-2.5 py-1 text-xs sm:hidden" :aria-expanded="moreOpen" @click="moreOpen = !moreOpen">{{ moreOpen ? '收起' : '更多' }}</button>
+          <div class="code-card-more-items">
         <button
           class="btn-ghost px-2.5 py-1 text-xs"
           :disabled="refetching"
@@ -280,6 +284,8 @@ async function reset() {
         >
           {{ resetting ? '重置中…' : '重置' }}
         </button>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -290,3 +296,14 @@ async function reset() {
     />
   </div>
 </template>
+
+<style scoped>
+@media (min-width: 640px) {
+  .code-card-more, .code-card-more-items { display: contents; }
+}
+@media (max-width: 639px) {
+  .code-card-more-open { flex-basis: 100%; }
+  .code-card-more-items { display: flex; flex-wrap: wrap; gap: 0.375rem; padding-top: 0.375rem; }
+  .code-card-more:not(.code-card-more-open) > .code-card-more-items { display: none; }
+}
+</style>

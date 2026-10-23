@@ -11,14 +11,14 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from loguru import logger
 from pydantic import BaseModel
 from sqlalchemy import func, or_, select
 
 from app.api.endpoints import get_current_user
 from app.core.config import get_settings
-from app.database.models import Code, CodeAlias, History, MediaLink, PendingDelete
+from app.database.models import Code, CodeAlias, DeletionRecord, History, MediaLink, PendingDelete
 from app.database.session import session_scope
 from app.schemas.reponse import ResponseEntity
 from app.services.medialink import (
@@ -27,6 +27,43 @@ from app.services.medialink import (
 from app.utils import get_true_code
 
 router = APIRouter(prefix="/medialinks", tags=["硬链接"])
+
+
+@router.get('/deletion-history')
+def deletion_history(keyword: str = Query('', max_length=500), status: str = '',
+                     page: int = Query(1, ge=1), size: int = Query(20, ge=1, le=100),
+                     current_user: str = Depends(get_current_user)):
+    from app.services.deletionhistory import public_record, _OWNER
+    conditions = []
+    if keyword.strip():
+        needle = keyword.strip()
+        conditions.append(or_(*(column.icontains(needle, autoescape=True) for column in
+                               (DeletionRecord.code, DeletionRecord.title, DeletionRecord.link_path, DeletionRecord.source_path))))
+    if status:
+        if status not in ('running', 'completed', 'partial', 'failed', 'interrupted'):
+            raise HTTPException(422, '删除状态无效')
+        if status == 'interrupted':
+            conditions.append((DeletionRecord.status == 'running') & (DeletionRecord.owner != _OWNER))
+        elif status == 'running':
+            conditions.append((DeletionRecord.status == 'running') & (DeletionRecord.owner == _OWNER))
+        else:
+            conditions.append(DeletionRecord.status == status)
+    with session_scope() as session:
+        total = session.scalar(select(func.count()).select_from(DeletionRecord).where(*conditions)) or 0
+        rows = session.scalars(select(DeletionRecord).where(*conditions)
+            .order_by(DeletionRecord.created_at.desc(), DeletionRecord.id.desc()).offset((page-1)*size).limit(size))
+        items = [public_record(row) for row in rows]
+    return ResponseEntity.ok({'items': items, 'total': total, 'page': page, 'size': size})
+
+
+@router.get('/deletion-history/{record_id}')
+def deletion_history_detail(record_id: str, current_user: str = Depends(get_current_user)):
+    from app.services.deletionhistory import public_record
+    with session_scope() as session:
+        row = session.get(DeletionRecord, record_id)
+        if row is None:
+            raise HTTPException(404, '删除历史不存在')
+        return ResponseEntity.ok(public_record(row, detail=True))
 
 
 class RegisterRequest(BaseModel):
@@ -966,6 +1003,7 @@ def batch_drop_records(
         return ResponseEntity.fail("未选中任何记录", code=400)
 
     removed: list[str] = []
+    from app.services.deletionhistory import new_record
     with session_scope() as session:
         # 分片：SQLite 的 IN 参数上限 999，一次全选很容易超
         for start in range(0, len(paths), 500):
@@ -975,6 +1013,8 @@ def batch_drop_records(
                 )
             ).all():
                 removed.append(row.link_path)
+                audit = new_record(session, [row], source='manual', action='record_remove', status='completed')
+                audit.result = {'records_removed': [row.link_path], 'files_deleted': []}
                 session.delete(row)
 
     _drop_stats_cache()
@@ -997,6 +1037,9 @@ def drop_record(
         row = session.get(MediaLink, link_path)
         if row is None:
             return ResponseEntity.fail("记录不存在", code=404)
+        from app.services.deletionhistory import new_record
+        audit = new_record(session, [row], source='manual', action='record_remove', status='completed')
+        audit.result = {'records_removed': [row.link_path], 'files_deleted': []}
         session.delete(row)
 
     _drop_stats_cache()
@@ -1050,6 +1093,9 @@ def prune_records(current_user: str = Depends(get_current_user)):
         for path in stale:
             row = session.get(MediaLink, path)
             if row is not None:
+                from app.services.deletionhistory import new_record
+                audit = new_record(session, [row], source='prune', action='record_remove', status='completed')
+                audit.result = {'records_removed': [path], 'files_deleted': []}
                 session.delete(row)
 
     _drop_stats_cache()

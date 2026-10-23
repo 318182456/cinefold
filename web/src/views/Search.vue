@@ -174,7 +174,7 @@ const sizeText = (mb) => (mb >= 1024 ? `${(mb / 1024).toFixed(2)} GB` : `${mb.to
 </script>
 
 <template>
-  <PagePanel content-class="space-y-5">
+  <PagePanel :collapse-header="false" content-class="space-y-5">
     <template #header>
 
     <div class="flex gap-2">
@@ -189,7 +189,7 @@ const sizeText = (mb) => (mb >= 1024 ? `${(mb / 1024).toFixed(2)} GB` : `${mb.to
     </div>
 
     <!-- 检索履历 -->
-    <div v-if="history.length" class="flex flex-wrap items-center gap-2">
+    <div v-if="history.length" class="mobile-tabs flex flex-wrap items-center gap-2 overflow-x-auto">
       <span class="text-xs text-gray-500">最近搜索</span>
       <span
         v-for="item in history"

@@ -65,7 +65,7 @@ onMounted(load)
     <template #header>
 
     <!-- 统计 -->
-    <div class="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+    <div class="mobile-stat-grid grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
       <RouterLink v-for="tile in TILES" :key="tile.key" :to="tile.to" class="card transition hover:border-brand/60 hover:bg-brand/5 focus-visible:outline focus-visible:outline-brand" :aria-label="`查看${tile.label} ${stats?.[tile.key] ?? ''}`" :title="`查看${tile.label}明细`">
         <p class="text-xs text-gray-500">{{ tile.label }}</p>
         <p class="mt-1 text-2xl font-semibold tabular-nums" :class="tile.color">

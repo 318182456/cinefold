@@ -1,5 +1,6 @@
 <script setup>
 import PagePanel from '@/components/PagePanel.vue'
+import MobileSection from '@/components/MobileSection.vue'
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import http, { codeCover, getConfig, saveConfig } from '@/api'
@@ -98,14 +99,15 @@ onMounted(() => perform(reloadCollections))
     <div class="flex flex-wrap items-center justify-between gap-3"><div><h1 class="text-xl font-semibold">媒体库</h1><p class="mt-1 text-sm text-gray-500">管理本地收藏与片单，在 Emby 中观看。</p></div><div class="flex flex-wrap gap-2"><button class="btn-ghost" @click="configureEmby">同步 Emby</button><button class="btn-primary" @click="newCollection()">新建片单</button></div></div>
     </template>
 
-    <section class="card space-y-3" aria-label="合集与片单">
+    <MobileSection title="合集与片单" :summary="`${collections.length + systemCollections.length} 个片单 · ${embyCollections.length} 个合集`" class="sm:card">
       <div class="flex items-center justify-between"><h2 class="text-sm font-medium text-gray-300">合集与片单 <span class="ml-2 text-xs text-gray-500">{{ collections.length + systemCollections.length }} 个片单 · {{ embyCollections.length }} 个 Emby 合集</span></h2><button class="text-xs text-brand" @click="reloadCollections">刷新列表</button></div>
       <div class="grid grid-cols-2 gap-2 lg:grid-cols-4"><button v-for="item in systemCollections" :key="item.key" class="rounded-lg border p-3 text-left" :class="filters.collection_id === `system:${item.key}` ? 'border-brand/60 bg-brand/5' : 'border-gray-800 hover:bg-gray-800/50'" @click="chooseCollection(`system:${item.key}`)"><p class="text-sm text-gray-300">{{ item.name }}</p><p class="mt-1 text-xs text-gray-500">{{ item.description }}</p></button></div>
       <div v-if="collections.length" class="space-y-2"><p class="text-xs text-gray-500">我的片单</p><div class="flex gap-2 overflow-x-auto pb-1"><button v-for="item in collections" :key="item.id" class="shrink-0 rounded-lg border px-4 py-3 text-left text-xs" :class="String(filters.collection_id) === String(item.id) ? 'border-brand/60 bg-brand/5' : 'border-gray-800 hover:bg-gray-800/50'" @click="chooseCollection(item.id)"><p class="text-gray-300">{{ item.name }}</p><p class="mt-1 text-gray-500">{{ item.kind === 'smart' ? '智能片单' : '手动片单' }}</p></button></div></div>
       <div v-if="embyCollections.length" class="space-y-2"><p class="text-xs text-gray-500">AI 合集 · Emby</p><div class="flex gap-2 overflow-x-auto pb-1"><button v-for="item in embyCollections" :key="item.key" class="flex max-w-64 shrink-0 gap-3 rounded-lg border p-2 text-left text-xs" :class="filters.collection_id === `emby:${item.key}` ? 'border-brand/60 bg-brand/5' : 'border-gray-800 hover:bg-gray-800/50'" @click="chooseCollection(`emby:${item.key}`)"><PrivateImage v-if="item.cover" :src="codeCover(item.cover)" :alt="item.name" img-class="h-14 w-10 rounded object-cover" :fallback-text="item.name" /><span class="py-1"><span class="line-clamp-2 text-gray-300">{{ item.name }}</span><span class="mt-1 block text-gray-500">{{ item.count }} 部 · Emby 合集</span></span></button></div></div>
       <p v-if="!collections.length && !embyCollections.length" class="text-xs text-gray-500">暂无片单或合集。可新建片单，或到任务页执行 AI 全库自动合集。</p>
       <p v-if="embyCollectionsError" class="text-xs text-amber-400">合集读取失败：{{ embyCollectionsError }}</p>
-    </section>
+    </MobileSection>
+    <MobileSection title="影片筛选" :summary="`${total} 部${filters.keyword ? ' · ' + filters.keyword : ''}`">
     <form class="card space-y-3" @submit.prevent="search">
       <div class="flex flex-wrap gap-3"><input v-model="filters.keyword" class="input !w-auto min-w-40 flex-1" placeholder="搜索番号、标题、演员、标签" aria-label="搜索媒体库"><select v-model="filters.collection_id" class="input !w-auto" aria-label="选择合集或片单" @change="chooseCollection(filters.collection_id)"><option value="">全部影片</option><optgroup label="智能片单"><option v-for="c in systemCollections" :key="c.key" :value="`system:${c.key}`">{{ c.name }}</option></optgroup><optgroup label="我的片单"><option v-for="c in collections" :key="c.id" :value="c.id">{{ c.kind === 'smart' ? '智能 · ' : '' }}{{ c.name }}</option></optgroup><optgroup label="Emby 合集"><option v-for="c in embyCollections" :key="c.key" :value="`emby:${c.key}`">{{ c.name }}</option></optgroup></select><select v-model="filters.sort" :disabled="!!activeSystem || activeCollection?.kind === 'smart'" class="input !w-auto" @change="search"><option value="recent">最近更新</option><option value="release">最新发行</option><option value="rating">个人评分</option><option value="plays">播放最多</option><option value="size">文件体积</option></select><button class="btn-ghost">搜索</button></div>
       <div class="flex flex-wrap items-center gap-4 text-sm"><label v-for="[key, label] in [['favorite','本地收藏'],['emby_favorite','Emby 收藏'],['watch_later','想看'],['unseen','未看完'],['watched','已看完'],['include_skipped','显示已跳过']]" :key="key" class="flex items-center gap-2"><input v-model="filters[key]" type="checkbox" @change="search">{{ label }}</label><span class="ml-auto text-gray-500">{{ total }} 部</span></div>
@@ -117,6 +119,7 @@ onMounted(() => perform(reloadCollections))
         <button type="button" class="btn-ghost" @click="clearFilters">清除筛选</button>
       </div>
     </form>
+    </MobileSection>
     <p v-if="filters.last_played_month || filters.release_year" class="text-xs text-brand">{{ filters.last_played_month ? `最后观看月份：${filters.last_played_month}` : '' }} {{ filters.release_year ? `发行年份：${filters.release_year}` : '' }}<button class="ml-3" @click="clearFilters">清除筛选</button></p>
     <p v-if="activeSystem" class="text-sm text-gray-400">智能片单 · {{ activeSystem.name }} · {{ activeSystem.description }}，随资料与观看状态自动更新</p>
     <div v-if="activeCollection" class="flex items-center gap-3 text-sm"><span class="text-gray-400">{{ activeCollection.kind === 'smart' ? '智能片单' : '手动片单' }} · {{ activeCollection.name }}</span><button class="text-brand" @click="newCollection(activeCollection)">编辑</button><button class="text-red-400" @click="deleteCollection">删除片单</button></div>

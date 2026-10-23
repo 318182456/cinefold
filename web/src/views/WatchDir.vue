@@ -418,11 +418,11 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <PagePanel content-class="space-y-4">
+  <PagePanel :mobile-summary="`${items.length} 个目录 · 观察中 ${holds.length}`" header-label="目录统计与操作" content-class="space-y-4">
     <template #header>
 
     <!-- 概览 -->
-    <div class="grid gap-3 sm:grid-cols-4">
+    <div class="mobile-stat-grid grid gap-3 sm:grid-cols-4">
       <div class="card">
         <p class="text-xs text-gray-500">监控目录</p>
         <p class="mt-1 text-xl font-semibold text-gray-200">{{ items.length }}</p>

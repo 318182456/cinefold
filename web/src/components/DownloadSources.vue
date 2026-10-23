@@ -1,4 +1,5 @@
 <script setup>
+import MobileSection from '@/components/MobileSection.vue'
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import http from '@/api'
 import { revealDetails } from '@/utils/statNavigation'
@@ -311,11 +312,7 @@ onUnmounted(() => { disposed = true; request++; rebuildRequest++; clearTimeout(t
 
 <template>
   <section class="space-y-5">
-    <div class="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-5">
-      <button v-for="item in stats" :key="item.label" class="rounded-xl border p-4 text-left transition hover:bg-gray-800/60 focus-visible:outline focus-visible:outline-brand" :class="status === item.status ? 'border-brand/60 bg-brand/5' : 'border-gray-800 bg-gray-900/40'" :aria-pressed="status === item.status" @click="filterStatus(item.status)">
-        <p class="text-xs text-gray-500">{{ item.label }}</p><p class="mt-2 text-2xl font-semibold tabular-nums" :class="item.color">{{ item.value }}</p>
-      </button>
-    </div>
+
     <div v-if="rebuild.running || rebuild.deletion_protected || rebuild.protection_error || rebuildStatusError" class="space-y-3 rounded-xl border border-amber-600/30 bg-amber-500/5 p-4">
       <div class="flex flex-wrap items-center justify-between gap-3">
         <p class="text-sm text-gray-300">{{ rebuild.running ? `全部重新刮削 · ${rebuildPhase}` : '重建已结束 · 删除保护与状态提示' }}</p>
@@ -342,8 +339,14 @@ onUnmounted(() => { disposed = true; request++; rebuildRequest++; clearTimeout(t
       <p v-if="job.current" class="text-xs text-brand">当前处理 {{ job.current }}，可离开页面，任务会继续执行。</p><p v-if="job.error" class="text-xs text-red-400">{{ job.error }}</p>
       <details v-if="job.results.length"><summary class="cursor-pointer text-xs text-gray-400">查看逐项结果</summary><div v-for="(row, i) in job.results" :key="i" class="mt-2 border-t border-gray-800 pt-2 text-xs"><p :class="row.ok ? 'text-emerald-400' : 'text-red-400'">{{ row.code }} · {{ row.ok ? '完成' : '失败' }} · NFO {{ row.nfo_written }} · 图片 {{ row.images_written }}</p><p v-if="row.error" class="mt-1 break-all text-red-400">{{ row.error }}</p><p v-for="(warning, n) in row.warnings" :key="n" class="mt-1 text-amber-400">{{ warning }}</p><p v-for="path in row.links" :key="path" class="mt-1 break-all text-gray-500">{{ path }}</p></div></details>
     </div>
-    <RouterLink :to="{ name: 'Scrape', query: { tab: 'history' } }" class="block text-xs text-brand">查看刮削记录 · 任务明细、继续与失败重试 →</RouterLink>
+    <RouterLink :to="{ name: 'Scrape', query: { tab: 'history' } }" class="hidden text-xs text-brand sm:block">查看刮削记录 · 任务明细、继续与失败重试 →</RouterLink>
         <div class="card space-y-4">
+    <MobileSection title="清单筛选与操作" :summary="`${data.total} 个视频 · ${keyword || LABELS[status] || '全部状态'}`">
+    <div class="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-5">
+      <button v-for="item in stats" :key="item.label" class="rounded-xl border p-4 text-left transition hover:bg-gray-800/60 focus-visible:outline focus-visible:outline-brand" :class="status === item.status ? 'border-brand/60 bg-brand/5' : 'border-gray-800 bg-gray-900/40'" :aria-pressed="status === item.status" @click="filterStatus(item.status)">
+        <p class="text-xs text-gray-500">{{ item.label }}</p><p class="mt-2 text-2xl font-semibold tabular-nums" :class="item.color">{{ item.value }}</p>
+      </button>
+    </div>
     <div class="flex flex-wrap items-start justify-between gap-3">
       <div><h2 class="text-sm font-medium text-gray-300">视频清单</h2><p class="mt-1 text-xs text-gray-500">点击视频查看刮削资料。新增或移动文件后，扫描目录更新清单。</p></div>
       <RouterLink :to="{ name: 'Config', query: { section: 'scrape' } }" class="text-xs text-brand">管理目录与刮削规则 ↗</RouterLink>
@@ -364,17 +367,18 @@ onUnmounted(() => { disposed = true; request++; rebuildRequest++; clearTimeout(t
       <select v-model="status" class="input !w-auto" aria-label="刮削状态筛选" @change="search"><option value="">全部状态</option><option v-for="(label, value) in LABELS" :key="value" :value="value">{{ label }}{{ data.counts[value] ? ` (${data.counts[value]})` : '' }}</option></select>
       <button class="btn-ghost" :disabled="loading">搜索</button><button type="button" class="btn-ghost" :disabled="rebuildLocked || inventory.running || !data.roots.length" @click="refreshIndex">{{ inventory.running ? '扫描中…' : '扫描目录更新清单' }}</button>
     </form>
+    </MobileSection>
     <div class="flex flex-wrap items-center gap-3 border-t border-gray-800 pt-3">
       <label class="flex cursor-pointer items-center gap-2 text-xs text-gray-400"><input type="checkbox" :checked="allSelected" aria-label="选择当前页可处理视频" @change="toggleAll" />全选当前页</label>
-      <button class="btn-primary !px-3 !py-1.5 !text-xs" :disabled="rebuildLocked || !selectedRows.length || job.running" @click="open(selectedRows)">批量刮削{{ selectedRows.length ? ` · ${selectedRows.length}` : '' }}</button>
-      <button class="btn-ghost !px-3 !py-1.5 !text-xs text-amber-400" :disabled="rebuildLocked || !selectedRows.length || job.running" @click="open(selectedRows, true, true)">强制重新刮削{{ selectedRows.length ? ` · ${selectedRows.length}` : '' }}</button>
+      <button v-if="selectedRows.length" class="btn-primary !px-3 !py-1.5 !text-xs" :disabled="rebuildLocked || !selectedRows.length || job.running" @click="open(selectedRows)">批量刮削{{ selectedRows.length ? ` · ${selectedRows.length}` : '' }}</button>
+      <button v-if="selectedRows.length" class="btn-ghost !px-3 !py-1.5 !text-xs text-amber-400" :disabled="rebuildLocked || !selectedRows.length || job.running" @click="open(selectedRows, true, true)">强制重新刮削{{ selectedRows.length ? ` · ${selectedRows.length}` : '' }}</button>
       <span class="ml-auto text-xs text-gray-500">{{ data.total }} 个视频<span v-if="keyword"> · 概况已按搜索条件筛选</span></span>
     </div>
     <p v-for="(warning, i) in data.warnings" :key="i" class="text-xs text-amber-400">{{ warning }}</p>
     <p v-if="loading" class="py-5 text-center text-sm text-gray-500">正在查询清单…</p>
     <div v-else-if="!data.items.length" class="rounded-xl border border-dashed border-gray-800 px-4 py-12 text-center"><p class="text-sm text-gray-400">{{ !data.roots.length ? '添加下载源，开始整理视频' : keyword || status ? '没有符合条件的视频' : '清单中还没有视频' }}</p><p class="mt-2 text-xs text-gray-600">{{ !data.roots.length ? '前往刮削设置，配置容器内可访问的下载目录。' : keyword || status ? '试试其他关键词，或切换到全部状态。' : '扫描下载目录后，视频会显示在这里。' }}</p><RouterLink v-if="!data.roots.length" :to="{ name: 'Config', query: { section: 'scrape' } }" class="mt-4 inline-block text-xs text-brand">配置下载源 ↗</RouterLink></div>
     <div v-else class="divide-y divide-gray-800/70">
-      <article v-for="row in data.items" :key="row.path" class="group flex items-start gap-3 rounded-lg px-2 py-4 transition hover:bg-gray-800/30 sm:gap-4">
+      <article v-for="row in data.items" :key="row.path" class="group flex items-start gap-3 rounded-lg px-2 py-2 transition sm:py-4 hover:bg-gray-800/30 sm:gap-4">
         <input v-model="selected" :value="row.path" type="checkbox" class="mt-2 shrink-0" :disabled="!selectable(row)" :aria-label="`选择 ${row.name}`" />
         <div class="min-w-0 flex-1">
           <button class="block max-w-full text-left focus-visible:outline focus-visible:outline-brand" :aria-label="`查看 ${row.name} 的刮削资料`" @click="showDetail(row)">

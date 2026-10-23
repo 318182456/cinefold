@@ -1,4 +1,5 @@
 <script setup>
+import MobileSection from '@/components/MobileSection.vue'
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { getLogFiles, getLogs } from '@/api'
@@ -75,7 +76,8 @@ onUnmounted(() => { disposed = true; revision++; controller?.abort(); clearTimeo
 
 <template>
   <div class="flex h-full min-h-0 min-w-0 flex-col gap-3 overflow-hidden">
-    <div class="flex max-h-[45%] shrink-0 flex-wrap items-center gap-2 overflow-auto">
+    <MobileSection title="日志筛选" :summary="`${filename ? '历史日志' : '当前日志'} · ${level || '全部级别'}`" class="page-panel-header flex max-h-[45%] min-h-0 shrink-0 flex-col">
+    <div class="flex flex-wrap items-center gap-2">
       <select v-model="filename" class="input w-full sm:w-60" aria-label="日志文件">
         <option value="">当前日志</option>
         <option v-for="file in files.filter(item => !item.current)" :key="file.name" :value="file.name">
@@ -106,6 +108,7 @@ onUnmounted(() => { disposed = true; revision++; controller?.abort(); clearTimeo
         滚动到底部
       </label>
     </div>
+    </MobileSection>
 
     <div
       v-if="filtered.length"
