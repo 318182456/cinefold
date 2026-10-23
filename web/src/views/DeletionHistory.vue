@@ -9,8 +9,9 @@ import { useToast } from '@/composables/useToast'
 const toast = useToast()
 const data = ref({ items: [], total: 0 }), keyword = ref(''), status = ref(''), page = ref(1)
 const loading = ref(false), error = ref(''), selected = ref(null), detail = ref(null), detailError = ref(''), subscribing = ref('')
+const importing = ref(false), importSummary = ref(null)
 const phases = { completed: '已完成', partial: '部分失败', failed: '执行失败', running: '执行中', interrupted: '中断待核对' }
-const sources = { emby: 'Emby 删除回调', cleanup: '系统 / 手动联动清理', manual: '手动清除记录', prune: '失效记录清理' }
+const sources = { emby: 'Emby 删除回调', cleanup: '系统 / 手动联动清理', manual: '手动清除记录', prune: '失效记录清理', log_import: '旧日志补录' }
 const date = value => value ? new Date(value).toLocaleString('zh-CN') : '—'
 let request = 0, detailRequest = 0, disposed = false, timer
 async function load() {
@@ -31,6 +32,17 @@ async function load() {
 }
 function search() { page.value = 1; load() }
 function turn(delta) { page.value += delta; load() }
+async function importLogs() {
+  if (importing.value) return
+  importing.value = true
+  try {
+    importSummary.value = await http.post('/medialinks/deletion-history/import-logs', null, { params: { dry_run: false }, timeout: 120000 })
+    toast.success(`已补录 ${importSummary.value.added} 条删除历史，已有 ${importSummary.value.existing} 条跳过`)
+    page.value = 1
+    await load()
+  } catch (err) { toast.error(err.message) }
+  finally { importing.value = false }
+}
 async function show(row) {
   selected.value = row; detail.value = null; detailError.value = ''
   const id = ++detailRequest
@@ -59,7 +71,8 @@ onUnmounted(() => { disposed = true; request++; detailRequest++; clearTimeout(ti
         <button class="btn-ghost" :disabled="loading">查询 / 刷新</button>
       </form>
     </template>
-    <p class="text-xs text-gray-500">保留删除前的影片、路径和下载信息；重新下载后仍可追溯。历史从此功能启用后开始记录，旧日志不会自动转换为删除记录。</p>
+    <div class="flex flex-wrap items-center justify-between gap-2"><p class="min-w-0 flex-1 text-xs text-gray-500">保留删除信息，重新下载后仍可追溯。以前的删除可从保留的日志补录，缺失细节不会推测补齐。</p><button class="btn-ghost shrink-0 !text-xs" :disabled="importing" @click="importLogs">{{ importing ? '正在扫描旧日志…' : '从旧日志补录' }}</button></div>
+    <p v-if="importSummary" class="text-xs text-gray-400">扫描 {{ importSummary.files }} 个日志，识别 {{ importSummary.matched }} 条，新补录 {{ importSummary.added }} 条，已有 {{ importSummary.existing }} 条；排除演练 / 未执行 {{ importSummary.dry_runs }} 条，未能配对 {{ importSummary.unmatched }} 条，歧义计划 {{ importSummary.ambiguous }} 条。补录只写历史，不触发删除或下载。</p>
     <p v-if="error" role="alert" class="text-sm text-red-400">读取失败：{{ error }}。<button class="text-brand" @click="load">重试</button></p>
     <p v-if="loading && !data.items.length" class="py-8 text-center text-gray-500">读取中…</p>
     <article v-for="row in data.items" :key="row.id" class="card space-y-2">
@@ -75,6 +88,7 @@ onUnmounted(() => { disposed = true; request++; detailRequest++; clearTimeout(ti
       <p v-if="detailError" class="text-sm text-red-400">{{ detailError }}</p><p v-else-if="!detail" class="text-sm text-gray-500">读取明细中…</p>
       <div v-else class="space-y-4 text-xs text-gray-400">
         <p>{{ sources[detail.source] || detail.source }} · {{ phases[detail.status] }} · {{ date(detail.created_at) }} → {{ date(detail.finished_at) }}</p>
+        <div v-if="detail.snapshot.provenance?.kind === 'log_import'" class="space-y-2 rounded-lg bg-amber-500/5 p-2 text-amber-300"><p>{{ detail.snapshot.provenance.note }}</p><p class="break-all">证据：{{ detail.snapshot.provenance.file }}:{{ detail.snapshot.provenance.line }} → {{ detail.snapshot.provenance.finished_file }}:{{ detail.snapshot.provenance.finished_line }}；日志时区 {{ detail.snapshot.provenance.timezone }}</p><p v-if="detail.result.summary">完成汇总：种子 {{ detail.result.summary.torrents }} · 文件 {{ detail.result.summary.files }} · 附属 {{ detail.result.summary.sidecars }} · 目录 {{ detail.result.summary.directories }} · 错误 {{ detail.result.summary.errors }}</p></div>
         <p v-if="detail.action === 'record_remove'">仅清除关联记录，未删除视频或下载器任务。</p>
         <p v-if="detail.status === 'interrupted'" class="text-amber-400">服务中断，部分操作可能已执行。请核对以下路径和下载器；不会自动重新删除。</p>
         <section><h3 class="mb-2 text-gray-200">删除前的关联</h3><div v-for="(row, i) in detail.snapshot.links || []" :key="i" class="mb-2 space-y-1 break-all"><p>{{ row.code }}</p><p>源文件：{{ row.source_path || '未登记' }}</p><p>播放文件：{{ row.link_path }}</p></div></section>

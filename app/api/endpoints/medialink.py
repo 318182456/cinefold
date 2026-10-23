@@ -66,6 +66,16 @@ def deletion_history_detail(record_id: str, current_user: str = Depends(get_curr
         return ResponseEntity.ok(public_record(row, detail=True))
 
 
+@router.post('/deletion-history/import-logs')
+def import_deletion_logs(dry_run: bool = True, current_user: str = Depends(get_current_user)):
+    from app.services.deletionlogimport import import_log_history
+    import os
+    try:
+        return ResponseEntity.ok(import_log_history(dry_run=dry_run, log_timezone=os.getenv('TZ') or 'Asia/Shanghai'))
+    except OSError as exc:
+        raise HTTPException(503, f'归档日志读取失败：{type(exc).__name__}') from exc
+
+
 class RegisterRequest(BaseModel):
     code: str
     source_path: str
