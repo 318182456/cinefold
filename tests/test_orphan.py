@@ -646,15 +646,16 @@ def test_directory_delete_event_ignored(monkeypatch):
 
     import app.api.endpoints.webhook as wh
     monkeypatch.setattr(
-        wh, "handle_media_deleted",
-        lambda *a, **k: called.append("hit") or wh.handle_media_deleted,
+        wh, "handle_emby_deleted",
+        lambda *a, **k: called.append("hit") or {},
     )
 
-    with TestClient(create_app()) as client:
-        resp = client.post("/api/v1/webhook/emby", json={
-            "Event": "library.deleted",
-            "Item": {"Path": "/volume3/h_video/日本AV/风间由美"},
-        })
+    # 此处只验证回调，不启动调度器、下载器和目录监听等真实后台服务。
+    client = TestClient(create_app())
+    resp = client.post("/api/v1/webhook/emby", json={
+        "Event": "library.deleted",
+        "Item": {"Path": "/volume3/h_video/日本AV/风间由美"},
+    })
 
     assert resp.status_code == 200
     assert resp.json()["data"]["ignored"] is True

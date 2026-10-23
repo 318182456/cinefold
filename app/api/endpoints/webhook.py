@@ -18,7 +18,7 @@ from starlette.concurrency import run_in_threadpool
 
 from app.core.config import get_settings
 from app.schemas.reponse import ResponseEntity
-from app.services.medialink import handle_media_deleted, register_scrape
+from app.services.medialink import handle_emby_deleted, register_scrape
 from app.utils import get_true_code
 
 router = APIRouter(prefix="/webhook", tags=["webhook"])
@@ -186,7 +186,8 @@ async def scrape_webhook(request: Request):
 async def emby_webhook(request: Request):
     """Emby / Jellyfin 删除影片回调，联动删除种子与文件。
 
-    传 dry_run=1 可只查看会删什么而不实际删除，建议接入前先试一次。
+    仅接受完整的已登记影片路径；文件仍存在、目录事件和无法确认的路径均忽略。
+    传 dry_run=1 可只查看已确认消失的影片会清理什么，不实际删除。
     """
     if not _check_token(request):
         return ResponseEntity.fail("密钥校验失败", code=403)
@@ -221,40 +222,13 @@ async def emby_webhook(request: Request):
         request.query_params.get("dry_run") or data.get("dry_run") or ""
     ).lower() in ("1", "true", "yes")
 
-    # 路径指向目录（没有番号 + 没有影片扩展名）的回调有两种，磁盘上分不出来
-    # —— 回调到达时 Emby 已经删完了，两种情况要么不存在要么是空目录：
-    #
-    #   1. 一部影片就是一个目录：DVD 目录结构、合集里每部片各占一个子目录。
-    #      联动必须照走，否则种子里那些文件永远不会被标记为不需要。
-    #   2. 影片删完后空掉的演员 / 系列目录，Emby 会各补一条回调。这类目录
-    #      本就没有关联记录，走下去只会刷「未找到关联记录」的 WARNING。
-    #
-    # 库里能分：第 1 种查得到目录下的关联记录，第 2 种查不到。查得到就按
-    # 查出来的影片逐个联动，查不到才静默忽略。
-    #
-    # 判据只看扩展名，不看 code 有没有解析出来 —— Emby 的目录级事件同样
-    # 带得出番号（Item.Name 就是「SNOS-183 瀬戸環奈」这种），要求 code 为空
-    # 才走目录分支，那些事件就会掉到下面按 link_path 精确查，而目录路径
-    # 永远查不到关联记录，整个删除就被静默跳过了
-    if link_path:
-        from app.services.medialink import VIDEO_SUFFIXES, lookup_links_under_dir
-
-        if Path(link_path).suffix.lower() not in VIDEO_SUFFIXES:
-            videos = await run_in_threadpool(lookup_links_under_dir, link_path)
-            if not videos:
-                logger.info(f"Emby 回调为目录级删除事件且目录下无关联记录，忽略: {link_path}")
-                return ResponseEntity.ok({"ignored": True, "reason": "目录级事件"})
-
-            logger.warning(
-                f"Emby 回调路径指向目录，其下有 {len(videos)} 条关联记录，"
-                f"逐个联动（事件={event or '未提供'}，"
-                f"来源={request.client.host if request.client else '?'}）: {link_path}"
-            )
-            results = []
-            for video in videos:
-                r = await run_in_threadpool(handle_media_deleted, video, "", dry_run)
-                results.append(r.as_dict())
-            return ResponseEntity.ok({"dir_path": link_path, "items": results})
+    # 条目删除不代表磁盘删除：扫描折叠/重建演员目录也会发出 library.deleted。
+    # 目录及仅番号回调均不能作为删源依据，禁止展开到目录下的影片。
+    from app.services.medialink import VIDEO_SUFFIXES
+    if not link_path or Path(link_path.replace('\\', '/')).suffix.lower() not in VIDEO_SUFFIXES:
+        reason = '目录级事件' if link_path else '缺少影片文件路径'
+        logger.warning(f'忽略 Emby 删除回调（{reason}）: {link_path or code}')
+        return ResponseEntity.ok({'ignored': True, 'reason': reason})
 
     # 联动删除会真的删掉种子和源文件，事后追责全靠这行 —— 被忽略的事件有日志，
     # 真正执行删除的反而没有，出事时只能看到"删了什么"，看不到"谁让删的"
@@ -265,6 +239,6 @@ async def emby_webhook(request: Request):
     )
 
     result = await run_in_threadpool(
-        handle_media_deleted, link_path, code or "", dry_run
+        handle_emby_deleted, link_path, dry_run
     )
-    return ResponseEntity.ok(result.as_dict())
+    return ResponseEntity.ok(result)

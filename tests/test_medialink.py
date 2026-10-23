@@ -1185,6 +1185,7 @@ def test_emby_webhook_deletes_on_item_remove(linked):
 
     source, link = linked
     medialink.register_scrape("ABS-001", str(source))
+    link.unlink()  # 真实删除回调到达前，播放文件应已由媒体服务器删除。
 
     client = TestClient(create_app())
     response = client.post(
@@ -1197,13 +1198,9 @@ def test_emby_webhook_deletes_on_item_remove(linked):
     assert not link.exists()
 
 
-def test_emby_webhook_handles_dir_event_with_code(linked):
-    """目录级事件同样带得出番号，不能因为有 code 就跳过目录处理。
-
-    Emby 的 Item.Name 是「SNOS-183 瀬戸環奈」这种，番号解析得出来。
-    早先要求 code 为空才走目录分支，这类事件就掉到按 link_path 精确查，
-    而目录路径永远查不到记录，删除被静默跳过。
-    """
+@pytest.mark.parametrize('dry_run', [False, True])
+def test_emby_webhook_ignores_registered_dir_event_with_code(linked, dry_run):
+    """演员目录条目重建不能展开到其中的影片，即使带有番号。"""
     from fastapi.testclient import TestClient
     from app.api import create_app
 
@@ -1212,7 +1209,7 @@ def test_emby_webhook_handles_dir_event_with_code(linked):
 
     client = TestClient(create_app())
     response = client.post(
-        "/api/v1/webhook/emby?dry_run=1",
+        f"/api/v1/webhook/emby?dry_run={int(dry_run)}",
         json={
             "Event": "library.deleted",
             "Item": {"Path": str(Path(link).parent), "Name": "ABS-001 某演员"},
@@ -1221,9 +1218,10 @@ def test_emby_webhook_handles_dir_event_with_code(linked):
 
     body = response.json()
     assert body["code"] == 200, body
-    # 走的是目录分支：返回 dir_path 而不是单条结果
-    assert "dir_path" in body["data"], body["data"]
-    assert body["data"]["items"], "目录下有关联记录，应逐个联动"
+    assert body['data']['ignored'] is True
+    assert source.exists() and link.exists()
+    with session_scope() as session:
+        assert session.get(MediaLink, str(link)) is not None
 
 
 def test_emby_webhook_ignores_empty_dir_event(linked):
@@ -1250,6 +1248,122 @@ def test_emby_webhook_ignores_empty_dir_event(linked):
 # ----------------------------------------------------------------------
 # 硬链接保护
 # ----------------------------------------------------------------------
+@pytest.fixture
+def callback_media(linked, monkeypatch):
+    """真实文件/数据库配合隔离的双下载器，检查误回调绝不产生删除副作用。"""
+    source, link = linked
+    sidecar = link.with_suffix('.nfo')
+    sidecar.write_text('<movie/>', encoding='utf-8')
+    torrent_hash = 'e' * 40
+    with session_scope() as session:
+        session.add(MediaLink(code='ABS-001', source_path=str(source), link_path=str(link)))
+        session.add(History(hash=torrent_hash, code='ABS-001', save_path=str(source)))
+    deleted = []
+
+    class Client:
+        def delete_torrent(self, hashes, delete_files=False):
+            deleted.append((list(hashes), delete_files))
+            return list(hashes)
+
+    import app.modules.downloadclient as dc
+    monkeypatch.setattr(dc, 'list_configured_clients', lambda: ['qbittorrent', 'transmission'])
+    monkeypatch.setattr(dc, 'get_download_client', lambda *a, **k: Client())
+    monkeypatch.setattr(medialink, '_torrent_hashes_by_path', lambda paths: [])
+    monkeypatch.setattr(medialink, '_plan_torrent_deletion', lambda hashes, paths: (hashes, [], {}))
+    return source, link, sidecar, torrent_hash, deleted
+
+
+@pytest.mark.parametrize('condition', ['exists', 'wrong_directory', 'missing_directory', 'permission', 'restored'])
+def test_emby_callback_preserves_media_on_unconfirmed_delete(callback_media, monkeypatch, condition):
+    source, link, sidecar, torrent_hash, deleted = callback_media
+    requested = str(link)
+    if condition == 'wrong_directory':
+        requested = str(link.parent.parent / 'other-actor' / link.name)
+    elif condition == 'missing_directory':
+        link.parent.rename(link.parent.with_name('offline'))
+    elif condition == 'permission':
+        real_lstat = Path.lstat
+
+        def lstat(path, *args, **kwargs):
+            if path == link:
+                raise PermissionError('unavailable')
+            return real_lstat(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, 'lstat', lstat)
+    elif condition == 'restored':
+        link.unlink()
+
+        def plan(hashes, paths):
+            os.link(source, link)  # 下载器查询期间，视频由重试或外部工具恢复。
+            return hashes, [], {}
+
+        monkeypatch.setattr(medialink, '_plan_torrent_deletion', plan)
+
+    result = medialink.handle_emby_deleted(requested)
+    assert result['ignored'] is True
+    assert source.read_bytes() == b'x' * 1024
+    assert deleted == []
+    stored_sidecar = (sidecar.parent.with_name('offline') / sidecar.name
+                      if condition == 'missing_directory' else sidecar)
+    assert stored_sidecar.read_text(encoding='utf-8') == '<movie/>'
+    with session_scope() as session:
+        assert session.get(MediaLink, str(link)) is not None
+        assert session.get(History, torrent_hash) is not None
+
+
+@pytest.mark.parametrize('payload_kind', ['file', 'directory', 'code_only'])
+def test_emby_refresh_callback_does_not_delete_existing_media(callback_media, payload_kind):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from app.api.endpoints.webhook import router
+
+    source, link, sidecar, torrent_hash, deleted = callback_media
+    app = FastAPI()
+    app.include_router(router)
+    item = {'Name': 'ABS-001'}
+    if payload_kind != 'code_only':
+        item['Path'] = str(link if payload_kind == 'file' else link.parent)
+    response = TestClient(app).post('/webhook/emby', json={'Event': 'library.deleted', 'Item': item})
+    assert response.json()['data']['ignored'] is True
+    assert source.exists() and link.exists() and sidecar.exists()
+    assert deleted == []
+
+
+def test_emby_deleted_file_cleans_source_once(callback_media):
+    source, link, sidecar, torrent_hash, deleted = callback_media
+    link.unlink()
+    result = medialink.handle_emby_deleted(str(link))
+    assert not result.get('ignored') and not result['errors']
+    assert not source.exists() and not sidecar.exists()
+    assert deleted == [([torrent_hash], False), ([torrent_hash], False)]
+    with session_scope() as session:
+        assert session.get(MediaLink, str(link)) is None
+        assert session.get(History, torrent_hash) is None
+    assert medialink.handle_emby_deleted(str(link))['ignored'] is True
+    assert len(deleted) == 2
+
+
+def test_emby_deleted_file_dry_run_keeps_source_and_torrents(callback_media):
+    source, link, sidecar, torrent_hash, deleted = callback_media
+    link.unlink()
+    result = medialink.handle_emby_deleted(str(link), dry_run=True)
+    assert result['dry_run'] and str(source) in result['files_deleted']
+    assert source.exists() and sidecar.exists() and deleted == []
+    with session_scope() as session:
+        assert session.get(MediaLink, str(link)) is not None
+        assert session.get(History, torrent_hash) is not None
+
+
+def test_emby_deleted_file_respects_rebuild_protection(callback_media, monkeypatch):
+    from app.services import scrapemaintenance
+    source, link, sidecar, torrent_hash, deleted = callback_media
+    link.unlink()
+    monkeypatch.setattr(scrapemaintenance, 'protects_delete', lambda path: True)
+    result = medialink.handle_emby_deleted(str(link))
+    assert result['ignored'] and '删除保护' in result['reason']
+    assert source.exists() and sidecar.exists() and deleted == []
+
+
 def test_delete_refuses_source_with_external_hardlink(linked, tmp_path):
     """源文件还被别处硬链接引用时不删它。
 

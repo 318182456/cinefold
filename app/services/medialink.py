@@ -23,6 +23,7 @@ from __future__ import annotations
 from app.services.scrapemaintenance import guarded as maintenance_guarded
 
 import os
+import stat
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -1324,8 +1325,50 @@ def handle_media_deleted(
         return result
 
 
+class _IgnoredDeleteCallback(ValueError):
+    pass
+
+
+def _require_missing_callback_link(link_path, links):
+    # 不采用文件名回退：不同目录可能有同名影片。
+    if (not link_path or len(links) != 1
+            or _norm_path(links[0].link_path) != _norm_path(link_path)):
+        raise _IgnoredDeleteCallback('未匹配到唯一的完整影片路径')
+    path = Path(links[0].link_path)
+    if not path.is_absolute() or path.suffix.lower() not in VIDEO_SUFFIXES:
+        raise _IgnoredDeleteCallback('不是已登记的绝对影片文件路径')
+    try:
+        path.lstat()  # 包括失效符号链接；权限错误也不能当作文件消失。
+    except FileNotFoundError:
+        try:
+            # 目录也消失时无法区分真实删除与挂载掉线，保留源文件供人工处理。
+            if path.parent.is_symlink() or not stat.S_ISDIR(path.parent.stat().st_mode):
+                raise _IgnoredDeleteCallback('播放目录不可用，无法确认影片已删除')
+        except OSError as exc:
+            raise _IgnoredDeleteCallback('播放目录不可用，无法确认影片已删除') from exc
+    except OSError as exc:
+        raise _IgnoredDeleteCallback('无法读取播放文件状态，保留源文件') from exc
+    else:
+        raise _IgnoredDeleteCallback('播放文件仍存在，可能是媒体库条目重建')
+
+
+def handle_emby_deleted(link_path: str, dry_run: bool = False) -> dict:
+    """仅对已确认消失的单个播放文件处理外部删除回调。"""
+    from app.services.scrape import _SCRAPE_LOCK
+    from app.services.scrapemaintenance import activity, protects_delete, MaintenanceBusy
+    try:
+        # 与刮削提交串行，避免核验消失后由重刮重新生成同一路径。
+        with activity(), _SCRAPE_LOCK:
+            if protects_delete(link_path):
+                raise _IgnoredDeleteCallback('全量重建的删除保护已启用')
+            return _handle_media_deleted(link_path, dry_run=dry_run, require_missing=True).as_dict()
+    except (_IgnoredDeleteCallback, MaintenanceBusy) as exc:
+        logger.warning(f'忽略 Emby 删除回调（{exc}）: {link_path}')
+        return {'ignored': True, 'reason': str(exc)}
+
+
 def _handle_media_deleted(
-    link_path: str = "", code: str = "", dry_run: bool = False
+    link_path: str = "", code: str = "", dry_run: bool = False, *, require_missing: bool = False
 ) -> DeleteResult:
     """媒体服务器删除影片后的联动清理。
 
@@ -1335,6 +1378,8 @@ def _handle_media_deleted(
     result = DeleteResult(dry_run=dry_run)
 
     links = _lookup_links(link_path=link_path, code=code)
+    if require_missing:
+        _require_missing_callback_link(link_path, links)
     if not links:
         logger.warning(
             f"未找到关联记录，不做任何删除。link_path={link_path!r} code={code!r}"
@@ -1391,6 +1436,10 @@ def _handle_media_deleted(
         result.links_deleted = link_paths
         result.sidecars_deleted, result.dirs_deleted = _preview_cleanup(link_paths)
         return result
+
+    if require_missing:
+        # 下载器查询可能较慢；真正删种/删文件前再次确认没有恢复。
+        _require_missing_callback_link(link_path, links)
 
     # 1) 处理种子。转种下同一文件对应多个种子，逐个按计划处理；
     #    文件一律不交给下载器删（转种时保存路径可能不一致，容易误删漏删）

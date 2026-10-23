@@ -180,7 +180,7 @@ def test_playback_webhook_never_enters_deletion_handler(state, monkeypatch):
     monkeypatch.setattr(api, '_check_token', lambda request: True)
     def forbidden(*args, **kwargs):
         raise AssertionError('播放事件不能触发删除')
-    monkeypatch.setattr(api, 'handle_media_deleted', forbidden)
+    monkeypatch.setattr(api, 'handle_emby_deleted', forbidden)
     app = FastAPI(); app.include_router(api.router)
     response = TestClient(app).post('/webhook/emby', json=hook(playing(), 'playback.start'))
     assert response.status_code == 200 and response.json()['data']['recorded']
