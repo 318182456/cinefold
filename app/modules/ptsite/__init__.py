@@ -109,21 +109,29 @@ def download_seed_by_url(
 
 
 # ----------------------------------------------------------------------
+SITE_SWITCHES = {'mteam': 'mteam_enabled', 'rousi': 'rousi_enabled', 'ptt': 'ptt_enabled', 'nicept': 'nicept_enabled'}
+
+
+def site_is_enabled(name: str) -> bool:
+    key = SITE_SWITCHES.get((name or '').casefold())
+    return bool(getattr(get_settings(), key)) if key else True
+
+
 def get_sites() -> list[PTSite]:
-    """返回所有已配置的 PT 站。"""
+    """返回已启用且已配置凭据的站点。停用不清除原凭据。"""
     settings = get_settings()
     sites: list[PTSite] = []
 
-    if settings.mteam_api_key:
+    if settings.mteam_api_key and site_is_enabled('MTeam'):
         from app.modules.ptsite.mteam import MTeam
         sites.append(MTeam())
-    if settings.rousi_apikey:
+    if settings.rousi_apikey and site_is_enabled('Rousi'):
         from app.modules.ptsite.rousi import Rousi
         sites.append(Rousi())
-    if settings.ptt_cookie:
+    if settings.ptt_cookie and site_is_enabled('PTT'):
         from app.modules.ptsite.ptt import PTT
         sites.append(PTT())
-    if settings.nicept_cookie:
+    if settings.nicept_cookie and site_is_enabled('NicePT'):
         from app.modules.ptsite.nicept import NicePT
         sites.append(NicePT())
     if settings.bt_url:
@@ -148,7 +156,7 @@ def crawling_checked(site: PTSite, keyword: str) -> tuple[bool, list[Torrent]]:
     各站的 search() 都在内部吞掉异常返回空列表（网络错误、鉴权失败都
     一样），光靠这里的 try/except 抓不到，所以要额外看 search_failed。
     """
-    if not getattr(site, "enabled", True):
+    if not site_is_enabled(site.name) or not getattr(site, "enabled", True):
         logger.debug(f"[{site.name}] 未配置，跳过")
         return False, []
     try:

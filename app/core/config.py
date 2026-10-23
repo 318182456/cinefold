@@ -224,6 +224,10 @@ class Settings:
     # PT-depiler 等工具用，需授予「读取账户资料」「读取与搜索种子」「下载种子」。
     # 账号密码登录换 JWT 与 Tracker Passkey 已废弃，站点侧不再需要
     rousi_apikey: str = ""
+    mteam_enabled: bool = True
+    rousi_enabled: bool = True
+    ptt_enabled: bool = False
+    nicept_enabled: bool = False
     ptt_cookie: str = ""
     nicept_cookie: str = ""
     mteam_api_key: str = ""
@@ -586,6 +590,10 @@ def load_settings() -> Settings:
         docker_container_qbittorrent=_env("DOCKER_CONTAINER_QBITTORRENT"),
 
         rousi_apikey=_env("ROUSI_APIKEY"),
+        mteam_enabled=_env_bool("MTEAM_ENABLED", True),
+        rousi_enabled=_env_bool("ROUSI_ENABLED", True),
+        ptt_enabled=_env_bool("PTT_ENABLED", False),
+        nicept_enabled=_env_bool("NICEPT_ENABLED", False),
         ptt_cookie=_env("PTT_COOKIE"),
         nicept_cookie=_env("NICEPT_COOKIE"),
         mteam_api_key=_env("MTEAM_API_KEY"),

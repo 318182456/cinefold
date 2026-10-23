@@ -82,6 +82,8 @@ MTEAM_API_KEY=xxx
 
 完整配置项见 [app/core/.env.example](app/core/.env.example)。
 
+在 **设置 → PT 站点** 可独立启停各站。PTT、NicePT 默认停用；停用保留原凭据，暂停该站搜索和新下载，不影响下载器中已有任务。确认站点恢复后可重新启用并保存。
+
 ### 内置 Mihomo 代理
 
 在 **设置 → 网络与存储 → 内置 Mihomo 代理** 填写 Clash/Mihomo YAML 订阅，

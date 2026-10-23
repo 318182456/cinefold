@@ -16,7 +16,7 @@ from loguru import logger
 from pyquery import PyQuery
 
 from app.core.config import get_settings
-from app.modules.ptsite import convert_to_mb, download_seed_by_url
+from app.modules.ptsite import convert_to_mb, download_seed_by_url, site_is_enabled
 from app.schemas.torrent import Torrent
 from app.utils import clean_header_value
 from app.utils.filters import has_chinese, has_uc, has_uhd
@@ -41,6 +41,34 @@ FREE_DISCOUNTS = ("free", "2x_free")
 FAILURE_THRESHOLD = 5
 # 熔断后多久再试一次
 COOLDOWN_SECONDS = 1800
+
+
+class NexusAccessError(ValueError):
+    """可直接展示的站点访问诊断，不附带 Cookie 或带密钥的 URL。"""
+
+
+def _access_error(response) -> str:
+    text = response.text[:100000].lower()
+    cloudflare = 'cloudflare' in text or 'cloudflare' in response.headers.get('server', '').lower()
+    if cloudflare and ('dns resolution error' in text or re.search(r'error\s*1001\b', text)):
+        return 'Cloudflare 1001：域名解析或站点回源配置异常，请核对站点域名与当前代理出口'
+    if response.status_code == 404:
+        return '种子列表地址返回 HTTP 404，请核对站点是否迁移以及配置的域名'
+    if response.status_code == 429 or '访问次数已达上限' in text or '已达上限' in text[:2000]:
+        return '站点访问频率受限，请稍后重试'
+    if 'cf-chl-' in text or 'challenge-platform' in text or '<title>just a moment' in text:
+        return f'站点要求浏览器验证（HTTP {response.status_code}），当前 Cookie 或出口未通过验证'
+    if response.status_code == 401:
+        return '站点拒绝认证（HTTP 401），请更新 Cookie'
+    if response.status_code == 403:
+        return '站点拒绝访问（HTTP 403），请检查 Cookie、访问权限及代理出口'
+    if response.is_error:
+        return f'站点返回 HTTP {response.status_code}'
+    doc = PyQuery(response.text)
+    if (re.search(r'/(?:login|takelogin)\.php(?:[?/#]|$)', response.url.path, re.I)
+            or doc('form[action*="takelogin.php"], input[type="password"]').length):
+        return 'Cookie 已失效或未登录，请重新登录站点并更新 Cookie'
+    return ''
 
 
 class NexusSite:
@@ -68,7 +96,7 @@ class NexusSite:
 
     @property
     def enabled(self) -> bool:
-        return bool(self.cookie and self.host)
+        return site_is_enabled(self.name) and bool(self.cookie and self.host)
 
     # ------------------------------------------------------------------
     def _breaker(self) -> list:
@@ -154,7 +182,9 @@ class NexusSite:
                     headers=self._headers(),
                     params={"search": keyword, "search_mode": 0},
                 )
-                response.raise_for_status()
+                reason = _access_error(response)
+                if reason:
+                    raise NexusAccessError(reason)
                 html = response.text
         except Exception as exc:
             logger.warning(f"[{self.name}] 搜索请求失败: {exc}")
@@ -168,7 +198,7 @@ class NexusSite:
             return []
 
         # Cookie 失效时会被重定向到登录页
-        if "takelogin.php" in html or "登录" in html[:500]:
+        if "takelogin.php" in html:
             logger.warning(f"[{self.name}] Cookie 可能已失效")
             self._record_failure("Cookie 失效")
             return []
@@ -271,6 +301,8 @@ class NexusSite:
 
     # ------------------------------------------------------------------
     def download_seed(self, torrent: Torrent) -> bytes | None:
+        if not self.enabled:
+            return None
         if not torrent.download_url:
             return None
         return download_seed_by_url(
@@ -278,6 +310,8 @@ class NexusSite:
         )
 
     def check_status(self) -> tuple[bool, str]:
+        if not site_is_enabled(self.name):
+            return False, '站点已停用，原有凭据已保留'
         if not self.enabled:
             return False, f"未配置 {self.name} Cookie"
         try:
@@ -288,10 +322,15 @@ class NexusSite:
                 verify=False,
                 trust_env=False,
             ) as client:
-                response = client.get(urljoin(self.host, "/index.php"), headers=self._headers())
-                response.raise_for_status()
-            if "takelogin.php" in response.text:
-                return False, "Cookie 已失效"
-            return True, "连接成功"
+                response = client.get(urljoin(self.host, self.search_path), headers=self._headers())
+                reason = _access_error(response)
+                if reason:
+                    return False, reason
+            doc = PyQuery(response.text)
+            if not doc('table.torrents, a[href*="logout.php"], a[href*="usercp.php"]').length:
+                return False, '未识别到已登录的种子列表页，请检查域名、Cookie 或站点页面是否变化'
+            return True, "种子列表访问成功"
+        except (httpx.TimeoutException, httpx.NetworkError) as exc:
+            return False, f'连接站点失败（{type(exc).__name__}），请检查网络和代理出口'
         except Exception as exc:
-            return False, str(exc)
+            return False, str(exc) if isinstance(exc, NexusAccessError) else f'站点检测失败（{type(exc).__name__}）'

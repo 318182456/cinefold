@@ -29,7 +29,7 @@ import httpx
 from loguru import logger
 
 from app.core.config import get_settings
-from app.modules.ptsite import download_seed_by_url
+from app.modules.ptsite import download_seed_by_url, site_is_enabled
 from app.schemas.torrent import Torrent
 from app.utils import get_true_code
 from app.utils.filters import has_chinese, has_uc, has_uhd
@@ -79,7 +79,7 @@ class Rousi:
 
     @property
     def enabled(self) -> bool:
-        return bool(self.apikey)
+        return site_is_enabled(self.name) and bool(self.apikey)
 
     # ------------------------------------------------------------------
     def _headers(self) -> dict:
@@ -111,6 +111,8 @@ class Rousi:
 
     # ------------------------------------------------------------------
     def check_status(self) -> tuple[bool, str]:
+        if not site_is_enabled(self.name):
+            return False, '站点已停用，原有凭据已保留'
         if not self.enabled:
             return False, "未配置 Rousi API Key"
         try:
@@ -209,6 +211,8 @@ class Rousi:
         return f"{self.host}/api/v1/torrents/{torrent_id}/download"
 
     def download_seed(self, torrent: Torrent) -> bytes | None:
+        if not self.enabled:
+            return None
         url = torrent.download_url
         if not url or url.startswith("magnet:"):
             return None

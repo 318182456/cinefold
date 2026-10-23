@@ -50,6 +50,7 @@ def search_torrents(
     """
     settings = get_settings()
     torrents = _search_pt_cached(code, refresh=refresh)
+    torrents = [torrent for torrent in torrents if ptsite.site_is_enabled(torrent.site)]
     if not torrents:
         return []
 
@@ -70,7 +71,8 @@ def _search_pt_cached(code: str, refresh: bool = False) -> list[Torrent]:
     """带缓存的全站检索。缓存的是各站返回的原始种子列表。"""
     import json
 
-    key = f"{code.upper()}@{TORRENT_CACHE_SCHEMA}"
+    switches = ''.join('1' if ptsite.site_is_enabled(name) else '0' for name in ptsite.SITE_SWITCHES)
+    key = f"{code.upper()}@{TORRENT_CACHE_SCHEMA}@{switches}"
     if not refresh:
         cached = get_rank_cache("torrent", key, ttl=TORRENT_CACHE_TTL)
         if cached:
@@ -427,6 +429,9 @@ def unwant_junk_for_downloading() -> int:
 
 def _push_to_client(client, torrent: Torrent, code: str) -> str | None:
     """磁链直接推送，http 种子先下载再推送。"""
+    if not ptsite.site_is_enabled(torrent.site):
+        logger.info(f'[{code}] {torrent.site} 已停用，跳过推送下载器')
+        return None
     url = torrent.download_url
 
     if url.startswith("magnet:"):

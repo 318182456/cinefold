@@ -27,6 +27,7 @@ const scrapeTab = ref('basic')
 const SCRAPE_TABS = [['basic', '目录与命名'], ['metadata', '元数据来源'], ['images', '图片与水印'], ['automation', '自动任务']]
 const testing = ref('')
 const testResults = reactive({})
+const ptSiteDisabled = target => ['mteam', 'rousi', 'ptt', 'nicept'].includes(target) && form[`${target}_enabled`] === false
 
 // Telegram 上行消息接收状态
 const tgReceive = ref(null)
@@ -475,6 +476,7 @@ const GROUPS = [
       {
         title: 'M-Team',
         fields: [
+          { k: 'mteam_enabled', label: '启用此站点', t: 'bool', hint: '停用后保留凭据，暂停搜索与新下载' },
           { k: 'mteam_api_key', label: 'API Key', t: 'password' },
         ],
       },
@@ -482,6 +484,7 @@ const GROUPS = [
         title: 'Rousi',
         hint: '只需 API Key，不会过期也无需续期',
         fields: [
+          { k: 'rousi_enabled', label: '启用此站点', t: 'bool', hint: '停用后保留凭据，暂停搜索与新下载' },
           { k: 'rousi_apikey', label: 'API Key', t: 'password',
             hint: '站点「个人 API Key」页签发，需授予「读取账户资料」「读取与搜索种子」「下载种子」三项权限' },
         ],
@@ -489,12 +492,14 @@ const GROUPS = [
       {
         title: 'PTTime',
         fields: [
+          { k: 'ptt_enabled', label: '启用此站点', t: 'bool', hint: '默认停用；确认站点可访问后可重新启用，原 Cookie 保留' },
           { k: 'ptt_cookie', label: 'Cookie', t: 'password' },
         ],
       },
       {
         title: 'NicePT',
         fields: [
+          { k: 'nicept_enabled', label: '启用此站点', t: 'bool', hint: '默认停用；确认站点可访问后可重新启用，原 Cookie 保留' },
           { k: 'nicept_cookie', label: 'Cookie', t: 'password' },
         ],
       },
@@ -1039,6 +1044,7 @@ async function removeWebhook() {
 }
 
 async function test(target) {
+  if (ptSiteDisabled(target)) return
   testing.value = target
   try {
     const data = await testConnection(target)
@@ -1651,15 +1657,15 @@ onUnmounted(stopUpgradePoll)
               v-for="target in group.tests"
               :key="target"
               class="btn-ghost px-3 py-1.5 text-xs"
-              :disabled="testing === target"
+              :disabled="testing === target || ptSiteDisabled(target)"
               @click="test(target)"
             >
-              {{ testing === target ? '测试中…' : target }}
+              {{ ptSiteDisabled(target) ? `${target} · 已停用` : testing === target ? '测试中…' : target }}
             </button>
           </div>
           <div v-for="(result, target) in testResults" :key="target" class="text-xs">
-            <span :class="result.success ? 'text-emerald-400' : 'text-red-400'">
-              {{ target }}: {{ result.message }}
+            <span :class="ptSiteDisabled(target) ? 'text-gray-500' : result.success ? 'text-emerald-400' : 'text-red-400'">
+              {{ target }}: {{ ptSiteDisabled(target) ? '已停用，凭据保留' : result.message }}
             </span>
           </div>
         </div>

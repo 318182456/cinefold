@@ -5,7 +5,7 @@ import httpx
 from loguru import logger
 
 from app.core.config import get_settings
-from app.modules.ptsite import convert_to_mb
+from app.modules.ptsite import convert_to_mb, site_is_enabled
 from app.schemas.torrent import Torrent
 from app.utils.filters import has_chinese, has_uc, has_uhd
 
@@ -51,7 +51,7 @@ class MTeam:
 
     @property
     def enabled(self) -> bool:
-        return bool(self.api_key)
+        return site_is_enabled(self.name) and bool(self.api_key)
 
     def _headers(self) -> dict:
         # 不写死 Content-Type：profile 是无 body 的 POST，
@@ -91,6 +91,8 @@ class MTeam:
 
     # ------------------------------------------------------------------
     def check_status(self) -> tuple[bool, str]:
+        if not site_is_enabled(self.name):
+            return False, '站点已停用，原有凭据已保留'
         if not self.enabled:
             return False, "未配置 M-Team API Key"
         try:
@@ -188,6 +190,8 @@ class MTeam:
             return ""
 
     def download_seed(self, torrent: Torrent) -> bytes | None:
+        if not self.enabled:
+            return None
         url = torrent.download_url or self.get_torrent_download_url(torrent.id)
         if not url:
             return None
