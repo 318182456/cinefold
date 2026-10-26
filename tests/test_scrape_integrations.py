@@ -179,14 +179,50 @@ def test_reverse_identity_uses_exact_file_and_history_hash_once(db, monkeypatch,
         session.add(History(hash='a' * 40, code='SOE-422', save_path=str(tmp_path)))
         session.commit()
     calls = []
-    def files():
-        calls.append(1)
-        return {str(source): ['A' * 40]}
-    monkeypatch.setattr(downloadclient, 'all_torrent_files_with_hashes', files)
+    def files(hashes):
+        calls.append(hashes)
+        return iter([(str(source), 'A' * 40)])
+    monkeypatch.setattr(downloadclient, 'iter_torrent_file_pairs', files)
     resolver = SourceIdentityResolver()
     assert resolver.resolve(source) == 'SOE-422'
     assert resolver.resolve(tmp_path / 'unrelated.mp4') == ''
     assert len(calls) == 1
+    assert calls[0] == ['a' * 40]
+
+
+def test_reverse_identity_discards_incomplete_snapshot_and_retries_next_scan(db, monkeypatch, tmp_path):
+    from app.database.models import History
+    from app.modules import downloadclient
+    from app.services.sourceidentity import SourceIdentityResolver
+    source = tmp_path / 'unknown.mp4'
+    with db() as session:
+        session.add(History(hash='a', code='SOE-422'))
+        session.commit()
+    calls = []
+    def failed(hashes):
+        calls.append(hashes)
+        yield str(source), 'a'
+        raise RuntimeError('incomplete snapshot')
+    monkeypatch.setattr(downloadclient, 'iter_torrent_file_pairs', failed)
+    resolver = SourceIdentityResolver()
+    assert resolver.resolve(source) == ''
+    assert resolver.resolve(tmp_path / 'another.mp4') == ''
+    assert len(calls) == 1
+    monkeypatch.setattr(downloadclient, 'iter_torrent_file_pairs', lambda hashes: iter([(str(source), 'a')]))
+    assert SourceIdentityResolver().resolve(source) == 'SOE-422'
+
+
+def test_reverse_identity_deduplicates_shared_downloaders_and_ignores_unrelated_hash(db, monkeypatch, tmp_path):
+    from app.database.models import History
+    from app.modules import downloadclient
+    from app.services.sourceidentity import SourceIdentityResolver
+    source = tmp_path / 'unknown.mp4'
+    with db() as session:
+        session.add(History(hash='a', code='SOE-422'))
+        session.commit()
+    monkeypatch.setattr(downloadclient, 'iter_torrent_file_pairs', lambda hashes: iter([
+        (str(source), 'a'), (str(source), 'A'), (str(tmp_path / 'another.mp4'), 'unrelated')]))
+    assert SourceIdentityResolver().resolve(source) == 'SOE-422'
 
 
 def test_reverse_identity_does_not_assign_collection_or_conflicting_codes(db, monkeypatch, tmp_path):
@@ -197,9 +233,9 @@ def test_reverse_identity_does_not_assign_collection_or_conflicting_codes(db, mo
         session.add_all([History(hash='a', code='SOE-422'), History(hash='b', code='SSIS-001')])
         session.commit()
     first, second = tmp_path / 'unknown.mp4', tmp_path / 'another.mp4'
-    monkeypatch.setattr(downloadclient, 'all_torrent_files_with_hashes', lambda: {str(first): ['a'], str(second): ['a']})
+    monkeypatch.setattr(downloadclient, 'iter_torrent_file_pairs', lambda hashes: iter([(str(first), 'a'), (str(second), 'a')]))
     assert SourceIdentityResolver().resolve(first) == ''
-    monkeypatch.setattr(downloadclient, 'all_torrent_files_with_hashes', lambda: {str(first): ['a', 'b']})
+    monkeypatch.setattr(downloadclient, 'iter_torrent_file_pairs', lambda hashes: iter([(str(first), 'a'), (str(first), 'b')]))
     assert SourceIdentityResolver().resolve(first) == ''
 
 
@@ -211,7 +247,7 @@ def test_reverse_identity_prefers_registered_source_without_downloader(db, monke
     with db() as session:
         session.add(MediaLink(source_path=str(source), link_path=str(tmp_path / 'SOE-422.mp4'), code='SOE-422'))
         session.commit()
-    monkeypatch.setattr(downloadclient, 'all_torrent_files_with_hashes', lambda: pytest.fail('已登记路径不应请求下载器'))
+    monkeypatch.setattr(downloadclient, 'iter_torrent_file_pairs', lambda hashes: pytest.fail('已登记路径不应请求下载器'))
     assert SourceIdentityResolver().resolve(source) == 'SOE-422'
 
 

@@ -670,6 +670,16 @@ const GROUPS = [
         ],
       },
       {
+        title: '下载器索引',
+        hint: '定时更新数据库，查询优先复用近期快照；转移和删除成功后即时更新',
+        fields: [
+          { k: 'download_index_interval', label: '下载器索引更新间隔（分钟）', ph: '30',
+            hint: '轻量同步种子状态；已完成任务的文件清单最多每 24 小时重新确认' },
+          { k: 'download_index_batch_size', label: '每轮更新文件清单数', ph: '128',
+            hint: '每个下载器每轮最多更新这些种子，积压条目自动轮换，减少内存峰值' },
+        ],
+      },
+      {
         title: '数据同步',
         hint: '只把番号收进库供浏览，不会订阅或下载',
         fields: [

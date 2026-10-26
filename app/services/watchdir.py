@@ -479,7 +479,8 @@ def _existing_links(rule: WatchDir, base: Path) -> dict[str, MediaLink]:
     prefix = str(base)
     out: dict[str, MediaLink] = {}
     with session_scope() as session:
-        for row in session.scalars(select(MediaLink)).all():
+        stmt = select(MediaLink).where(MediaLink.link_path.startswith(prefix, autoescape=True))
+        for row in session.scalars(stmt.execution_options(yield_per=200)):
             if row.link_path.startswith(prefix):
                 # detach 后仍要读字段，先取成普通值
                 out[row.link_path] = row

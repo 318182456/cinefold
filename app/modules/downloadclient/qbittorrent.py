@@ -388,26 +388,35 @@ class QBitTorrentClient:
         「同目录下哪些文件属于这部片子」可靠得多。查不到就返回空，
         调用方据此退回到路径策略。
         """
-        if not hashes:
-            return []
-        if not self._ensure_client():
-            return []
+        return list(self.iter_torrent_files(hashes))
 
-        paths: list[str] = []
+    def iter_torrent_files(self, hashes: Sequence[str]):
+        """逐条提供文件路径，避免扫描时另建一份全库路径列表。"""
+        for path, _ in self.iter_torrent_file_pairs(hashes):
+            yield path
+
+    def iter_torrent_file_pairs(self, hashes: Sequence[str], *, strict=False):
+        """只读取指定种子，逐条提供路径/hash 对。"""
+        if not hashes or not self._ensure_client():
+            return
+
         for h in [x for x in hashes if x]:
             try:
                 # save_path 是种子的根目录，files 里的 name 是相对它的路径
                 info = self.client.torrents_info(torrent_hashes=[h])
                 if not info:
+                    if strict:
+                        raise RuntimeError('种子在文件清单读取期间已移除')
                     continue
                 root = info[0].save_path
                 for f in self.client.torrents_files(torrent_hash=h):
-                    paths.append(str(PurePath(root) / f.name))
+                    yield str(PurePath(root) / f.name), h
                 _report_ok()
             except Exception as exc:
                 logger.warning(f"读取 qBittorrent 种子 {h} 的文件清单失败: {exc}")
                 self._on_error(exc, "读取文件清单")
-        return paths
+                if strict:
+                    raise
 
     def list_torrent_files_detailed(self, torrent_hash: str) -> list[dict]:
         """列出单个种子的文件，带绝对路径与字节数。
@@ -674,6 +683,8 @@ class QBitTorrentClient:
             self.client.torrents_delete(
                 torrent_hashes=hit, delete_files=delete_files
             )
+            from app.services.downloadindex import after_delete
+            after_delete('qbittorrent', hit, self)
             logger.info(
                 f"已从 qBittorrent 删除 {len(hit)} 个种子"
                 f"（delete_files={delete_files}）: {', '.join(hit)}"

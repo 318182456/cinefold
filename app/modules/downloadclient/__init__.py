@@ -85,6 +85,31 @@ def find_torrents_by_path_checked(
     return merged, answered
 
 
+def iter_torrent_file_pairs(hashes: Sequence[str]):
+    """流式反查有历史番号的种子；不复制完整下载库，也不缓存失败结果。"""
+    wanted = {h.lower() for h in hashes if h}
+    if not wanted:
+        return
+    for name in list_configured_clients():
+        client = get_download_client(name)
+        loader = getattr(client, 'iter_torrent_file_pairs', None)
+        if loader is None:
+            continue
+        try:
+            # 先用轻量列表排除已经移除的历史 hash，避免无效查询和空范围全量查询。
+            if getattr(client, 'url', ''):
+                from app.services.downloadindex import file_pairs
+                yield from file_pairs(name, list(wanted), client)
+                continue
+            current = [t['hash'] for t in client.monitor_torrent(all_categories=True)
+                       if t.get('hash') and t['hash'].lower() in wanted]
+            if current:
+                yield from loader(current)
+        except Exception:
+            # 不向调用方返回半份身份快照，保持无法验证的文件待确认。
+            raise RuntimeError(f'{name} 文件归属读取未完成') from None
+
+
 def all_torrent_files_with_hashes() -> dict[str, list[str]]:
     """下载器里全部种子内文件 → 种子 hash 的完整映射，一趟拉完。
 
@@ -104,6 +129,17 @@ def all_torrent_files_with_hashes() -> dict[str, list[str]]:
     for name in list_configured_clients():
         client = get_download_client(name)
         if client is None:
+            continue
+        if getattr(client, 'url', '') and hasattr(client, 'iter_torrent_file_pairs'):
+            from app.services.downloadindex import current_hashes, file_pairs
+            try:
+                for path, value in file_pairs(name, current_hashes(name, client), client):
+                    bucket = merged.setdefault(path, [])
+                    if value not in bucket:
+                        bucket.append(value)
+            except Exception:
+                logger.warning(f'{name} 数据库文件索引暂不可用，本轮不采用该下载器的不完整映射')
+                raise
             continue
         finder = getattr(client, "find_torrents_by_path", None)
         if finder is None:

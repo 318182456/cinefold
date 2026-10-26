@@ -328,6 +328,8 @@ def _transfer_hashes(hashes: list[str], delete_source: bool | None = None) -> Tr
                            and not any(word in str(row.get('state', '')).lower() for word in ('error', 'missing', 'check'))
                            for row in owned):
                         result.transferred.append(torrent_hash)
+                        from app.services.downloadindex import observed
+                        observed('transmission', owned, tr)
                         continue
                 except Exception:
                     pass
@@ -364,6 +366,9 @@ def _transfer_hashes(hashes: list[str], delete_source: bool | None = None) -> Tr
         if not new_hash:
             result.failed.append({"hash": torrent_hash, "reason": "Transmission 添加失败"})
             continue
+
+        from app.services.downloadindex import observed
+        observed('qbittorrent', [{**detail, 'hash': torrent_hash}], qb)
 
         # tr 已接管，这时才动 qb。删文件恒为 False —— 那份文件正是 tr 在做种的
         if delete_source:

@@ -7,6 +7,7 @@ from __future__ import annotations
 import re
 from pathlib import PurePath
 from typing import Sequence
+from collections.abc import Iterator
 from urllib.parse import urlparse
 
 from loguru import logger
@@ -194,6 +195,8 @@ class TransmissionClient:
             # transmission-rpc 对重复种子抛的是普通异常，只能按文案判别
             if "duplicate" in str(exc).lower():
                 logger.info(f"[{code}] Transmission 中已存在该种子，跳过: {torrent_hash}")
+                from app.services.downloadindex import after_transfer
+                after_transfer(torrent_hash, code, save_path, self)
                 return torrent_hash
             logger.error(f"[{code}] 转移做种失败: {exc}")
             return None
@@ -211,6 +214,8 @@ class TransmissionClient:
         logger.info(
             f"[{code}] 已转移做种到 Transmission，hash={new_hash}，目录={save_path}"
         )
+        from app.services.downloadindex import after_transfer
+        after_transfer(new_hash, code, save_path, self)
         return new_hash
 
     def _apply_labels(
@@ -297,22 +302,33 @@ class TransmissionClient:
 
     def list_torrent_files(self, hashes: Sequence[str]) -> list[str]:
         """列出这些种子包含的全部文件，返回绝对路径。语义同 qBittorrent 版。"""
-        if not hashes:
-            return []
-        if not self._ensure_client():
-            return []
-
-        wanted = [h for h in hashes if h]
-        paths: list[str] = []
         try:
-            for t in self.client.get_torrents(ids=wanted):
-                # files() 里的 name 含种子根目录名，相对 download_dir
-                root = t.download_dir
-                for f in t.get_files():
-                    paths.append(str(PurePath(root) / f.name))
+            return list(self.iter_torrent_files(hashes))
         except Exception as exc:
             logger.warning(f"读取 Transmission 种子文件清单失败: {exc}")
-        return paths
+            return []
+
+    def iter_torrent_files(self, hashes: Sequence[str]) -> Iterator[str]:
+        """分批读取必要字段，调用方可逐条匹配，不保留整个下载库的路径。"""
+        for path, _ in self.iter_torrent_file_pairs(hashes):
+            yield path
+
+    def iter_torrent_file_pairs(self, hashes: Sequence[str], *, strict=False):
+        """限定种子范围的流式路径/hash 对；不拉取无关任务或完整资料。"""
+        wanted = [h for h in hashes if h]
+        if not wanted or not self._ensure_client():
+            return
+        for offset in range(0, len(wanted), 128):
+            batch = wanted[offset:offset + 128]
+            torrents = self.client.get_torrents(ids=batch, arguments=['downloadDir', 'files'])
+            if strict and {h.lower() for h in batch} - {t.hash_string.lower() for t in torrents}:
+                raise RuntimeError('种子在文件清单读取期间已移除')
+            for torrent in torrents:
+                if strict and 'files' not in torrent.fields:
+                    raise RuntimeError('下载器未返回完整文件清单')
+                # 只读原始文件记录，不构造依赖 priorities/wanted 的 File 对象。
+                for item in torrent.fields.get('files', []):
+                    yield str(PurePath(torrent.download_dir) / item['name']), torrent.hash_string
 
     def list_torrent_files_detailed(self, torrent_hash: str) -> list[dict]:
         """列出单个种子的文件，带绝对路径与字节数。语义同 qBittorrent 版。"""
@@ -463,7 +479,7 @@ class TransmissionClient:
         try:
             # 传入不存在的 id，transmission-rpc 会直接抛异常，先过滤一遍
             existing = {
-                t.hashString.lower() for t in self.client.get_torrents(ids=list(wanted))
+                t.hashString.lower() for t in self.client.get_torrents(ids=list(wanted), arguments=['hashString'])
             }
             hit = [h for h in wanted if h.lower() in existing]
             missing = [h for h in wanted if h.lower() not in existing]
@@ -473,6 +489,8 @@ class TransmissionClient:
                 return []
 
             self.client.remove_torrent(ids=hit, delete_data=delete_files)
+            from app.services.downloadindex import after_delete
+            after_delete('transmission', hit, self)
             logger.info(
                 f"已从 Transmission 删除 {len(hit)} 个种子"
                 f"（delete_files={delete_files}）: {', '.join(hit)}"

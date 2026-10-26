@@ -302,6 +302,8 @@ class Settings:
     translate_interval: int = 10
     photo_cache_interval: int = 20
     orphan_scan_interval: int = 60
+    download_index_interval: int = 30
+    download_index_batch_size: int = 128
     link_refresh_interval: int = 30
     # --- 外部爬虫库导入 ---
     # PostgreSQL 连接串，为空则整个功能不启用（任务不注册、页面不显示）
@@ -646,6 +648,8 @@ def load_settings() -> Settings:
         translate_interval=_env_int("TRANSLATE_INTERVAL", 10),
         photo_cache_interval=_env_int("PHOTO_CACHE_INTERVAL", 20),
         orphan_scan_interval=_env_int("ORPHAN_SCAN_INTERVAL", 60),
+        download_index_interval=_env_int("DOWNLOAD_INDEX_INTERVAL", 30),
+        download_index_batch_size=_env_int("DOWNLOAD_INDEX_BATCH_SIZE", 128),
         link_refresh_interval=_env_int("LINK_REFRESH_INTERVAL", 30),
         crawler_db_dsn=_env("CRAWLER_DB_DSN", "").strip("'\""),
         crawler_db_time=_env("CRAWLER_DB_TIME", "").strip("'\""),

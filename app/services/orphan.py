@@ -55,14 +55,16 @@ class TorrentView:
     会把全库的关联一次性标成「种子已删除」—— 正是这个功能最不该出的错。
     """
     hashes: set[str] = field(default_factory=set)
-    # 种子内文件路径。用于判断「源文件仍被某个种子持有」
+    # 规范化的精确匹配路径；扫描时只保留本轮源文件，避免复制下载器全库。
     files: set[str] = field(default_factory=set)
     # 至少一个下载器答上了话
     answered: bool = False
 
 
-def _torrent_view() -> TorrentView:
+def _torrent_view(paths: set[str] | None = None) -> TorrentView:
     """拉一次下载器全量种子快照，整轮共用。
+
+    paths 非空时只保留这些规范化源路径的精确命中，文件清单逐批消费。
 
     逐条关联去问下载器是不行的：find_torrents_by_path 的成本与种子总数成
     正比而与查询路径数无关（它要把每个种子的文件清单拉一遍才能建索引），
@@ -79,7 +81,11 @@ def _torrent_view() -> TorrentView:
         if monitor is None:
             continue
         try:
-            torrents = monitor()
+            if getattr(client, 'url', '') and hasattr(client, 'iter_torrent_file_pairs'):
+                from app.services.downloadindex import current_hashes
+                torrents = [{'hash': value} for value in current_hashes(name, client)]
+            else:
+                torrents = monitor()
         except Exception as exc:
             logger.warning(f"{name} 读取种子列表异常: {exc}")
             continue
@@ -90,18 +96,27 @@ def _torrent_view() -> TorrentView:
         # hash 大小写在不同下载器/不同接口间不统一，统一小写再比
         view.hashes.update(h.lower() for h in hashes)
 
-        lister = getattr(client, "list_torrent_files", None)
+        lister = getattr(client, "iter_torrent_files", None) or getattr(client, "list_torrent_files", None)
         if lister is None:
             continue
         try:
-            view.files.update(p for p in lister(hashes) if p)
+            # 只保存本轮源文件的精确命中；不能用布隆过滤器的概率命中判断归属。
+            # 先完整读取成功再合入，失败的半份快照不能当成完整结果。
+            if getattr(client, 'url', '') and hasattr(client, 'iter_torrent_file_pairs'):
+                from app.services.downloadindex import file_pairs
+                files = (path for path, _ in file_pairs(name, hashes, client, paths=paths))
+            else:
+                files = lister(hashes)
+            matched = {normalized for p in files if p
+                       if (normalized := _norm(p)) and (paths is None or normalized in paths)}
+            view.files.update(matched)
         except Exception as exc:
             # 文件清单拉不到不影响 hash 维度的判定，降级继续
             logger.warning(f"{name} 读取种子文件清单异常: {exc}")
 
     if view.answered:
         logger.info(
-            f"下载器快照 —— 种子 {len(view.hashes)} 个，种子内文件 {len(view.files)} 个"
+            f"下载器快照 —— 种子 {len(view.hashes)} 个，匹配源路径 {len(view.files)} 个"
         )
     else:
         logger.warning("下载器均无响应，本轮不做「种子已删除」判定")
@@ -176,8 +191,8 @@ def scan_orphans(refresh_gone_time: bool = True) -> list[dict]:
     if not rows:
         return []
 
-    view = _torrent_view()
-    torrent_files = {_norm(p) for p in view.files}
+    view = _torrent_view({_norm(row['source_path']) for row in rows if row['source_path']})
+    torrent_files = view.files
 
     # 两侧路径一次性并发探完，之后全在内存里查。逐条 stat 在 NAS 上是分钟级
     probed = _probe(list({

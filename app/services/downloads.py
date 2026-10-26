@@ -45,6 +45,12 @@ def _read(name):
     return client.list_downloads()
 
 
+def invalidate_live():
+    global _LIVE
+    with _LIVE_LOCK:
+        _LIVE = None
+
+
 def live(*, client='', state='', keyword='', code_status=None, page=1, size=30):
     global _LIVE
     settings = get_settings()

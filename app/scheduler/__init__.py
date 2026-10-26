@@ -255,6 +255,11 @@ def sync_download_history() -> int:
     return result['counts']['all']
 
 
+def sync_download_index() -> int:
+    from app.services.downloadindex import sync
+    return sync()
+
+
 def poll_playback() -> int:
     """每分钟只读 Emby 会话，持续记录播放。"""
     from app.services.playback import poll
@@ -498,6 +503,8 @@ JOBS: dict[str, dict] = {
 
 # 固定间隔任务，不走 crontab
 INTERVAL_JOBS: dict[str, dict] = {
+    'sync_download_index': {'func': sync_download_index, 'name': '更新下载器文件索引', 'minutes': 30,
+                            'interval_key': 'download_index_interval'},
     "sync_download_history": {"func": sync_download_history, "name": "保存下载历史", "minutes": 5},
     "poll_playback": {"func": poll_playback, "name": "Emby 播放记录", "minutes": 1},
     "scan_scrape_sources": {

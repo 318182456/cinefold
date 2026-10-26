@@ -52,27 +52,30 @@ class SourceIdentityResolver:
             if not self._history:
                 return ''
             if self._torrent_files is None:
-                from app.modules.downloadclient import all_torrent_files_with_hashes
+                from app.modules.downloadclient import iter_torrent_file_pairs
                 from app.utils import mediafile
-                self._torrent_files = {}
-                files = all_torrent_files_with_hashes()
-                by_hash: dict[str, list] = {}
-                for filename, hashes in files.items():
+                resolved = {}
+                by_hash: dict[str, dict] = {}
+                for filename, torrent_hash in iter_torrent_file_pairs(list(self._history)):
+                    torrent_hash = torrent_hash.lower()
+                    if torrent_hash not in self._history:
+                        continue
                     if Path(filename).suffix.lower() not in ('.mp4', '.mkv', '.avi', '.wmv', '.mov', '.m4v', '.ts', '.iso'):
                         continue
                     info = mediafile.parse(filename)
                     if info.ignored or info.trailer:
                         continue
-                    for torrent_hash in hashes:
-                        by_hash.setdefault(torrent_hash.lower(), []).append(info)
-                for torrent_hash, infos in by_hash.items():
+                    by_hash.setdefault(torrent_hash, {})[path_key(filename)] = info
+                for torrent_hash, files in by_hash.items():
+                    infos = files.values()
                     codes = self._history.get(torrent_hash, set())
                     known = {i.code for i in infos if i.code}
                     # 合集种子不能把订阅的一部片编号套给其余所有无编号文件。
                     if len(infos) > 1 and (not known.issubset(codes) or not all(i.part for i in infos)):
                         continue
                     for info in infos:
-                        self._torrent_files.setdefault(path_key(info.path), set()).update(codes)
+                        resolved.setdefault(path_key(info.path), set()).update(codes)
+                self._torrent_files = resolved
             candidates = self._torrent_files.get(path_key(path), set())
             if len(candidates) == 1:
                 code = next(iter(candidates))
@@ -81,5 +84,7 @@ class SourceIdentityResolver:
             if candidates:
                 logger.warning(f'[番号反查] 同一路径对应多个历史番号，保留待确认: {path}')
         except Exception:
+            # 本轮失败不逐文件重试，也不采用已读到的半份映射；下轮新实例再查。
+            self._torrent_files = {}
             logger.warning('[番号反查] 下载历史或下载器暂不可用，保留待确认')
         return ''
