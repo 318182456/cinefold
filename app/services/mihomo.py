@@ -1,7 +1,7 @@
 """Managed Mihomo child process, persistent nodes and verified online updates.
 
 Only node definitions are imported from subscriptions. Each node gets its own
-authenticated HTTP listener so concurrent TRAWL requests cannot switch exits.
+authenticated identity on one fixed HTTP port, pinning concurrent TRAWL exits.
 The controller stays on loopback; nothing needs another container.
 """
 from __future__ import annotations
@@ -31,7 +31,7 @@ from loguru import logger
 from app.services.mihomosubscription import MAX_NODES, SubscriptionLoader
 from app.services.mihomogroups import JAPAN_SOURCES, build_groups, default_group
 
-FIRST_PORT = 17890
+PROXY_PORT = 17890
 CONTROLLER = "http://127.0.0.1:19090"
 RELEASE_ROOT = "https://github.com/MetaCubeX/mihomo/releases"
 MAX_DOWNLOAD = 100 * 1024 * 1024
@@ -209,15 +209,20 @@ class Mihomo:
                    "type": "select", "proxies": [member for member in members if member in names]}
                   for name, members in build_groups(nodes, self.config["groups"]).items()]
         groups = [group for group in groups if group["proxies"]]
+        # Rule targets must not contain subscription punctuation (e.g. commas).
+        routes = [{"name": self._username(node), "type": "select", "proxies": [node["name"]]}
+                  for node in nodes]
         return {"mode": "rule", "log-level": "warning", "ipv6": False,
                 "external-controller": "127.0.0.1:19090", "secret": credentials["secret"],
                 "allow-lan": True, "bind-address": "*", "geoip-maxmind": False,
                 "profile": {"store-selected": False},
-                "proxies": nodes, "proxy-groups": groups, "rules": ["MATCH,REJECT"],
-                "listeners": [{"name": f"cinefold-{index}", "type": "http", "listen": "0.0.0.0",
-                               "port": FIRST_PORT + index, "proxy": node["name"],
-                               "users": [{"username": "cinefold", "password": credentials["password"]}]}
-                              for index, node in enumerate(nodes)]}
+                "proxies": nodes, "proxy-groups": groups + routes,
+                "rules": [f"IN-USER,{route['name']},{route['name']}" for route in routes] + ["MATCH,REJECT"],
+                "skip-auth-prefixes": [],
+                "listeners": [{"name": "cinefold-proxy", "type": "http", "listen": "0.0.0.0",
+                               "port": PROXY_PORT,
+                               "users": [{"username": route["name"], "password": credentials["password"]}
+                                         for route in routes]}]}
 
     def _validate(self, binary=None, nodes=None):
         candidate = self.root / "check.json"
@@ -515,7 +520,20 @@ class Mihomo:
                 raise RuntimeError("内置代理的默认节点或数据源指定节点已失效，请在设置中重新选择")
             password = self._credentials()["password"]
             host = self.config["trawl_host"] if remote else "127.0.0.1"
-            return f"http://cinefold:{quote(password, safe='')}@{host}:{FIRST_PORT + index}"
+            return f"http://{self._username(self.nodes[index])}:{quote(password, safe='')}@{host}:{PROXY_PORT}"
+
+    @staticmethod
+    def _username(node):
+        # Stable across reordering, but changes when the node definition changes.
+        digest = hashlib.sha256(json.dumps(node, sort_keys=True).encode()).hexdigest()
+        return f"cinefold-{digest}"
+
+    def _proxy_index(self, proxy):
+        parsed = urlparse(proxy)
+        if parsed.port != PROXY_PORT or parsed.password != self.credentials.get("password"):
+            return None
+        return next((index for index, node in enumerate(self.nodes)
+                     if parsed.username == self._username(node)), None)
 
     @staticmethod
     def _identity(node):
@@ -571,7 +589,8 @@ class Mihomo:
                     # An otherwise healthy pool may only be busy/rate-limited.
                     self.proxy(remote, source_key, url)
                     proxy = None
-                candidate = self.nodes[urlparse(proxy).port - FIRST_PORT] if proxy else None
+                index = self._proxy_index(proxy) if proxy else None
+                candidate = self.nodes[index] if index is not None else None
                 if candidate is not None and candidate["name"] not in excluded:
                     name = candidate["name"]
                     self.allocated.add(name)
@@ -588,7 +607,9 @@ class Mihomo:
 
     def _probe_key(self, proxy, url):
         from app.services.mihomoprobe import origin
-        index = (urlparse(proxy).port or 0) - FIRST_PORT
+        index = self._proxy_index(proxy)
+        if index is None:
+            raise ValueError("代理节点身份已失效")
         return origin(url), self._identity(self.nodes[index])
 
     def _preflight_needed(self, proxy, url):
@@ -650,7 +671,7 @@ class Mihomo:
                         budget.check()
                 if selected is not None:
                     # Probes are fully finished/cancelled before releasing losers;
-                    # runtime updates cannot remap ports while a probe is in flight.
+                    # runtime updates cannot replace identities while a probe is in flight.
                     for index, candidate in enumerate(reservations):
                         if index != selected:
                             candidate.__exit__(None, None, None)
@@ -677,19 +698,16 @@ class Mihomo:
         """A log-safe label: never return the authenticated listener URL."""
         if not proxy:
             return "默认代理"
-        index = (urlparse(proxy).port or 0) - FIRST_PORT
         with self.lock:
-            return self.nodes[index]["name"] if 0 <= index < len(self.nodes) else "未知节点"
+            index = self._proxy_index(proxy)
+            return self.nodes[index]["name"] if index is not None else "未知节点"
 
     def note_result(self, url, proxy, success):
         if not proxy or not self.config["enabled"]:
             return
-        parsed = urlparse(proxy)
-        if parsed.username != "cinefold" or parsed.password != self.credentials.get("password"):
-            return
-        index = (parsed.port or 0) - FIRST_PORT
         with self.lock:
-            if not 0 <= index < len(self.nodes):
+            index = self._proxy_index(proxy)
+            if index is None:
                 return
             name = self.nodes[index]["name"]
             identity = self._identity(self.nodes[index])

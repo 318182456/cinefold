@@ -46,7 +46,7 @@ def client(manager, handler, monkeypatch):
     monkeypatch.setattr(manager, "_client", lambda: httpx.Client(transport=httpx.MockTransport(handler), follow_redirects=True))
 
 
-def test_node_selection_has_distinct_authenticated_listener_and_persists(manager):
+def test_node_selection_has_distinct_identity_on_fixed_port_and_persists(manager):
     manager.nodes = nodes()
     manager.config.update(enabled=True, selected="Japan", trawl_host="cinefold", subscription="https://sub.example/secret")
     local = manager.proxy()
@@ -54,18 +54,51 @@ def test_node_selection_has_distinct_authenticated_listener_and_persists(manager
     manager.config["selected"] = "US"
     us = manager.proxy(remote=True)
     assert "127.0.0.1:17890" in local
-    assert "cinefold:17890" in japan and "cinefold:17891" in us
+    assert "@cinefold:17890" in japan and "@cinefold:17890" in us
+    assert japan != us
     runtime = manager._runtime()
     assert runtime["external-controller"] == "127.0.0.1:19090"
-    assert runtime["listeners"][0]["proxy"] == "Japan"
-    assert runtime["listeners"][1]["proxy"] == "US"
-    assert all(item["users"][0]["password"] for item in runtime["listeners"])
+    assert len(runtime["listeners"]) == 1
+    assert runtime["listeners"][0]["port"] == 17890
+    assert len(runtime["listeners"][0]["users"]) == 2
+    assert runtime["skip-auth-prefixes"] == []
+    assert runtime["rules"][-1] == "MATCH,REJECT"
+    for proxy in (japan, us):
+        username = httpx.URL(proxy).username
+        assert f"IN-USER,{username},{username}" in runtime["rules"]
+        assert any(g["name"] == username and g["proxies"] == [manager.proxy_name(proxy)] for g in runtime["proxy-groups"])
     mihomo._write(manager.root / "nodes.json", manager.nodes)
     mihomo._write(manager.root / "settings.json", manager.config)
     restored = Mihomo(manager.root)
     assert restored.proxy(remote=True) == us
     assert restored.status()["subscription"] == "********"
     assert "secret" not in json.dumps(restored.status())
+
+
+def test_proxy_identity_survives_reordering_and_rejects_replaced_nodes(manager):
+    manager.nodes = nodes()
+    manager.config.update(enabled=True, selected="Japan")
+    old = manager.proxy()
+    manager.nodes.reverse()
+    assert manager.proxy_name(old) == "Japan"
+    assert manager._probe_key(old, "https://target.test/")[1] == manager._identity(nodes()[0])
+    manager.nodes = [nodes()[1]]
+    assert manager.proxy_name(old) == "未知节点"
+    manager.note_result("https://target.test/", old, False)
+    assert not manager.health
+    with pytest.raises(ValueError, match="身份已失效"):
+        manager._probe_key(old, "https://target.test/")
+
+
+def test_fixed_port_rules_handle_punctuation_and_reject_wrong_credentials(manager):
+    manager.nodes = [dict(nodes()[0], name="airport / JP, 01")]
+    manager.config.update(enabled=True, selected=manager.nodes[0]["name"])
+    proxy = manager.proxy()
+    runtime = manager._runtime()
+    assert len(runtime["listeners"]) == 1
+    assert len(runtime["rules"][0].split(',')) == 3
+    assert manager._proxy_index(proxy.replace(manager.credentials['password'], 'wrong')) is None
+    assert manager._proxy_index(proxy.replace(':17890', ':17891')) is None
 
 
 def test_disabled_preserves_legacy_proxy_and_no_trawl_payload_proxy(manager, monkeypatch):
@@ -95,7 +128,8 @@ def test_enabled_trawl_proxy_uses_docker_hostname(manager):
     with httpx.Client(transport=httpx.MockTransport(respond)) as transport:
         base._fetch_bypass_response(transport, "http://trawl/v1", "https://target.example", "age=1", 1000)
     assert requests[0]["proxy"] == {"url": manager.proxy(remote=True)}
-    assert "@cinefold:17891" in requests[0]["proxy"]["url"]
+    assert "@cinefold:17890" in requests[0]["proxy"]["url"]
+    assert manager.proxy_name(requests[0]["proxy"]["url"]) == "US"
     assert requests[0]["cookies"] == [{"name": "age", "value": "1"}]
 
 
@@ -276,10 +310,10 @@ def test_per_source_preference_and_success_are_isolated(manager):
                           source_hosts={"dmm": "dmm.co.jp"})
     dmm = manager.proxy(url="https://www.dmm.co.jp/detail", remote=True)
     javdb = manager.proxy(url="https://javdb.com/movie", remote=True)
-    assert ":17891" in dmm and ":17890" in javdb
+    assert manager.proxy_name(dmm) == "US" and manager.proxy_name(javdb) == "Japan"
     manager.note_result("https://javdb.com/movie", javdb, False)
     fallback = manager.proxy(url="https://javdb.com/movie", remote=True)
-    assert ":17891" in fallback
+    assert manager.proxy_name(fallback) == "US"
     manager.note_result("https://javdb.com/movie", fallback, True)
     assert manager.proxy(url="https://javdb.com/other", remote=True) == fallback
     assert ":17890" in manager.proxy(url="https://other.example", remote=True)
@@ -297,7 +331,7 @@ def test_trawl_automatically_changes_exit_and_reuses_success(manager):
     def respond(request):
         body = json.loads(request.content)
         requests.append(body)
-        if ":17890" in body["proxy"]["url"]:
+        if manager.proxy_name(body["proxy"]["url"]) == "Japan":
             return httpx.Response(500, json={"status": "error", "message": "Tier 3 failed (goto: Timeout 30000ms exceeded.)"})
         return httpx.Response(200, json={"status": "ok", "solution": {"status": 200, "response": "good"}})
 
@@ -305,8 +339,8 @@ def test_trawl_automatically_changes_exit_and_reuses_success(manager):
         assert base._fetch_bypass_response(c, "http://trawl/v1", "https://javdb.com/v/123", "", 90000) == "good"
         assert base._fetch_bypass_response(c, "http://trawl/v1", "https://javdb.com/v/456", "", 90000) == "good"
     assert len(requests) == 3
-    assert ":17890" in requests[0]["proxy"]["url"]
-    assert all(":17891" in request["proxy"]["url"] for request in requests[1:])
+    assert manager.proxy_name(requests[0]["proxy"]["url"]) == "Japan"
+    assert all(manager.proxy_name(request["proxy"]["url"]) == "US" for request in requests[1:])
     assert requests[0]["maxTimeout"] <= 45000
 
 
@@ -366,7 +400,7 @@ def test_direct_transport_failure_switches_node_for_retry(manager, monkeypatch):
         proxies.append(proxy)
 
         def respond(request):
-            if ":17890" in proxy:
+            if manager.proxy_name(proxy) == "Japan":
                 raise httpx.ConnectError("node unreachable")
             return httpx.Response(200, text="metadata")
 
@@ -398,7 +432,7 @@ def test_source_bindings_saved_through_api_and_restored(manager, monkeypatch):
     assert restored.config["groups"] == {"US group": ["US"]}
     assert restored.config["source_groups"] == {"dmm": "US group"}
     restored.config["enabled"] = True
-    assert ":17891" in restored.proxy(url="https://www.dmm.co.jp/", remote=True)
+    assert restored.proxy_name(restored.proxy(url="https://www.dmm.co.jp/", remote=True)) == "US"
 
 
 def test_nested_subscriptions_merge_names_and_ignore_upstream_groups(manager, monkeypatch):
@@ -447,7 +481,7 @@ def test_custom_group_limits_automatic_fallback(manager):
     manager.config.update(enabled=True, selected="Japan", groups={"US only": ["US"]},
                           source_groups={"dmm": "US only"}, source_hosts={"dmm": "www.dmm.co.jp"})
     proxy = manager.proxy(url="https://www.dmm.co.jp/", remote=True)
-    assert ":17891" in proxy
+    assert manager.proxy_name(proxy) == "US"
     manager.note_result("https://www.dmm.co.jp/", proxy, False)
     with pytest.raises(RuntimeError):
         manager.proxy(url="https://www.dmm.co.jp/", remote=True)
@@ -684,6 +718,6 @@ def test_failed_exit_aliases_share_cooldown_and_clear_cached_alias(manager):
     manager.note_result(target, alias, True)
     manager.note_result(target, first, False)
     assert "javdb.com" not in manager.winners
-    assert ":17892" in manager.proxy(url=target)
+    assert manager.proxy_name(manager.proxy(url=target)) == "US"
     assert manager.proxy_name(first) == "Japan"
-    assert ":17891" in manager.proxy(url="https://other.example/")
+    assert manager.proxy_name(manager.proxy(url="https://other.example/")) == "other-subscription / alias"

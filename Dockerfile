@@ -99,9 +99,9 @@ COPY deploy/supervisord.conf /etc/supervisord.conf
 
 VOLUME ["/data"]
 EXPOSE 3750
-# Authenticated per-node Mihomo listeners, reachable on the container network.
+# Fixed authenticated Mihomo listener, reachable on the container network.
 # The management API remains on loopback and is accessed through cinefold.
-EXPOSE 17890-18913
+EXPOSE 17890
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
     CMD curl -fsS http://127.0.0.1:3750/api/health || exit 1

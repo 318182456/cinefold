@@ -8,7 +8,7 @@ from urllib.parse import urlparse
 import httpx
 import pytest
 
-from app.services.mihomo import Mihomo, FIRST_PORT
+from app.services.mihomo import Mihomo, PROXY_PORT
 from app.services import mihomo, mihomoprobe
 from app.modules.ladysite.transport import FetchBudget, FetchCancelled
 
@@ -24,13 +24,13 @@ def manager(tmp_path, monkeypatch):
 
 
 @pytest.fixture
-def network(monkeypatch):
+def network(monkeypatch, manager):
     original = httpx.AsyncClient
     requests, clients = [], []
     def install(handler):
         def factory(**options):
             proxy = options.pop("proxy")
-            index = urlparse(proxy).port - FIRST_PORT
+            index = manager._proxy_index(proxy)
             async def respond(request):
                 requests.append((index, request.method, str(request.url), proxy))
                 return await handler(index, request)
@@ -51,11 +51,13 @@ def test_failed_first_node_is_never_assigned_and_success_is_cached(manager, netw
     requests, clients = network(target)
     url = "https://source.example/sensitive-path?token=hidden"
     with manager.lease(url=url, remote=True) as proxy:
-        assert urlparse(proxy).port == FIRST_PORT + 1
+        assert manager.proxy_name(proxy) == "Node 1"
+        assert urlparse(proxy).port == PROXY_PORT
         assert urlparse(proxy).hostname == "cinefold"
     before = len(requests)
     with manager.lease(url=url) as proxy:
-        assert urlparse(proxy).port == FIRST_PORT + 1
+        assert manager.proxy_name(proxy) == "Node 1"
+        assert urlparse(proxy).port == PROXY_PORT
     assert len(requests) == before
     assert all(method == "HEAD" and target == "https://source.example/" and urlparse(proxy).hostname == "127.0.0.1" for _, method, target, proxy in requests)
     assert all(client.is_closed for client in clients)
@@ -68,7 +70,8 @@ def test_parallel_probes_pick_the_first_healthy_exit_instead_of_list_order(manag
         return httpx.Response(204)
     network(target)
     with manager.lease(url="https://source.example/") as proxy:
-        assert urlparse(proxy).port == FIRST_PORT + 2
+        assert manager.proxy_name(proxy) == "Node 2"
+        assert urlparse(proxy).port == PROXY_PORT
 
 
 @pytest.mark.parametrize("status,reachable", [(200, True), (302, True), (401, True), (403, True), (404, True), (405, True), (407, False), (429, False), (502, False)])
@@ -140,7 +143,8 @@ def test_candidate_groups_still_limit_preflight(manager, network):
     async def target(index, request): return httpx.Response(200)
     requests, _ = network(target)
     with manager.lease(source_key="source", url="https://source.example/") as proxy:
-        assert urlparse(proxy).port == FIRST_PORT + 2
+        assert manager.proxy_name(proxy) == "Node 2"
+        assert urlparse(proxy).port == PROXY_PORT
     assert [index for index, *_ in requests] == [2]
 
 
@@ -189,7 +193,8 @@ def test_parallel_requests_use_different_verified_nodes(manager, network):
     def request(_):
         with manager.lease(url="https://source.example/") as proxy:
             barrier.wait(timeout=2)
-            return urlparse(proxy).port
+            assert urlparse(proxy).port == PROXY_PORT
+            return manager.proxy_name(proxy)
     with ThreadPoolExecutor(2) as pool:
         assert len(set(pool.map(request, range(2)))) == 2
     assert not manager.allocated
@@ -222,7 +227,7 @@ def test_authenticated_proxy_tunnel_and_real_target_tls(manager, tmp_path, monke
     key_path.write_bytes(key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
     methods, authentications = [], []
     password = manager._credentials()["password"]
-    expected = "Basic " + base64.b64encode(f"cinefold:{password}".encode()).decode()
+    expected = "Basic " + base64.b64encode(f"{manager._username(manager.nodes[0])}:{password}".encode()).decode()
 
     class Target(BaseHTTPRequestHandler):
         def log_message(self, *_): pass
@@ -264,7 +269,7 @@ def test_authenticated_proxy_tunnel_and_real_target_tls(manager, tmp_path, monke
     context.load_cert_chain(cert_path, key_path)
     target.socket = context.wrap_socket(target.socket, server_side=True)
     proxy = ThreadingHTTPServer(("127.0.0.1", 0), Proxy)
-    monkeypatch.setattr(mihomo, "FIRST_PORT", proxy.server_port)
+    monkeypatch.setattr(mihomo, "PROXY_PORT", proxy.server_port)
     manager.nodes = manager.nodes[:1]
     threads = [threading.Thread(target=server.serve_forever, daemon=True) for server in (target, proxy)]
     for thread in threads: thread.start()
