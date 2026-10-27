@@ -48,10 +48,6 @@ class TestImports:
         from app.modules.ptsite.nicept import NicePT
         assert MTeam and Rousi and PTT and NicePT
 
-    def test_bt(self):
-        from app.modules.bt.bt import BT, add_keyword_param
-        assert BT and add_keyword_param
-
     def test_database_models(self):
         from app.database.models import Actor, Cache, Code, CodeStatus, History, User
         assert Code.__tablename__ == "code"
@@ -70,23 +66,6 @@ class TestSizeConversion:
     def test_convert_to_mb(self, text, expected):
         from app.modules.ptsite import convert_to_mb
         assert convert_to_mb(text) == expected
-
-
-class TestBTKeyword:
-    def test_placeholder_substitution(self):
-        from app.modules.bt.bt import add_keyword_param
-        assert add_keyword_param("http://x/s?q=${keyword}", "ABP-984") == "http://x/s?q=ABP-984"
-        assert add_keyword_param('{"kw":"{keyword}"}', "ABP-984") == '{"kw":"ABP-984"}'
-
-    def test_url_without_placeholder_gets_param(self):
-        from app.modules.bt.bt import add_keyword_param
-        assert add_keyword_param("http://x/search", "ABP-984") == "http://x/search?keyword=ABP-984"
-        assert add_keyword_param("http://x/s?a=1", "ABP-984") == "http://x/s?a=1&keyword=ABP-984"
-
-    def test_json_body_without_placeholder_unchanged(self):
-        from app.modules.bt.bt import add_keyword_param
-        body = '{"page": 1}'
-        assert add_keyword_param(body, "ABP-984") == body
 
 
 class TestTorrentConversion:

@@ -1,7 +1,6 @@
 """种子数据结构。
 
-字段定义与原项目 BT_URL 自定义源的返回格式保持一致，
-外部 BT 源可以直接按这个结构返回 {"data": [...]}。
+统一 PT 站点及本地资源库的搜索、展示和下载字段。
 """
 from __future__ import annotations
 
@@ -41,17 +40,14 @@ class Torrent:
     detail_url: str = ""
     # 关联番号，搜索时回填
     code: str = ""
-    # 自定义 BT 源接口自报的站名，仅用于展示。
-    # site 必须由 cinefold 自己决定（按站点过滤、排序、反查都认它），
-    # 外部接口报什么都不能覆盖它，否则「参与自动下载」这类开关会被绕过。
+    # 展示用资源来源；site 决定过滤、排序与下载策略。
     source_site: str = ""
 
     @property
     def discount_label(self) -> str:
         """展示用折扣文案：无折扣返回空串。
 
-        站点没给 discount 但标了 free 时退回「免费」，这样自定义 BT 源
-        只报 free 也照样有标注。
+        站点没给 discount 但标了 free 时退回「免费」。
         """
         if self.discount:
             return DISCOUNT_LABELS.get(self.discount, self.discount)
@@ -59,7 +55,7 @@ class Torrent:
 
     @property
     def display_site(self) -> str:
-        """展示用站名：自定义 BT 源标成「BT · 原站名」，其余就是站名本身。"""
+        """展示用站名：有具体来源时追加来源名。"""
         if self.source_site and self.source_site != self.site:
             return f"{self.site} · {self.source_site}"
         return self.site

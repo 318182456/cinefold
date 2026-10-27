@@ -34,6 +34,7 @@ class DownloadRequest(BaseModel):
     title: str | None = None
     # 已下载过/已入库时前端先弹确认，用户确认后带 force 再来一次
     force: bool = False
+    downloader: Literal['', 'qbittorrent', 'transmission', 'thunder'] = ''
 
 
 @router.get("/dashboard")
@@ -301,7 +302,8 @@ def manual_download(body: DownloadRequest, current_user: str = Depends(get_curre
             code=code,
         )
 
-    if not services.download_torrent(code, torrent, force=body.force):
+    options = {'downloader': body.downloader} if body.downloader else {}
+    if not services.download_torrent(code, torrent, force=body.force, **options):
         return ResponseEntity.fail("下载失败，请查看日志", code=500)
     suffix = "（强制重新下载）" if body.force else ""
     return ResponseEntity.ok(message=f"已推送 {code} 到下载器{suffix}")

@@ -420,13 +420,8 @@ class Settings:
     agent_model: str = ""
     agent_api_key: str = ""
 
-    # --- 自定义 BT 源 ---
-    bt_url: str = ""
-    bt_json_data: str = ""
-    bt_header: str = ""
-    bt_method: str = "get"
-    # 关掉后 BT 源仍参与搜索、结果可见，但自动下载不会选它的种子。
-    # 适合来源不稳定、只想手动挑的场景
+    # --- 本地资源库磁链下载 ---
+    # 关闭后仍可搜索、手动下载，仅阻止自动选种。
     bt_auto_download: bool = True
     # BT 源的种子下完后限制上传速度，单位 KB/s，0 表示不限。
     # PT 站的种子不受影响 —— 那边要保分享率，限速会把账号做死
@@ -737,10 +732,6 @@ def load_settings() -> Settings:
         agent_model=_env("AGENT_MODEL"),
         agent_api_key=_env("AGENT_API_KEY"),
 
-        bt_url=_env("BT_URL"),
-        bt_json_data=_env("BT_JSON_DATA"),
-        bt_header=_env("BT_HEADER"),
-        bt_method=_env("BT_METHOD", "get").strip("'\""),
         bt_auto_download=_env_bool("BT_AUTO_DOWNLOAD", True),
         bt_seed_upload_limit_kb=_env_int("BT_SEED_UPLOAD_LIMIT_KB", 0),
 

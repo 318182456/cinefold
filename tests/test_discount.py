@@ -29,7 +29,7 @@ class TestDiscountLabel:
         assert Torrent().discount_label == ""
 
     def test_free_without_discount_falls_back(self):
-        """自定义 BT 源只报 free，没有 discount 字段，也要标得出来。"""
+        """资源只报 free，没有 discount 字段，也要标得出来。"""
         assert Torrent(free=True).discount_label == "免费"
 
     def test_unknown_discount_shown_as_is(self):

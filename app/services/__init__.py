@@ -35,9 +35,9 @@ TORRENT_CACHE_TTL = 1800
 #
 # 改动任何「影响字段取值」的规则时（站名归属、字段语义）都要 +1，
 # 让旧缓存自然失效。只改过滤/排序条件不用动 —— 那些每次现算
-TORRENT_CACHE_SCHEMA = 2
+TORRENT_CACHE_SCHEMA = 3
 
-# 与 app.modules.bt.bt.BT.name 一致，用于按站点过滤
+# 本地资源库磁链的站点类型，用于自动下载过滤
 BT_SITE_NAME = "BT"
 
 
@@ -293,7 +293,7 @@ def is_exist_server(code: str) -> bool:
 # 下载
 # ======================================================================
 def download_torrent(
-    code: str, torrent: Torrent | None = None, force: bool = False
+    code: str, torrent: Torrent | None = None, force: bool = False, *, downloader: str = ""
 ) -> bool:
     """下载指定番号。torrent 为空时自动搜索最优种子。
 
@@ -339,7 +339,10 @@ def download_torrent(
         f"({torrent.size_mb:.0f}MB, {torrent.seeders} 种{discount_text})"
     )
 
-    client = downloadclient.get_download_client()
+    if downloader and downloader not in downloadclient.list_configured_clients():
+        logger.error(f"[{code}] 指定下载器 {downloader} 未配置")
+        return False
+    client = downloadclient.get_download_client(downloader) if downloader else downloadclient.get_download_client()
     if client is None:
         logger.error(f"[{code}] 未配置下载器")
         return False

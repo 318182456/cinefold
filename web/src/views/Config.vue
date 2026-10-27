@@ -509,27 +509,16 @@ const GROUPS = [
     tests: ['mteam', 'rousi', 'ptt', 'nicept'],
   },
   {
-    key: 'bt',
+    key: 'resources',
     cat: 'pipeline',
-    title: '自定义 BT 源',
+    title: '资源库与爬虫',
     sections: [
-      {
-        title: '请求配置',
-        hint: '接入自建或第三方搜索接口',
-        fields: [
-          { k: 'bt_url', label: '请求地址', hint: '支持 ${keyword} 占位符' },
-          { k: 'bt_method', label: '请求方法', t: 'select', options: ['get', 'post'] },
-          { k: 'bt_header', label: '请求头 JSON', t: 'textarea' },
-          { k: 'bt_json_data', label: '请求体 JSON', t: 'textarea' },         
-          { k: 'bt_auto_download', label: '参与自动下载', t: 'bool',
-            hint: '关掉后仍参与搜索、结果可手动下载，只是自动选种时不选它' },
-        ],
-      },
       {
         title: '原生资源爬虫',
         hint: '论坛磁链直接写入本程序资源库，不依赖 article 或旧库导入。地址、Cookie、代理在数据源页面设置。',
         fields: [
-          { k: 'resource_catalog_enabled', label: '搜索包含本地资源库', t: 'bool', hint: '自动下载仍受上方 BT 参与自动下载开关控制' },
+          { k: 'resource_catalog_enabled', label: '搜索包含本地资源库', t: 'bool', hint: '搜索时包含原生爬虫采集到的磁链' },
+          { k: 'bt_auto_download', label: '本地资源参与自动下载', t: 'bool', hint: '关闭后仍可搜索和手动下载' },
           { k: 'resource_crawl_time', label: '资源抓取时间', hint: 'crontab 格式，留空不自动执行；任务页可手动运行' },
           { k: 'resource_metadata_time', label: '影片与演员抓取时间', hint: 'Avbase 新片、JavDB 榜单、JavLibrary 榜单及演员；留空不自动执行' },
           { k: 'resource_crawl_pages', label: '每板块最多页数', t: 'number', hint: '1–100，默认 2' },

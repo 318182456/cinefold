@@ -168,6 +168,58 @@ def test_live_catalog_search_ignores_remote_negative_cache_and_respects_bt_auto(
     assert services.search_torrents('ABC-001',use_filter=False)==[]
 
 
+def test_removed_custom_bt_config_and_cache_cannot_supply_results(native,monkeypatch):
+    from app import services
+    settings=native[0]
+    assert not {'bt_url','bt_method','bt_header','bt_json_data'} & settings.to_safe_dict().keys()
+    # Even an old in-memory setting must not register an external provider.
+    monkeypatch.setattr(settings,'bt_url','https://removed.invalid',raising=False)
+    monkeypatch.setattr(services.ptsite,'get_settings',lambda:settings)
+    assert all(site.name!='BT' for site in services.ptsite.get_sites())
+    keys=[]
+    def cached(namespace,key,**kwargs):
+        keys.append(key)
+        return json.dumps([{'site':'BT','title':'obsolete'}]) if '@2@' in key else None
+    monkeypatch.setattr(services,'get_rank_cache',cached)
+    monkeypatch.setattr(services.ptsite,'search_pt_detailed',lambda code:([],0,0))
+    assert services._search_pt_cached('ABC-001')==[]
+    assert keys and '@2@' not in keys[0]
+
+
+def test_resource_magnet_download_uses_explicit_qb_and_records_history(native,monkeypatch):
+    from app import services
+    from app.database.models import History, Code, CodeStatus
+    from app.api.endpoints import get_current_user
+    from app.api.endpoints.subscribe import router
+    catalog.put('sehuatang',1,'37',post())
+    monkeypatch.setattr(services,'get_settings',lambda:native[0])
+    monkeypatch.setattr(services,'is_filtered_code',lambda code:'')
+    monkeypatch.setattr(services,'is_exist_server',lambda code:False)
+    monkeypatch.setattr(services,'send_downloading_message',lambda *a:None)
+    pushed=[]
+    client=SimpleNamespace(add_torrent_by_magnet=lambda url,code:(pushed.append((url,code)) or A))
+    names=[]
+    monkeypatch.setattr(services.downloadclient,'get_download_client',lambda name='':(names.append(name) or client))
+    monkeypatch.setattr(services.downloadclient,'list_configured_clients',lambda:['transmission','qbittorrent'])
+    app=FastAPI();app.include_router(router);app.dependency_overrides[get_current_user]=lambda:'test'
+    body=dict(code='ABC-001',site='BT',title='Chosen resource',download_url='magnet:?xt=urn:btih:'+A,downloader='qbittorrent')
+    with TestClient(app) as api:
+        assert api.post('/codes/download',json=body).json()['code']==200
+        assert names==['qbittorrent'] and pushed==[(body['download_url'],'ABC-001')]
+        with native[1]() as db:
+            assert db.get(History,A).site=='BT'
+            assert db.get(Code,'ABC-001').status==CodeStatus.DOWNLOADING
+        # A second click is blocked by existing download history until explicitly confirmed.
+        assert api.post('/codes/download',json=body).json()['code']==500
+        assert len(pushed)==1
+        assert api.post('/codes/download',json={**body,'force':True}).json()['code']==200
+        assert len(pushed)==2
+        assert api.post('/codes/download',json={**body,'downloader':'unknown'}).status_code==422
+        monkeypatch.setattr(services.downloadclient,'list_configured_clients',lambda:['transmission'])
+        assert api.post('/codes/download',json={**body,'force':True}).json()['code']==500
+        assert len(pushed)==2, 'An unavailable explicit client must not fall back to Transmission'
+
+
 def test_preview_urls_stay_metadata_and_ambiguous_posts_are_not_auto_matched(native):
     catalog.put('sehuatang',1,'37',post(title='ABC-001 ABC-002 合集'))
     assert catalog.search('ABC-001')==[]

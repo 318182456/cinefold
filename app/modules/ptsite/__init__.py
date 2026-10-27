@@ -134,9 +134,6 @@ def get_sites() -> list[PTSite]:
     if settings.nicept_cookie and site_is_enabled('NicePT'):
         from app.modules.ptsite.nicept import NicePT
         sites.append(NicePT())
-    if settings.bt_url:
-        from app.modules.bt.bt import BT
-        sites.append(BT())
 
     return sites
 

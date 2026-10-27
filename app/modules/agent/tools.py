@@ -339,7 +339,7 @@ def tool_check_config(_: dict) -> dict:
         "rousi": bool(settings.rousi_apikey),
         "ptt": bool(settings.ptt_cookie),
         "nicept": bool(settings.nicept_cookie),
-        "bt": bool(settings.bt_url),
+        "resource_catalog": settings.resource_catalog_enabled,
     }
     media = {
         "emby": bool(settings.emby_url),
@@ -355,7 +355,7 @@ def tool_check_config(_: dict) -> dict:
     if not any(downloaders.values()):
         problems.append("没有配置任何下载器，搜到资源也推不出去")
     if not any(sources.values()):
-        problems.append("没有配置任何资源站或 BT 源，搜不到种子")
+        problems.append("没有配置 PT 站点且未启用本地资源库，搜不到种子")
 
     return {
         "downloaders": downloaders,
