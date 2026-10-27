@@ -20,11 +20,12 @@ class Library:
         if not host:
             client = SiteClient.from_source(self.name)
             if client is not None:
+                client.host = client.host.removesuffix('/cn')
                 self.client = client
                 return
 
         # JavLibrary 直连稳定 403，配了 bypass 就直接走
-        self.client = SiteClient(host or HOST, interval=2.0, bypass_first=True)
+        self.client = SiteClient((host or HOST).rstrip('/').removesuffix('/cn'), interval=2.0, bypass_first=True)
 
     def crawling_top20(self, page: int = 1) -> list[str]:
         """最想看排行。"""

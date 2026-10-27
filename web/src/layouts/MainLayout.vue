@@ -34,6 +34,7 @@ const destinations = [
       { name: 'Downloads', label: '下载管理', icon: 'M12 3v12m-5-5l5 5 5-5M5 17v4h14v-4' },
       { name: 'Subscribe', label: '订阅', icon: 'M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9' },
       { name: 'Search', label: '搜索', icon: 'M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z' },
+      { name: 'Resources', label: '资源库与爬虫', icon: 'M4 4h16v16H4zM8 8h8M8 12h8M8 16h4' },
     ],
   },
   {
@@ -68,7 +69,7 @@ const groups = [{ title: '工作区', items: [
   workspace('Dashboard', '看板'),
   workspace('Library', '媒体库', [['Library', '影片与片单'], ['LibraryInsights', '分析与播放日历']]),
   workspace('Subscribe', '订阅与下载', [['Subscribe', '订阅列表'], ['Downloads', '下载管理与历史'], ['SubscriptionRules', '条件与方案']]),
-  workspace('Search', '发现', [['Search', '搜索'], ['Rank', '榜单'], ['Hot', '推荐'], ['Actors', '演员'], ['Brands', '厂牌']]),
+  workspace('Search', '发现', [['Search', '搜索'], ['Resources', '资源库与爬虫'], ['Rank', '榜单'], ['Hot', '推荐'], ['Actors', '演员'], ['Brands', '厂牌']]),
   workspace('Scrape', '入库管理'),
   workspace('Logs', '运行记录', [['Logs', '日志'], ['Task', '任务'], ['DeletionHistory', '删除历史']]),
   workspace('Config', '设置', [['Config', '系统配置'], ['ToolConnections', '工具接入'], ['DataSource', '数据源'], ['Maintenance', '维护'], ['Profile', '账户']]),

@@ -5,8 +5,10 @@ import json
 import os
 import threading
 import time
+from decimal import Decimal
 from pathlib import Path
 
+from loguru import logger
 from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -21,12 +23,20 @@ _stop = threading.Event()
 NS = 'image-maintenance'
 
 
+def _json_number(value):
+    # PostgreSQL SUM(bigint) is numeric/Decimal, including an empty coalesced sum.
+    if isinstance(value, Decimal) and value.is_finite():
+        return int(value) if value == value.to_integral_value() else float(value)
+    raise TypeError(f'Unsupported checkpoint value: {type(value).__name__}')
+
+
 def _save(state, session=None):
     def write(db):
         stmt = (pg_insert if db.bind.dialect.name == 'postgresql' else sqlite_insert)(Cache)
         state['updated_at'] = time.time()
-        db.execute(stmt.values(namespace=NS, key='current', content=json.dumps(state, ensure_ascii=False))
-            .on_conflict_do_update(index_elements=['namespace', 'key'], set_={'content': json.dumps(state, ensure_ascii=False)}))
+        content = json.dumps(state, ensure_ascii=False, default=_json_number)
+        db.execute(stmt.values(namespace=NS, key='current', content=content)
+            .on_conflict_do_update(index_elements=['namespace', 'key'], set_={'content': content}))
     if session is not None:
         write(session)
     else:
@@ -44,7 +54,7 @@ def state():
         except (ValueError, TypeError):
             return {'phase': 'failed', 'running': False, 'message': '任务记录损坏，请重新预览，未将其视为完成'}
         if data.get('running') and not _running:
-            data.update(running=False, phase='interrupted', message='服务重启，已完成的文件保留，可继续')
+            data.update(running=False, phase='interrupted', message='后台任务已中断（服务重启或执行异常），已完成文件保留，可继续')
         return data
 
 
@@ -107,7 +117,7 @@ def _scan(data):
     if not root.is_dir():
         raise OSError('图片缓存目录不存在，已有统计保留')
     stamp, batch = time.time(), []
-    data.update(scanned=0, current='', message='扫描网页图片缓存')
+    data.update(scanned=0, scanned_bytes=0, current='', message='扫描网页图片缓存')
 
     def flush():
         if not batch:
@@ -122,6 +132,7 @@ def _scan(data):
             db.execute(stmt.on_conflict_do_update(index_elements=['key'],
                 set_={key: getattr(stmt.excluded, key) for key in batch[0] if key != 'key'}), batch)
         data['scanned'] += len(batch)
+        data['scanned_bytes'] += sum(row['size'] for row in batch)
         batch.clear()
         _save(data)
 
@@ -149,8 +160,8 @@ def _scan(data):
     flush()
     with session_scope() as db:
         db.execute(delete(ImageCacheFile).where(ImageCacheFile.scanned < stamp))
-        data['total_bytes'] = db.scalar(select(func.coalesce(func.sum(ImageCacheFile.size), 0)))
-        data['total_files'] = db.scalar(select(func.count()).select_from(ImageCacheFile))
+        data['total_bytes'] = int(db.scalar(select(func.coalesce(func.sum(ImageCacheFile.size), 0))))
+        data['total_files'] = int(db.scalar(select(func.count()).select_from(ImageCacheFile)))
     data['stage'] = 'process'
     _save(data)
     return True
@@ -252,8 +263,12 @@ def _run(data):
                 message='维护完成；重要封面与无法确认来源的图片保留' if completed else '已暂停，可继续', finished_at=time.time())
             _save(data)
     except Exception as exc:
+        logger.exception('网页图片维护失败')
         data.update(running=False, phase='failed', message=f'维护中断: {type(exc).__name__}，已处理文件保留，可继续')
-        _save(data)
+        try:
+            _save(data)
+        except Exception:
+            logger.exception('网页图片维护错误状态保存失败，已有检查点保留')
     finally:
         with _lock:
             _running = False

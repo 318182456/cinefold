@@ -10,6 +10,7 @@ from app.database.models.deletionrecord import DeletionRecord
 from app.database.models.downloadrecord import DownloadRecord
 from app.database.models.downloadindex import TorrentManifest, TorrentFile
 from app.database.models.localindex import SubtitleDirectory, SubtitleFile
+from app.database.models.resourcepost import ResourcePost, CrawlerAttempt
 from app.database.models.imagecache import ImageCacheFile
 from app.database.models.medialink import MediaLink
 from app.database.models.mediamerge import MediaMerge
@@ -29,6 +30,7 @@ from app.database.models.curation import (
 )
 
 __all__ = [
+    'ResourcePost', 'CrawlerAttempt',
     'ImageCacheFile',
     'SubtitleDirectory', 'SubtitleFile',
     'TorrentManifest', 'TorrentFile',

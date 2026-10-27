@@ -321,7 +321,9 @@ class SiteClient:
                     response = client.get(url, headers=headers, params=params)
                     response.raise_for_status()
                     _note_proxy_result(url, request_proxy, True)
-                    return self._remember(response.text, str(response.url))
+                    return self._remember(FetchedPage(response.text, str(response.url), cookies=[
+                        {'name':cookie.name,'value':cookie.value,'domain':cookie.domain} for cookie in getattr(getattr(response,'cookies',None),'jar',[])],
+                        proxy=request_proxy), str(response.url))
             except httpx.HTTPStatusError as exc:
                 status = exc.response.status_code
                 if status == 429:
@@ -455,10 +457,13 @@ def _cookie_pairs(cookie: str) -> list[dict]:
 
 
 class FetchedPage(str):
-    def __new__(cls, text: str, url: str, status: int = 200):
+    def __new__(cls, text: str, url: str, status: int = 200, *, cookies=None, user_agent='', proxy=None):
         value = super().__new__(cls, text)
         value.url = url
         value.status = status
+        value.cookies = cookies or []
+        value.user_agent = user_agent
+        value.proxy = proxy
         return value
 
 
@@ -545,6 +550,8 @@ def _solver_request(client, endpoint, body, quick=False):
             request["maxTimeout"] = max(1, int(remaining * 1000 / remaining_attempts))
             # A service disconnection is not a failure of the target's exit.
             response = client.post(endpoint, json=request)
+            if isinstance(getattr(response,'extensions',None),dict):
+                response.extensions['cinefold_proxy'] = proxy
             try:
                 payload = response.json()
             except ValueError:
@@ -602,7 +609,8 @@ def _fetch_bypass_response(client, base, url, cookie, solver_timeout, quick=Fals
                     html = json.dumps(data, ensure_ascii=False)
             except (ValueError, TypeError):
                 pass
-        return FetchedPage(html, solution.get('url') or url)
+        return FetchedPage(html, solution.get('url') or url, cookies=solution.get('cookies'),
+            user_agent=solution.get('userAgent') or '', proxy=getattr(response,'extensions',{}).get('cinefold_proxy'))
 
     # cloudflare-bypass-for-scraping 风格
     with _bypass_slot(base, quick):

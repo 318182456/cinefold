@@ -63,6 +63,15 @@ def states():
         return copy.deepcopy(_STATES)
 
 
+def progress(job_id, message, *, current='', processed=0):
+    """Publish bounded progress for long scheduler tasks without keeping payloads."""
+    with _LOCK:
+        state=_STATES.get(job_id)
+        if not state or state.get('phase')!='running':return
+        state['progress']={'message':message,'current':current,'processed':int(processed),'updated_at':time.time()}
+        _save(job_id)
+
+
 def _reserve(job_id, source):
     with _LOCK:
         _load()

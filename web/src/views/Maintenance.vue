@@ -15,7 +15,7 @@ async function refreshMemory() {
   try { memory.value = await http.get('/runtime/memory') } catch (err) { toast.error(err.message) }
 }
 let storageTimer
-const bytes = value => `${((value || 0) / 1024 ** 3).toFixed(2)} GiB`
+const bytes = value => value == null ? '待统计' : `${(value / 1024 ** 3).toFixed(2)} GiB`
 async function pollStorage() {
   clearTimeout(storageTimer)
   try {
@@ -185,7 +185,13 @@ onUnmounted(() => clearTimeout(storageTimer))
       </div>
       <div v-if="storage.phase !== 'idle'" class="space-y-1 text-xs text-gray-400" role="status">
         <p>{{ storage.message }} · 已扫描 {{ storage.scanned || 0 }} 张 · 已处理 {{ storage.processed || 0 }} 张</p>
-        <p>当前占用 {{ bytes(storage.total_bytes) }} · 可清理 {{ storage.candidate_files || 0 }} 张 / {{ bytes(storage.candidate_bytes) }} · 已节省 {{ bytes(storage.saved_bytes) }}</p>
+        <p v-if="storage.stage === 'scan'">已扫描容量 {{ bytes(storage.scanned_bytes) }} · 完整占用待扫描结束后确认</p>
+        <p v-else>当前占用 {{ bytes(storage.total_bytes) }}</p>
+        <p v-if="storage.mode !== 'optimize'">
+          <template v-if="storage.processed || storage.phase === 'finished'">{{ storage.phase === 'finished' ? '可清理' : '已发现可清理' }} {{ storage.candidate_files || 0 }} 张 / {{ bytes(storage.candidate_bytes) }}</template>
+          <template v-else>可清理数量待试算</template>
+        </p>
+        <p>已节省 {{ bytes(storage.saved_bytes) }}</p>
         <p v-if="storage.current" class="break-all font-mono text-gray-500">{{ storage.current }}</p>
         <p v-if="storage.updated_at">最近更新 {{ new Date(storage.updated_at * 1000).toLocaleString() }}</p>
         <p v-for="error in storage.errors || []" :key="error" class="text-amber-400">{{ error }}</p>

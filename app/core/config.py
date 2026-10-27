@@ -39,7 +39,7 @@ SENSITIVE_KEYS = {
     "agent_api_key",
     "github_token", "oidc_client_secret", "medialink_webhook_token",
     # 连接串里通常内嵌账号密码
-    "database_url", "redis_url", "crawler_db_dsn",
+    "database_url", "redis_url",
 }
 
 DEFAULT_FILTER = {
@@ -305,13 +305,14 @@ class Settings:
     download_index_interval: int = 30
     download_index_batch_size: int = 128
     link_refresh_interval: int = 30
-    # --- 外部爬虫库导入 ---
-    # PostgreSQL 连接串，为空则整个功能不启用（任务不注册、页面不显示）
-    crawler_db_dsn: str = ""
-    # 默认不排班：连接串没配好就跑等于每次都往日志里写一条失败
-    crawler_db_time: str = ""
-    # 单次最多导入多少条，防止首次全量把库和日志刷爆。0 表示不限
-    crawler_db_limit: int = 5000
+    # --- 原生资源爬虫（不用外部 article 系统）---
+    resource_catalog_enabled: bool = True
+    resource_crawl_time: str = ''
+    resource_metadata_time: str = ''
+    resource_crawl_pages: int = 2
+    resource_crawl_limit: int = 50
+    resource_sht_sections: str = '37,103,104'
+    resource_x1080_sections: str = '5206,5479,5208'
 
     # --- 字幕 ---
     # 刮削登记完成后自动抓字幕，并允许定时补漏。关掉则只剩页面手动触发
@@ -658,9 +659,13 @@ def load_settings() -> Settings:
         download_index_interval=_env_int("DOWNLOAD_INDEX_INTERVAL", 30),
         download_index_batch_size=_env_int("DOWNLOAD_INDEX_BATCH_SIZE", 128),
         link_refresh_interval=_env_int("LINK_REFRESH_INTERVAL", 30),
-        crawler_db_dsn=_env("CRAWLER_DB_DSN", "").strip("'\""),
-        crawler_db_time=_env("CRAWLER_DB_TIME", "").strip("'\""),
-        crawler_db_limit=_env_int("CRAWLER_DB_LIMIT", 5000),
+        resource_catalog_enabled=_env_bool('RESOURCE_CATALOG_ENABLED', True),
+        resource_crawl_time=_env('RESOURCE_CRAWL_TIME', ''),
+        resource_metadata_time=_env('RESOURCE_METADATA_TIME', ''),
+        resource_crawl_pages=max(1, min(100, _env_int('RESOURCE_CRAWL_PAGES', 2))),
+        resource_crawl_limit=max(1, min(1000, _env_int('RESOURCE_CRAWL_LIMIT', 50))),
+        resource_sht_sections=_env('RESOURCE_SHT_SECTIONS', '37,103,104'),
+        resource_x1080_sections=_env('RESOURCE_X1080_SECTIONS', '5206,5479,5208'),
 
         subtitle_enabled=_env_bool("SUBTITLE_ENABLED", False),
         subtitle_fill_limit=_env_int("SUBTITLE_FILL_LIMIT", 30),

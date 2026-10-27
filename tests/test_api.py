@@ -1179,9 +1179,8 @@ class TestImportedActorsAreNotSubscriptions:
                     session.delete(row)
 
     def _import(self, monkeypatch, rows):
-        from app.modules.crawlerdb import importer
-        monkeypatch.setattr(importer, "_query", lambda *a, **k: rows)
-        return importer.import_casts()
+        from app.services.resourcecatalog import cache_actor
+        return sum(cache_actor(row) for row in rows)
 
     def test_import_creates_unsubscribed_rows(self, monkeypatch):
         from app.database.models import Actor

@@ -463,41 +463,26 @@ def _run_ladysite_task(func_name: str, label: str) -> int:
         return 0
 
 
-def import_crawler_db(full: bool = False) -> int:
-    """从外部爬虫库导入番号情报。DSN 没配时直接返回。
-
-    只补空字段、不改 status —— 导入是为了充实番号库供浏览和搜索，
-    不该让几万条番号悄悄进下载流程。要下载还是手动订阅。
-
-    full=True 忽略增量水位重跑全量。清洗规则放宽之后要用：之前被规则
-    丢掉的行水位已经越过去了，再怎么触发增量都查不回来。
-    """
-    settings = get_settings()
-    if not settings.crawler_db_dsn:
-        logger.debug("[任务] CRAWLER_DB_DSN 未配置，跳过爬虫库导入")
-        return 0
-
-    from app.modules import crawlerdb
-
-    logger.info(f"[任务] 开始从爬虫库导入番号{'（全量）' if full else ''}")
-    try:
-        return crawlerdb.import_all(full=full)
-    except crawlerdb.CrawlerDBError as exc:
-        # 对方的库不归我们管，连不上是常态。记 warning 让它下轮再试，
-        # 不要抛出去——异常会让 APScheduler 把这个任务整个移除
-        logger.warning(f"[任务] 爬虫库导入失败: {exc}")
-        return 0
 
 
-def import_crawler_db_full() -> int:
-    """全量重灌爬虫库。只作为手动入口注册，不排班。"""
-    return import_crawler_db(full=True)
 
 
 # ======================================================================
 # 任务注册表
 # ======================================================================
+def crawl_resources():
+    from app.services.resourcecrawler import run_scheduled
+    return run_scheduled()
+
+
+def crawl_resource_metadata():
+    from app.services.resourcefeeds import run
+    return run()
+
+
 JOBS: dict[str, dict] = {
+    'crawl_resources': {'func':crawl_resources,'name':'抓取论坛资源','cron_key':'resource_crawl_time'},
+    'crawl_resource_metadata': {'func':crawl_resource_metadata,'name':'抓取影片与演员情报','cron_key':'resource_metadata_time'},
     "run_codes_task": {"func": run_codes_task, "name": "订阅下载", "cron_key": "download_schedule_time"},
     "run_actors": {"func": run_actors, "name": "演员订阅", "cron_key": "actor_schedule_time"},
     "sub_rank": {"func": sub_rank, "name": "榜单订阅", "cron_key": "rank_schedule_time"},
@@ -512,12 +497,6 @@ JOBS: dict[str, dict] = {
     "fill_subtitles": {"func": fill_subtitles, "name": "补抓字幕", "cron_key": "subtitle_fill_time"},
     "fill_reviews": {"func": fill_reviews, "name": "补生成影评", "cron_key": "review_fill_time"},
     "auto_emby_collections": {"func": auto_emby_collections, "name": "AI 全库自动合集", "cron_key": "emby_collection_time"},
-    # cron 默认为空，配了 CRAWLER_DB_TIME 才排班
-    "import_crawler_db": {"func": import_crawler_db, "name": "导入爬虫库", "cron_key": "crawler_db_time"},
-    # 手动专用：cron_key 留空不排班，避免每天大表全量扫一遍
-    "import_crawler_db_full": {
-        "func": import_crawler_db_full, "name": "导入爬虫库（全量）", "cron_key": "",
-    },
 }
 
 # 固定间隔任务，不走 crontab

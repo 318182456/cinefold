@@ -116,6 +116,11 @@ SOURCES: tuple[dict, ...] = (
      "parser": "xchina", "bypass_first": False, "interval": 2.0,
      "code_rule": "skip:date"},
 
+    # Resource crawlers share proxy/cookie/throttling configuration, not metadata lookup.
+    {"key":"sehuatang", "name":"色花堂资源爬虫", "host":"https://sehuatang.org", "kind":"resource",
+     "enabled":False, "parser":"", "interval":2.0, "bypass_first":False},
+    {"key":"x1080x", "name":"X1080X 资源爬虫", "host":"https://agaghhh.cc", "kind":"resource",
+     "enabled":False, "parser":"", "interval":2.0, "bypass_first":True},
     # --- 字幕源（kind="subtitle"）---
     # 登记在这里只为让用户能在页面上改域名与开关 —— 字幕站换域名同样频繁。
     # parser 留空是有意的：详情抓取只认有 parser 的源

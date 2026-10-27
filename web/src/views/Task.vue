@@ -83,7 +83,8 @@ const DESCRIPTIONS = {
   warm_page_cache: '提前抓好推荐/榜单/厂牌页，打开即命中缓存',
   fill_subtitles: '给媒体库里没字幕的影片补抓',
   fill_reviews: '给媒体库里没影评的影片补生成 AI 影评',
-  import_crawler_db: '从外部爬虫库导入番号情报',
+  crawl_resources: '抓取已启用的论坛资源，支持暂停继续与失败冷却',
+  crawl_resource_metadata: '抓取 Avbase 新片、JavDB 和 JavLibrary 榜单及演员资料',
   pt_wait: '同步下载器任务状态',
   translate_titles: '翻译缺中文标题的番号',
   cache_photos: '把封面图缓存到本地',
@@ -277,6 +278,8 @@ onUnmounted(() => {
         <div v-if="job.id !== COLLECTION_JOB && job.execution?.phase !== 'idle' && job.execution?.phase" class="mt-3 space-y-2 border-t border-gray-800 pt-3 text-xs text-gray-500">
           <p>提交 {{ timeText(job.execution.queued_at) }} · 开始 {{ timeText(job.execution.started_at) }} · 耗时 {{ durationText(job.execution) }}<span v-if="job.execution.processed != null"> · 返回数量 {{ job.execution.processed }}</span></p>
           <p v-if="job.execution.error" class="break-all text-red-400">{{ job.execution.error }}</p>
+          <p v-if="job.execution.progress" class="break-all">{{job.execution.progress.message}} · 已处理 {{job.execution.progress.processed}}</p>
+          <RouterLink v-if="job.id === 'crawl_resources'" class="inline-block text-brand" :to="{name:'Resources'}">查看各爬虫进度与资源</RouterLink>
           <p v-if="job.execution.process_memory_after?.rss != null">进程 RSS：执行前 {{ ((job.execution.process_memory_before?.rss || 0) / 1048576).toFixed(1) }} → 执行后 {{ (job.execution.process_memory_after.rss / 1048576).toFixed(1) }} MiB（包含同时运行的其他任务）</p>
           <p v-if="activeJob(job)" class="text-gray-400">任务在后台执行，可以离开此页，稍后回来查看结果。</p>
           <RouterLink :to="{name:'Logs',query:{keyword:job.id}}" class="text-brand">查看任务日志 ↗</RouterLink>

@@ -51,6 +51,18 @@ def search_torrents(
     settings = get_settings()
     torrents = _search_pt_cached(code, refresh=refresh)
     torrents = [torrent for torrent in torrents if ptsite.site_is_enabled(torrent.site)]
+    # Local additions must be visible even while a remote empty-result cache is warm.
+    if settings.resource_catalog_enabled:
+        from app.services.resourcecatalog import search as search_catalog
+        torrents = [*torrents, *search_catalog(code)]
+        seen, unique = set(), []
+        for torrent in torrents:
+            identity = get_magnet_hash(torrent.download_url) or (torrent.site, torrent.download_url, torrent.id)
+            if identity in seen:
+                continue
+            seen.add(identity); unique.append(torrent)
+        torrents = unique
+    torrents = [torrent for torrent in torrents if ptsite.site_is_enabled(torrent.site)]
     if not torrents:
         return []
 

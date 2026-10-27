@@ -492,6 +492,7 @@ onMounted(load)
       <div v-if="registered.length" class="space-y-2 border-t border-gray-800 pt-4">
         <p class="text-xs text-gray-500">
           不参与详情抓取（可测连通性，因此不排序）
+          · 资源爬虫在「发现 → 资源库」运行
         </p>
         <div class="grid gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
           <div
@@ -503,6 +504,7 @@ onMounted(load)
             <div class="flex items-center gap-2">
               <span class="h-2 w-2 shrink-0 rounded-full" :class="STATUS[item.status].dot" />
               <span class="truncate text-sm text-gray-300">{{ item.name }}</span>
+              <span v-if="item.kind === 'resource'" class="badge bg-emerald-950 text-emerald-300">资源爬虫</span>
               <span
                 v-if="!item.builtin"
                 class="badge shrink-0 bg-gray-800 text-gray-400"
