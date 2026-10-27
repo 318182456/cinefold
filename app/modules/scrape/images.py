@@ -26,6 +26,7 @@ from __future__ import annotations
 import os
 import tempfile
 from dataclasses import dataclass, field
+from functools import lru_cache
 from io import BytesIO
 from pathlib import Path
 
@@ -275,8 +276,39 @@ def build_image_set(
     )
 
 
-def valid_file(path: Path) -> bool:
+def _fingerprint(stat):
+    return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns
+
+
+class InvalidImageError(ValueError):
+    """Invalid or temporarily unreadable images must not become permanent cache hits."""
+
+
+def _decode_file(path: str, fingerprint: tuple) -> bool:
     try:
-        return bool(jpeg_bytes(path.read_bytes()))
-    except OSError:
+        with Image.open(path) as image:
+            # Full decoding still rejects truncated/corrupt images; no JPEG
+            # encoding is needed when the caller only needs a yes/no answer.
+            image.load()
+            valid = min(image.size) >= 16
+        return valid and _fingerprint(Path(path).stat()) == fingerprint
+    except Exception:
+        return False
+
+
+@lru_cache(maxsize=8192)
+def _valid_file(path: str, fingerprint: tuple) -> bool:
+    """Cache only booleans and stat identities, never decoded images or bytes."""
+    if not _decode_file(path, fingerprint):
+        raise InvalidImageError()
+    return True
+
+
+def valid_file(path: Path) -> bool:
+    if Image is None:
+        return False
+    try:
+        path = Path(path)
+        return _valid_file(str(path), _fingerprint(path.stat()))
+    except (OSError, InvalidImageError):
         return False

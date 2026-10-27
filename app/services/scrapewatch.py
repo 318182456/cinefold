@@ -45,7 +45,8 @@ def _complete(source: Path, code: str, links: list[str], require_images: bool = 
                 alias = product_alias(code)
                 if not alias or not local.read(target.with_suffix('.nfo'), alias).get('title'):
                     continue
-            if not require_images or all(scrape.scrape_images.valid_file(target.with_name(f"{target.stem}-{kind}.jpg")) for kind in ("poster", "fanart", "thumb")):
+            from app.services.artifactvalidation import valid_image
+            if not require_images or all(valid_image(target.with_name(f"{target.stem}-{kind}.jpg")) for kind in ("poster", "fanart", "thumb")):
                 return True
         except OSError:
             continue

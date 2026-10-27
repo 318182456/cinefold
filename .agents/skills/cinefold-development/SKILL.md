@@ -47,6 +47,10 @@ description: 为 cinefold 添加或修改功能时，检查前后端契约、任
 
 容器内存排查先拆分主进程、子进程 RSS 与 cgroup 文件缓存，不能把 Docker 总量都归因于 Python 或代理，也不能仅凭空闲时 RSS 高就认定泄漏。Transmission `get_torrents()` 未指定字段会拉取完整种子资料；文件扫描应按 hash 分批，只取 `downloadDir/files` 并逐条消费原始 `torrent.fields['files']`。`get_files()` 另依赖 `priorities/wanted`，只需路径时不要构造 File 对象。孤儿检查只保留本轮源路径的精确匹配，概率过滤器不能代替文件归属核验。优化需在独立进程测峰值，并核对全路径多重集及匹配结果一致；不得把诊断进程的改善写成线上主进程已经下降。
 
+热更新仅重启 Python 时，容器 ID 与 cgroup 缓存可能沿用；对比内存要同时记录容器启动时间、Python 进程年龄和至少一轮实际任务后的 RSS，不能把刚启动的进程与旧进程直接当成长期对照。cgroup v1 的 Docker CLI 只减去 `total_inactive_file`，活跃文件缓存仍计入面板值，见 [Docker stats 说明](https://docs.docker.com/reference/cli/docker/container/stats/)。容器内另起诊断 Python 时，须先调用 `app.core.overlay.activate()` 再导入业务模块，否则可能读取镜像旧代码，出现线上已有新版本但诊断导入新模型失败的假象。
+
+周期扫描的图片校验不得调用 `jpeg_bytes()` 重新编码来取得布尔值；`Image.open()` 本身只懒加载头部，仍需完整 `load()` 才能拒绝截断图片，见 [Pillow 图片读取](https://pillow.readthedocs.io/en/stable/reference/Image.html#PIL.Image.open)。`scrapewatch._complete()` 的持久化校验在 `services/artifactvalidation.py`，以路径及设备/inode/大小/mtime_ns/ctime_ns 识别未变文件，DB 与有界 LRU 只复用成功校验，不持有图片内容。临时读取失败不能永久缓存为损坏；换算法时更新缓存 namespace 版本。可在 PostgreSQL 临时表中清空 LRU 后禁止打开图片，验证“重启”仍从 DB 命中，并单独检验替换同大小、同 mtime 文件能触发重新解码。
+
 下载器文件索引的入口在 `app/services/downloadindex.py`：按连接身份隔离缓存，只用完整成功的列表标记种子已移除。文件快照和完成标记须同事务提交，失败保留旧版本并降频重试；后台同步按尚未更新的条目轮换。删除确认后写墓碑，以观测时间阻止先开始、后返回的旧快照将记录恢复为存在。转移目标接管与源任务删除是两个独立事实，失败不能提前改源状态。普通身份反查可复用近期数据库索引，真正删除前仍走实时归属核验；不要把数据库里整张索引表重新加载进全局 Python 字典。
 
 修改内置 Mihomo 路由时，保留固定代理端口与按认证身份分流：`IN-USER` 匹配稳定的节点身份，不用端口偏移识别节点，也不在并发请求间切换全局代理组。预检、租约、失败冷却和日志需使用同一身份解析；节点重排不应改变旧身份的出口，已替换节点的旧身份应失效。不要跳过回环地址的认证，否则本机请求无法按用户分流。
