@@ -1,6 +1,6 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { askAgent, cancelAgentAction, confirmAgentAction, getAgentStatus } from '@/api'
+import { getAgentHistory, clearAgentHistory, askAgentStream, cancelAgentAction, confirmAgentAction, getAgentStatus } from '@/api'
 import { renderMarkdown } from '@/utils/markdown'
 
 // 面板尺寸。拖动时要用它把面板夹在视口内，写死比读 DOM 省事且够准
@@ -14,6 +14,8 @@ const HISTORY_LIMIT = 12
 const POS_KEY = 'agent_panel_pos'
 const SUGGESTIONS = [
   '现在什么情况？',
+  '有哪些榜单可以看？',
+  '看看论坛抓取进度',
   '下载卡住的任务有哪些？',
   '最近有什么报错吗？',
   '配置有什么问题？',
@@ -29,7 +31,9 @@ const open = ref(false)
 const available = ref(false)
 const model = ref('')
 const question = ref('')
-const sending = ref(false)
+const historyLoading = ref(false), historyKnown = ref(false), historyError = ref(''), hasMoreHistory = ref(false), historyBefore = ref(0)
+const sending = ref(false), progressText = ref('正在查询…')
+const toolLabels = { get_rank: '读取榜单', browse_resources: '搜索本地资源', actor_profile: '查询演员档案', crawler_status: '读取抓取进度', list_tasks: '查询任务', propose_task: '生成任务提案', propose_resource_download: '生成下载提案' }
 const messages = ref([])
 const bodyRef = ref(null)
 const inputRef = ref(null)
@@ -143,7 +147,7 @@ const CANCEL_WORDS = /^(取消|算了|不要|不用|不用了|放弃|no|n|cancel
 
 async function send(text) {
   const content = (text ?? question.value).trim()
-  if (!content || sending.value) return
+  if (!content || sending.value || historyLoading.value || !historyKnown.value) return
 
   const pending = pendingProposal()
   if (pending) {
@@ -170,10 +174,11 @@ async function send(text) {
   const history = messages.value
     .slice(0, -1)
     .slice(-HISTORY_LIMIT)
-    .map((m) => ({ role: m.role, content: m.content }))
+    .map((m) => ({ role: m.role, content: [String(m.content || ''), ...(m.proposals || []).map(p => `操作记录：${p.label}；状态 ${p.status}；${p.result || (p.status === 'expired' ? '提案已失效，尚未执行' : '')}`)].join('\n').slice(0,8000) }))
 
   try {
-    const data = await askAgent(content, history)
+    progressText.value = '正在分析问题…'
+    const data = await askAgentStream(content, history, event => { progressText.value = event.phase === 'tool' ? (toolLabels[event.tool] || `正在查询 ${event.tool}`) : '正在整理回答…' })
     const fresh = (data?.proposals || []).map((p) => ({
       ...p,
       status: 'pending',
@@ -248,8 +253,24 @@ function onKeydown(event) {
   }
 }
 
-function clearAll() {
-  messages.value = []
+async function loadHistory(older = false) {
+  if (historyLoading.value || sending.value) return
+  historyLoading.value = true; historyError.value = ''
+  try {
+    const previousHeight = bodyRef.value?.scrollHeight || 0, previousTop = bodyRef.value?.scrollTop || 0
+    const data = await getAgentHistory(older ? historyBefore.value : 0)
+    const restored = (data.messages || []).map(message => ({ ...message, proposals: (message.proposals || []).map(proposal => ({ ...proposal, deleteFiles: proposal.action === 'delete_with_files' })) }))
+    messages.value = older ? [...restored, ...messages.value] : restored
+    hasMoreHistory.value = !!data.has_more; historyBefore.value = data.next_before || 0; historyKnown.value = true
+    if (!older) scrollToBottom()
+    else nextTick(() => { if (bodyRef.value) bodyRef.value.scrollTop = previousTop + bodyRef.value.scrollHeight - previousHeight })
+  } catch (error) { historyError.value = error.message }
+  finally { historyLoading.value = false }
+}
+async function clearAll() {
+  if (sending.value || historyLoading.value) return
+  try { await clearAgentHistory(); messages.value = []; hasMoreHistory.value = false; historyBefore.value = 0 }
+  catch (error) { historyError.value = error.message }
 }
 
 function onResize() {
@@ -284,6 +305,7 @@ onMounted(async () => {
     // 后端没配好就不显示悬浮球，免得点开只看到一句"没配置"
     available.value = !!data?.enabled
     model.value = data?.model || ''
+    if (available.value) await loadHistory()
   } catch {
     available.value = false
   }
@@ -333,7 +355,7 @@ onBeforeUnmount(() => {
         <button
           v-if="messages.length"
           class="ml-auto text-[11px] text-gray-500 hover:text-gray-300"
-          @click="clearAll"
+          @click="clearAll" :disabled="sending || historyLoading"
         >
           清空
         </button>
@@ -412,7 +434,7 @@ onBeforeUnmount(() => {
               <ul class="mt-1.5 space-y-0.5">
                 <li
                   v-for="target in proposal.targets"
-                  :key="target.hash || target.code || target.actor"
+                  :key="target.hash || target.code || target.actor || target.job_id || target.key"
                   class="flex items-baseline gap-1.5 text-gray-400"
                 >
                   <span class="truncate">{{ target.name }}</span>
@@ -473,6 +495,7 @@ onBeforeUnmount(() => {
               <p v-else-if="proposal.status === 'done'" class="mt-2 text-[11px] text-brand">
                 {{ proposal.result }}
               </p>
+              <p v-else-if="proposal.status === 'expired'" class="mt-2 text-[11px] text-gray-500">提案已过期，请重新提问生成</p>
               <p v-else-if="proposal.status === 'cancelled'" class="mt-2 text-[11px] text-gray-500">
                 已取消
               </p>
@@ -494,9 +517,12 @@ onBeforeUnmount(() => {
           </div>
         </div>
 
+        <p v-if="historyError" class="text-xs text-amber-400">聊天记录读取或保存失败：{{ historyError }} <button class="text-brand" @click="loadHistory()">重试</button></p>
+        <p v-if="historyLoading" class="text-xs text-gray-500">读取聊天记录中…</p>
+        <button v-if="hasMoreHistory" class="text-xs text-brand" :disabled="historyLoading || sending" @click="loadHistory(true)">加载更早的聊天记录</button>
         <div v-if="sending" class="flex items-center gap-1.5 px-1 text-xs text-gray-500">
           <span class="h-1.5 w-1.5 animate-pulse rounded-full bg-brand" />
-          正在查…
+          {{ progressText }}
         </div>
       </div>
 
@@ -510,7 +536,7 @@ onBeforeUnmount(() => {
             class="input max-h-24 min-h-[38px] resize-none py-2 text-sm"
             @keydown="onKeydown"
           />
-          <button class="btn-primary shrink-0 px-3 py-2" :disabled="sending || !question.trim()" @click="send()">
+          <button class="btn-primary shrink-0 px-3 py-2" :disabled="sending || historyLoading || !historyKnown || !question.trim()" @click="send()">
             <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" d="M12 19V5m0 0l-6 6m6-6l6 6" />
             </svg>

@@ -9,7 +9,7 @@ import {
   testConnection, testOidc,
 } from '@/api'
 import { PasskeyCancelled, createCredential, isSupported } from '@/utils/webauthn'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { useToast } from '@/composables/useToast'
 import { useConfigStore } from '@/stores/config'
 import ConfigField from '@/components/ConfigField.vue'
@@ -24,6 +24,7 @@ const form = reactive({})
 const loading = ref(true)
 const saving = ref(false)
 const route = useRoute()
+const router = useRouter()
 const activeGroup = ref('downloader')
 const scrapeTab = ref('basic')
 const SCRAPE_TABS = [['basic', '目录与命名'], ['metadata', '元数据来源'], ['images', '图片与水印'], ['automation', '自动任务']]
@@ -509,27 +510,6 @@ const GROUPS = [
     tests: ['mteam', 'rousi', 'ptt', 'nicept'],
   },
   {
-    key: 'resources',
-    cat: 'pipeline',
-    title: '资源库与爬虫',
-    sections: [
-      {
-        title: '原生资源爬虫',
-        hint: '论坛磁链直接写入本程序资源库，不依赖 article 或旧库导入。地址、Cookie、代理在数据源页面设置。',
-        fields: [
-          { k: 'resource_catalog_enabled', label: '搜索包含本地资源库', t: 'bool', hint: '搜索时包含原生爬虫采集到的磁链' },
-          { k: 'bt_auto_download', label: '本地资源参与自动下载', t: 'bool', hint: '关闭后仍可搜索和手动下载' },
-          { k: 'resource_crawl_time', label: '资源抓取时间', hint: 'crontab 格式，留空不自动执行；任务页可手动运行' },
-          { k: 'resource_metadata_time', label: '影片与演员抓取时间', hint: 'Avbase 新片、JavDB 榜单、JavLibrary 榜单及演员；留空不自动执行' },
-          { k: 'resource_crawl_pages', label: '每板块最多页数', t: 'number', hint: '1–100，默认 2' },
-          { k: 'resource_crawl_limit', label: '每轮帖子上限', t: 'number', hint: '1–1000，默认 50，可继续未完成的帖子' },
-          { k: 'resource_sht_sections', label: '色花堂板块', hint: '逗号分隔，默认 37,103,104' },
-          { k: 'resource_x1080_sections', label: 'X1080X 板块', hint: '逗号分隔，默认 5206,5479,5208' },
-        ],
-      },
-    ],
-  },
-  {
     key: 'notify',
     cat: 'assist',
     title: '通知',
@@ -883,6 +863,7 @@ function groupFields(group) {
 }
 
 watch(() => route.query.section, value => {
+  if (value === 'resources') { router.replace({ name: 'Task', query: { section: 'resources' } }); return }
   if (GROUPS.some(group => group.key === value)) activeGroup.value = value
 }, { immediate: true })
 

@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import date
+from urllib.parse import quote
 
 from loguru import logger
 
@@ -52,6 +54,49 @@ class Avbase:
         if not html:
             return None
         return html_to_code(html, normalized)
+
+    def feed(self, day='', page=1):
+        path='/works/date/'+date.fromisoformat(day).isoformat() if day else '/works/recent'
+        return html_to_works(self.client.get(path,params={'page':page},timeout=40))
+
+    def actor_works(self, name, page=1, single=False):
+        from app.utils.actornames import matches
+        path='/talents/'+quote(name.strip(),safe='')
+        params={'page':page}
+        if single:params['cast_size']='single'
+        html=self.client.get(path,params=params,timeout=40)
+        props=page_props(html);talent=props.get('talent') or {};primary=talent.get('primary') or {}
+        canonical=primary.get('name') or name
+        aliases=list(dict.fromkeys(a.get('name') for a in talent.get('actors') or [] if a.get('name')))
+        if not talent or not matches(name,canonical,aliases):raise ValueError('Avbase 未返回匹配的演员资料')
+        movies,_=html_to_works(html)
+        # The source's single-cast filter is also checked locally.
+        if single:movies=[row for row in movies if len([n for n in (row.get('casts') or '').split(',') if n])==1]
+        maximum=props.get('max_page')
+        has_more=page<int(maximum) if maximum else len(props.get('works') or [])>=30
+        return dict(name=canonical,aliases=aliases,photo=primary.get('image_url') or '',source_url=self.client.host+path,items=movies,has_more=has_more)
+
+
+def page_props(html):
+    match=NEXT_DATA_RE.search(html or '')
+    if not match:raise ValueError('Avbase 页面没有作品数据，可能仍在验证页')
+    props=(json.loads(match[1]).get('props') or {}).get('pageProps') or {}
+    if not isinstance(props.get('works'),list):raise ValueError('Avbase 列表数据格式不匹配')
+    return props
+
+
+def html_to_works(html):
+    props=page_props(html);movies=[];actors=[];seen=set()
+    for work in props['works'][:100]:
+        work=dict(work)
+        work['title']=work.get('title') or next((p.get('title') for p in work.get('products') or [] if p.get('title')),'')
+        if not work.get('casts'):work['casts']=[{'actor':actor} for actor in work.get('actors') or []]
+        payload=json.dumps({'props':{'pageProps':{'work':work}}},ensure_ascii=False).replace('</','<\\/')
+        info=html_to_code('<script id="__NEXT_DATA__" type="application/json">'+payload+'</script>')
+        if info and info.code not in seen:movies.append(info.to_dict());seen.add(info.code)
+        actors.extend({'name':a.get('name'),'photo':a.get('image_url')} for a in work.get('actors') or [] if a.get('name'))
+    if props['works'] and not movies:raise ValueError('Avbase 列表没有可识别的影片')
+    return movies,actors
 
 
 def _js_date(raw: str) -> str:

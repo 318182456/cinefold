@@ -1,5 +1,6 @@
 """演员订阅。"""
 from __future__ import annotations
+from typing import Literal
 
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
@@ -21,6 +22,8 @@ class ActorRequest(BaseModel):
 class ActorRefreshRequest(BaseModel):
     name: str
     max_pages: int = 3
+    source: Literal['javdb','avbase'] = 'javdb'
+    single: bool = False
 
 
 class ActorPhotosRequest(BaseModel):
@@ -53,7 +56,8 @@ def actor_profile(name: str, page: int = 1, size: int = 24, filter: str = 'all',
 def refresh_actor_profile(body: ActorRefreshRequest, current_user: str = Depends(get_current_user)):
     from app.services.actorprofile import refresh
     try:
-        return ResponseEntity.ok(refresh(body.name, body.max_pages))
+        options={'source':body.source,'single':body.single} if body.source!='javdb' or body.single else {}
+        return ResponseEntity.ok(refresh(body.name, body.max_pages,**options))
     except ValueError as exc:
         return ResponseEntity.fail(str(exc), code=400)
 

@@ -314,6 +314,32 @@ def test_http200_challenge_is_retried_through_existing_bypass(monkeypatch):
     assert len(calls)==2 and calls[1]['bypass_first'] is True and client.bypass_first
 
 
+def test_unrecognized_list_retries_once_with_the_same_deadline(monkeypatch):
+    from app.modules.ladysite.transport import current_budget
+    pages=iter(['<title>Temporary verification</title>','<table id="threadlisttableid"><tbody id="normalthread_9"></tbody></table>'])
+    calls=[]
+    def get(*args,**kwargs):calls.append((current_budget(),kwargs));return next(pages)
+    client=SimpleNamespace(get=get,host='https://forum',cookie='',proxy=None,bypass_first=False)
+    monkeypatch.setattr(parser.SiteClient,'from_source',lambda key:client)
+    assert parser.ForumCrawler('sehuatang').listing('37',1)==[9]
+    assert len(calls)==2 and calls[0][0] is calls[1][0] and client.bypass_first
+
+
+def test_x1080_follows_official_release_then_reports_maintenance_without_retry(monkeypatch):
+    pages=iter(['<title>歡迎訪問 · x1080x</title><body>請使用下面地址之一訪問論壇<a href="01.html">地址一</a></body>',
+                '<meta http-equiv="refresh" content="0; url=https://new-forum.test">',
+                '<title>網站維護中 - x1080x</title><body>論壇目前仍在改版中，維護期間暫停開放。</body>'])
+    calls=[]
+    def get(path,**kwargs):calls.append((path,client.host,client.cookie));return next(pages)
+    client=SimpleNamespace(get=get,host='https://release.test',cookie='private=do-not-forward',proxy=None,bypass_first=True)
+    monkeypatch.setattr(parser.SiteClient,'from_source',lambda key:client)
+    with pytest.raises(parser.ForumPageError,match='论坛正在维护') as error:
+        parser.ForumCrawler('x1080x').listing('5206',1)
+    assert not error.value.retryable and len(calls)==3
+    assert calls[1][0]=='https://release.test/01.html'
+    assert calls[2][1]=='https://new-forum.test' and calls[2][2]==''
+
+
 def test_attachment_login_page_is_not_treated_as_missing_links(monkeypatch):
     client=SimpleNamespace(host='https://forum',cookie='')
     monkeypatch.setattr(parser.SiteClient,'from_source',lambda key:client)

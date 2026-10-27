@@ -16,6 +16,7 @@ from sqlalchemy import func, or_, select
 
 from app.database.models import Actor, Code, CodeStatus, History
 from app.database.session import session_scope
+from app.modules.ladysite.ranks import RANKS
 
 # 单个工具最多返回多少条记录。返回值要塞回模型上下文，条数一多既费 token
 # 又容易把真正有用的信息挤出去
@@ -620,6 +621,72 @@ for _name, _description, _properties, _required in [
 PROPOSAL_TOOLS = {"propose_action", "propose_subscription"}
 
 
+def tool_rank(args):
+    from app.modules.ladysite.ranks import RANKS, spec
+    from app.services.rankpages import read
+    if not args.get('rank'):return {'ranks':list(RANKS.values())}
+    selected=spec(args['rank'])
+    return read(selected['value'],limit=ROW_LIMIT)
+
+
+def tool_catalog(args):
+    from app.services.resourcecatalog import browse
+    result=browse(str(args.get('keyword') or '')[:200],source=str(args.get('source') or ''),size=ROW_LIMIT)
+    result['items']=[{key:row.get(key) for key in ('key','code','title','source','published','size_mb','detail_url')} | {'magnet_count':len(row['magnets'])} for row in result['items']]
+    return result
+
+
+def tool_actor_profile(args):
+    from app.services.actorprofile import profile
+    return profile(str(args.get('name') or ''),size=ROW_LIMIT)
+
+
+def tool_crawlers(args):
+    from app.services.resourcecrawler import sources
+    return {'sources':[{key:source[key] for key in ('key','name','enabled','job')} for source in sources()]}
+
+
+def tool_propose_task(args):
+    from app.scheduler import JOBS, INTERVAL_JOBS
+    from app.modules.agent.actions import create_proposal
+    job_id=str(args.get('job_id') or '')
+    meta=JOBS.get(job_id) or INTERVAL_JOBS.get(job_id)
+    if not meta:return {'error':'未知任务，请先用 list_tasks 查询实际任务'}
+    target={'job_id':job_id,'name':meta['name'],'progress_percent':None}
+    if args.get('day'):
+        from datetime import date
+        if job_id!='crawl_avbase_date':return {'error':'仅按日期抓取 Avbase 支持 day 参数'}
+        target['day']=date.fromisoformat(str(args['day'])).isoformat()
+        target['name']+=' · '+target['day']
+    return {'proposal':create_proposal('run_task',[target])}
+
+
+def tool_propose_resource(args):
+    from app.database.models import ResourcePost
+    from app.modules.agent.actions import create_proposal
+    index=int(args.get('index') or 0)
+    client=args.get('client') or 'qbittorrent'
+    if client not in ('qbittorrent','transmission'):return {'error':'未知下载器'}
+    with session_scope() as session:
+        row=session.get(ResourcePost,str(args.get('key') or ''))
+        if row is None or not row.code or not 0<=index<len(row.magnets):return {'error':'资源不存在、番号不明确或磁链序号无效'}
+        target={'key':row.key,'code':row.code,'url':row.magnets[index],'name':row.title,'progress_percent':None}
+    return {'proposal':create_proposal('download_resource',[target],client)}
+
+
+for _name,_handler,_description,_properties,_required in [
+    ('get_rank',tool_rank,'查询可用榜单或某榜单的本地快照；refreshing 表示后台更新中，不代表新榜单已取得。',{'rank':{'type':'string','enum':list(RANKS)}},[]),
+    ('browse_resources',tool_catalog,'搜索原生爬虫已入库的本地资源，返回真实资源 key；不会订阅或下载。',{'keyword':{'type':'string'},'source':{'type':'string'}},[]),
+    ('actor_profile',tool_actor_profile,'查询已保存演员资料、作品和在库统计，不自动同步或订阅。',{'name':{'type':'string'}},['name']),
+    ('crawler_status',tool_crawlers,'查询各论坛抓取状态、失败明细、进度和原任务参数。',{},[]),
+    ('propose_task',tool_propose_task,'对真实任务 ID 生成后台执行提案；只在用户确认后提交任务，不代表任务执行完成。crawl_avbase_date 可传 ISO 日期 day，不修改全局设置。',{'job_id':{'type':'string'},'day':{'type':'string','description':'YYYY-MM-DD，仅用于按日期抓取 Avbase'}},['job_id']),
+    ('propose_resource_download',tool_propose_resource,'按 browse_resources 返回的资源 key 生成下载提案，确认后才推送到所选下载器，index 从 0 开始。',{'key':{'type':'string'},'index':{'type':'integer','minimum':0},'client':{'type':'string','enum':['qbittorrent','transmission']}},['key']),
+]:
+    REGISTRY[_name]=_handler
+    TOOL_SCHEMAS.append({'type':'function','function':{'name':_name,'description':_description,'parameters':{'type':'object','properties':_properties,'required':_required}}})
+PROPOSAL_TOOLS.update({'propose_task','propose_resource_download'})
+
+
 def call_tool(name: str, arguments: str | dict) -> str:
     """执行工具并返回 JSON 字符串，供回填进对话。
 
@@ -638,6 +705,8 @@ def call_tool(name: str, arguments: str | dict) -> str:
     else:
         args = arguments or {}
 
+    if not isinstance(args,dict):
+        return json.dumps({'error':'工具参数必须为 JSON 对象'},ensure_ascii=False)
     try:
         result = func(args)
     except Exception as exc:

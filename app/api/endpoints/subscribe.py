@@ -15,6 +15,7 @@ from app.database.session import session_scope
 from app.schemas.reponse import ResponseEntity
 from app.schemas.torrent import Torrent
 from app.utils import get_true_code
+from app.modules.ladysite.ranks import RANKS, RankType
 
 router = APIRouter(tags=["subscribe"])
 
@@ -381,9 +382,14 @@ def recommend(
         })
 
 
+@router.get('/rank/options')
+def rank_options(current_user: str = Depends(get_current_user)):
+    return ResponseEntity.ok({'items':list(RANKS.values())})
+
+
 @router.get("/rank")
 def rank(
-    rank_type: Literal['', 'daily', 'weekly', 'monthly'] = "",
+    rank_type: RankType | Literal[''] = "",
     limit: int = PAGE_SIZE,
     current_user: str = Depends(get_current_user),
 ):
@@ -393,19 +399,19 @@ def rank(
 
 
 @router.post('/rank/refresh')
-def refresh_rank(rank_type: Literal['daily', 'weekly', 'monthly'] = 'daily', current_user: str = Depends(get_current_user)):
+def refresh_rank(rank_type: RankType = 'daily', current_user: str = Depends(get_current_user)):
     from app.services.rankpages import read
     return ResponseEntity.ok(read(rank_type, force=True))
 
 
 @router.post("/rank/subscribe")
-def rank_subscribe(rank_type: Literal['daily', 'weekly', 'monthly'] = 'daily', current_user: str = Depends(get_current_user)):
+def rank_subscribe(rank_type: RankType = 'daily', current_user: str = Depends(get_current_user)):
     from app.services.ranksubscriptions import start
     return ResponseEntity.ok(start(rank_type), message='榜单订阅任务已触发')
 
 
 @router.get('/rank/subscribe/status')
-def rank_subscribe_status(rank_type: Literal['daily', 'weekly', 'monthly'] = 'daily', current_user: str = Depends(get_current_user)):
+def rank_subscribe_status(rank_type: RankType = 'daily', current_user: str = Depends(get_current_user)):
     from app.services.ranksubscriptions import current
     return ResponseEntity.ok(current(rank_type))
 

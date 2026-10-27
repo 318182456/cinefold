@@ -246,8 +246,8 @@ export const cancelActor = (name) => http.post('/actors/cancel', { name })
 export const getActorRank = () => http.get('/actors/rank')
 export const getActorCodes = (name) => http.get('/actors/codes', { params: { name } })
 export const getActorProfile = (params) => http.get('/actors/profile', { params })
-export const refreshActorProfile = (name, maxPages = 3) =>
-  http.post('/actors/profile/refresh', { name, max_pages: maxPages })
+export const refreshActorProfile = (name, maxPages = 3, source = 'javdb', single = false) =>
+  http.post('/actors/profile/refresh', { name, max_pages: maxPages, source, single })
 export const getActorProfileSync = (name) => http.get('/actors/profile/sync', { params: { name } })
 export const subscribeActorWorks = (name) => http.post('/actors/profile/subscribe', { name })
 
@@ -311,3 +311,35 @@ export const confirmAgentAction = (proposalId, deleteFiles = null) =>
   http.post('/agent/confirm', { proposal_id: proposalId, delete_files: deleteFiles })
 export const cancelAgentAction = (proposalId) =>
   http.post('/agent/cancel', { proposal_id: proposalId })
+
+export const getRankOptions = () => http.get('/rank/options')
+
+export async function askAgentStream(question, history = [], onProgress = () => {}) {
+  const response = await fetch('/api/v1/agent/chat/stream', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${localStorage.getItem('token') || ''}` }, body: JSON.stringify({ question, history }) })
+  if (!response.ok) throw new Error(`助手请求失败（HTTP ${response.status}）`)
+  if (!response.headers.get('content-type')?.includes('application/x-ndjson')) { const error = await response.json(); throw new Error(error.message || '助手暂时不可用') }
+  const reader = response.body.getReader(), decoder = new TextDecoder()
+  let buffer = '', result
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      buffer += decoder.decode(value || new Uint8Array(), { stream: !done })
+      if (buffer.length > 1000000) throw new Error('助手响应过长，请缩小查询范围')
+      const lines = buffer.split('\n'); buffer = lines.pop()
+      if (done && buffer.trim()) { lines.push(buffer); buffer = '' }
+      for (const line of lines) {
+        if (!line.trim()) continue
+        const event = JSON.parse(line)
+        if (event.event === 'progress') onProgress(event.data)
+        if (event.event === 'result') result = event.data
+        if (event.event === 'error') throw new Error(event.message || '助手请求中断')
+      }
+      if (done) break
+    }
+    if (!result) throw new Error('助手未返回最终结果，请重试')
+    return result
+  } finally { await reader.cancel().catch(() => {}); reader.releaseLock() }
+}
+
+export const getAgentHistory = (before = 0) => http.get('/agent/history', { params: { before } })
+export const clearAgentHistory = () => http.delete('/agent/history')

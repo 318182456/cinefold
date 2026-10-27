@@ -1,30 +1,32 @@
 """Article's metadata feeds reuse native providers; no legacy DB or browser process."""
-import json
 from loguru import logger
 from app.core.config import get_settings
 from app.modules.ladysite.base import SiteClient
-from app.modules.ladysite.avbase import NEXT_DATA_RE, html_to_code
+from app.modules.ladysite.avbase import html_to_works as parse_avbase
 from app.modules.ladysite.sources import get_source
 from app.services.resourcecatalog import cache_actor
 
 
-def parse_avbase(html):
-    match=NEXT_DATA_RE.search(html or '')
-    if not match:raise ValueError('Avbase 列表没有作品数据，可能仍在验证页')
-    payload=json.loads(match[1]);props=(payload.get('props') or {}).get('pageProps') or {}
-    if not isinstance(props.get('works'),list):raise ValueError('Avbase 列表数据格式不匹配')
-    movies,actors,seen=[],[],set()
-    for work in props['works'][:100]:
-        work=dict(work)
-        work['title']=work.get('title') or next((product.get('title') for product in work.get('products') or [] if product.get('title')), '')
-        if not work.get('casts'):work['casts']=[{'actor':a} for a in work.get('actors') or []]
-        data=json.dumps({'props':{'pageProps':{'work':work}}},ensure_ascii=False).replace('</','<\\/')
-        info=html_to_code('<script id="__NEXT_DATA__" type="application/json">'+data+'</script>')
-        if info and info.code not in seen:
-            movies.append(info.to_dict());seen.add(info.code)
-        actors.extend({'name':a.get('name'),'photo':a.get('image_url')} for a in work.get('actors') or [] if a.get('name'))
-    if props['works'] and not movies:raise ValueError('Avbase 列表没有可识别的影片')
-    return movies,actors
+def crawl_date(day=None):
+    from app import services
+    from app.modules.ladysite.avbase import Avbase
+    from app.modules.ladysite.transport import FetchBudget
+    from app.services.taskruns import progress
+    import time
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    settings=get_settings()
+    day=day or settings.resource_avbase_date or datetime.now(ZoneInfo('Asia/Shanghai')).date().isoformat()
+    if not (get_source('avbase') or {}).get('enabled'):raise ValueError('Avbase 数据源未启用')
+    provider=Avbase();saved=0
+    with FetchBudget(time.perf_counter()+120).activate():
+        for page in range(1,min(settings.resource_crawl_pages,10)+1):
+            progress('crawl_avbase_date',f'Avbase {day} 第 {page} 页',current=day,processed=saved)
+            movies,actors=provider.feed(day,page)
+            saved+=services.cache_remote_codes(movies)
+            for actor in actors:cache_actor(actor)
+            if not movies:break
+    return saved
 
 
 def run():

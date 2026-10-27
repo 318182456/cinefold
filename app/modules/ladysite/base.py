@@ -9,9 +9,10 @@ import re
 import ssl
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
+from contextvars import ContextVar
 from dataclasses import dataclass, field
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 
 import httpx
 from loguru import logger
@@ -24,6 +25,24 @@ from app.services.mihomo import source_context, proxy_lease
 # bypass 服务类型探测结果缓存：{base_url: 是否讲 FlareSolverr 协议}
 # 覆盖 FlareSolverr / Byparr / TRAWL，三家都是 POST /v1
 _BYPASS_KIND: dict[str, bool] = {}
+_PINNED_BYPASS_PROXY = ContextVar('pinned_bypass_proxy', default=None)
+
+
+@contextmanager
+def same_bypass_exit(proxy):
+    """Reuse a known internal exit for a cookie confirmation, in this thread only."""
+    from app.services.mihomo import get_manager
+    manager = get_manager()
+    pinned = None
+    if proxy and manager._proxy_index(proxy) is not None:
+        parsed = urlparse(proxy)
+        # The solver runs in a sibling container; loopback there is not cinefold.
+        pinned = parsed._replace(netloc=f"{parsed.netloc.rsplit('@', 1)[0]}@{manager.config['trawl_host']}:{parsed.port}").geturl()
+    token = _PINNED_BYPASS_PROXY.set(pinned)
+    try:
+        yield
+    finally:
+        _PINNED_BYPASS_PROXY.reset(token)
 
 # 解 Cloudflare 挑战要跑一个真实浏览器，给足时间（毫秒）
 BYPASS_SOLVE_TIMEOUT_MS = 90000
@@ -323,7 +342,7 @@ class SiteClient:
                     _note_proxy_result(url, request_proxy, True)
                     return self._remember(FetchedPage(response.text, str(response.url), cookies=[
                         {'name':cookie.name,'value':cookie.value,'domain':cookie.domain} for cookie in getattr(getattr(response,'cookies',None),'jar',[])],
-                        proxy=request_proxy), str(response.url))
+                        user_agent=headers.get('User-Agent', ''), proxy=request_proxy), str(response.url))
             except httpx.HTTPStatusError as exc:
                 status = exc.response.status_code
                 if status == 429:
@@ -398,7 +417,9 @@ class SiteClient:
                         response = client.get(url, headers=headers, params=params)
                     response.raise_for_status()
                     _note_proxy_result(url, request_proxy, True)
-                    return self._remember(response.text, str(response.url))
+                    return self._remember(FetchedPage(response.text, str(response.url), cookies=[
+                        {'name':cookie.name,'value':cookie.value,'domain':cookie.domain} for cookie in getattr(getattr(response,'cookies',None),'jar',[])],
+                        user_agent=headers.get('User-Agent', ''), proxy=request_proxy), str(response.url))
                 except FetchCancelled:
                     return ""
                 except httpx.HTTPStatusError as exc:
@@ -531,11 +552,15 @@ def _solver_request(client, endpoint, body, quick=False):
     manager = get_manager()
     automatic = manager.config["enabled"] and manager.config["automatic"]
     attempts = max(1, min(3, len(manager.nodes), max(1, body["maxTimeout"] // BYPASS_NODE_WINDOW_MS))) if automatic else 1
+    pinned = _PINNED_BYPASS_PROXY.get()
+    if pinned:
+        attempts = 1
     deadline = time.perf_counter() + body["maxTimeout"] / 1000
     for attempt in range(max(1, attempts)):
         # Re-enter the FIFO queue for each exit attempt, so a slow site's
         # complete retry chain cannot monopolize a browser slot.
-        with manager.lease(remote=True, url=body["url"], timeout=min(20, max(0, deadline-time.perf_counter()))) as proxy, _bypass_slot(endpoint, quick):
+        lease = nullcontext(pinned) if pinned else manager.lease(remote=True, url=body["url"], timeout=min(20, max(0, deadline-time.perf_counter())))
+        with lease as proxy, _bypass_slot(endpoint, quick):
             node_name = manager.proxy_name(proxy)
             request = dict(body)
             if proxy:

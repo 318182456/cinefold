@@ -309,6 +309,7 @@ class Settings:
     resource_catalog_enabled: bool = True
     resource_crawl_time: str = ''
     resource_metadata_time: str = ''
+    resource_avbase_date: str = ''
     resource_crawl_pages: int = 2
     resource_crawl_limit: int = 50
     resource_sht_sections: str = '37,103,104'
@@ -657,6 +658,7 @@ def load_settings() -> Settings:
         resource_catalog_enabled=_env_bool('RESOURCE_CATALOG_ENABLED', True),
         resource_crawl_time=_env('RESOURCE_CRAWL_TIME', ''),
         resource_metadata_time=_env('RESOURCE_METADATA_TIME', ''),
+        resource_avbase_date=_env('RESOURCE_AVBASE_DATE', ''),
         resource_crawl_pages=max(1, min(100, _env_int('RESOURCE_CRAWL_PAGES', 2))),
         resource_crawl_limit=max(1, min(1000, _env_int('RESOURCE_CRAWL_LIMIT', 50))),
         resource_sht_sections=_env('RESOURCE_SHT_SECTIONS', '37,103,104'),

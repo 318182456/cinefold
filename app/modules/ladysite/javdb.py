@@ -1,6 +1,6 @@
 """JavDB 抓取。
 
-只走直连解析公开页面。原项目的 bypass 与第三方 API 通道不在此实现。
+默认解析公开页面并复用共享过盾；数据源设置可显式启用旧项目的签名 API 作为备用通道。
 部分页面需要登录才能看到完整信息，可通过 JAVDB_COOKIE 提供会话。
 """
 from __future__ import annotations
@@ -85,6 +85,13 @@ class Avdb:
     # ------------------------------------------------------------------
     def crawler_original(self, code: str) -> CodeInfo | None:
         """按番号搜索并抓取详情。"""
+        from app.modules.ladysite.javdbapi import JavdbAPI
+        api=JavdbAPI()
+        if api.enabled:
+            try:
+                info=api.detail(code)
+                if info:return info
+            except Exception as exc:logger.debug(f'JavDB 备用 API 失败: {type(exc).__name__}')
         detail_url = self._search_detail_url(code)
         if not detail_url:
             return None
@@ -104,22 +111,32 @@ class Avdb:
         return html_to_code(html, code)
 
     # ------------------------------------------------------------------
-    def crawler_rank_original(self, rank_type: str = "daily", page: int = 1) -> list[str]:
+    def crawler_rank_original(self, rank_type: str = "daily", page: int = 1, section: str = 'censored') -> list[str]:
         """抓取排行榜，返回番号列表。"""
         period = RANK_TYPES.get((rank_type or "").lower(), "daily")
+        if section not in ('censored','uncensored','fc2'):raise ValueError('未知榜单分类')
         html = self.client.get(
-            "/rankings/movies", params={"t": "censored", "p": period, "page": page}
+            "/rankings/movies", params={"t": section, "p": period, "page": page}
         )
         return html_to_rank(html) if html else []
 
-    def crawling_top(self, rank_type: str = "daily", pages: int = 1) -> list[str]:
+    def crawling_top(self, rank_type: str = "daily", pages: int = 1, section: str = 'censored') -> list[str]:
         """抓取多页排行榜。"""
+        from app.modules.ladysite.javdbapi import JavdbAPI
+        api=JavdbAPI()
+        if api.enabled:
+            try:
+                rows=api.rank(RANK_TYPES.get(rank_type,'daily'),section)
+                if rows:return [row.code for row in rows if row and (section!='fc2' or row.code.startswith('FC2'))]
+            except Exception as exc:logger.debug(f'JavDB 备用榜单 API 失败: {type(exc).__name__}')
         codes: list[str] = []
         for page in range(1, max(pages, 1) + 1):
-            batch = self.crawler_rank_original(rank_type, page)
+            batch = self.crawler_rank_original(rank_type, page, **({'section':section} if section!='censored' else {}))
             if not batch:
                 break
             codes.extend(batch)
+        if section=='fc2' and any(not code.startswith('FC2') for code in codes):
+            raise ValueError('网页未返回 FC2 榜单，请在 JavDB 数据源启用备用 API')
         return codes
 
     # ------------------------------------------------------------------

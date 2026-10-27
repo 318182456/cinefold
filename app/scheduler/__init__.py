@@ -480,7 +480,13 @@ def crawl_resource_metadata():
     return run()
 
 
+def crawl_avbase_date():
+    from app.services.resourcefeeds import crawl_date
+    return crawl_date()
+
+
 JOBS: dict[str, dict] = {
+    'crawl_avbase_date': {'func':crawl_avbase_date,'name':'按日期抓取 Avbase 新片','cron_key':''},
     'crawl_resources': {'func':crawl_resources,'name':'抓取论坛资源','cron_key':'resource_crawl_time'},
     'crawl_resource_metadata': {'func':crawl_resource_metadata,'name':'抓取影片与演员情报','cron_key':'resource_metadata_time'},
     "run_codes_task": {"func": run_codes_task, "name": "订阅下载", "cron_key": "download_schedule_time"},
@@ -740,6 +746,12 @@ def list_jobs() -> list[dict]:
                 editable=bool(INTERVAL_JOBS[job.id].get("interval_key")),
             )
         out.append(item)
+    registered={item['id'] for item in out}
+    for job_id,meta in JOBS.items():
+        if job_id in registered:continue
+        cron=getattr(settings,meta['cron_key'],'') if meta['cron_key'] else ''
+        out.append(dict(id=job_id,name=meta['name'],next_run='',trigger='未排班',kind='cron',schedule=cron,
+                        schedule_text=describe_cron(cron),editable=bool(meta['cron_key']),execution=executions.get(job_id,{'phase':'idle','history':[]})))
     out.sort(key=lambda item: item['execution'].get('phase') not in ('queued', 'running'))
     return out
 

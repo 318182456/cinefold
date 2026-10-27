@@ -29,12 +29,16 @@ class Library:
 
     def crawling_top20(self, page: int = 1) -> list[str]:
         """最想看排行。"""
-        html = self.client.get("/cn/vl_mostwanted.php", params={"page": page})
+        return self.crawling_rank('mostwanted',page)
+
+    def crawling_rank(self, kind='mostwanted', page=1):
+        if kind not in ('mostwanted','bestrated'):raise ValueError('未知 JavLibrary 榜单')
+        html = self.client.get(f"/cn/vl_{kind}.php", params={"page": page})
         return html_to_rank(html) if html else []
 
     def crawling_top20_actor(self, page: int = 1) -> list[ActorInfo]:
         """最佳女优排行。"""
-        html = self.client.get("/cn/vl_star.php", params={"page": page})
+        html = self.client.get("/cn/star_mostfav.php", params={"page": page})
         return html_to_rank_actor(html) if html else []
 
     def crawler_rank_original(self, page: int = 1) -> list[str]:
@@ -63,10 +67,13 @@ def html_to_rank_actor(html: str) -> list[ActorInfo]:
     try:
         doc = PyQuery(html)
         actors = []
-        for item in doc(".star").items():
-            name = (item("a").text() or "").strip()
-            if name:
-                actors.append(ActorInfo(name=name))
+        seen=set()
+        for item in doc(".star, .starbox .searchitem").items():
+            name = (item('img').attr('title') or item("a").text() or "").strip()
+            if name and name not in seen:
+                seen.add(name)
+                photo=item('img').attr('src') or ''
+                actors.append(ActorInfo(name=name,photo='https:'+photo if photo.startswith('//') else photo))
         return actors
     except Exception as exc:
         logger.debug(f"[javlibrary] 解析女优榜失败: {exc}")

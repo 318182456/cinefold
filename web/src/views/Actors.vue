@@ -183,6 +183,7 @@ async function pollSync() {
     if (!disposed && selectedName.value === name && epoch === syncEpoch) { syncPollError.value = err.message; scheduleSyncPoll() }
   }
 }
+const profileSource = ref('javdb'), singleWorks = ref(false)
 async function refreshProfile() {
   const name = selectedName.value
   if (!name || syncSubmitting.value || sync.value.running || profileLoading.value) return
@@ -190,7 +191,7 @@ async function refreshProfile() {
   stopSyncPolling(); profileRequest += 1
   syncSubmitting.value = true; syncPollError.value = ''
   try {
-    const result = await refreshActorProfile(canonical, 3)
+    const result = await refreshActorProfile(canonical, 3, profileSource.value, profileSource.value === 'avbase' && singleWorks.value)
     if (disposed || selectedName.value !== name || id !== refreshRequest) return
     syncEpoch += 1
     sync.value = result
@@ -281,14 +282,14 @@ onUnmounted(() => { disposed = true; clearTimeout(photoTimer); directoryRequest 
           <button class="h-14 w-14 shrink-0 overflow-hidden rounded-full bg-gray-800" :aria-label="`打开 ${item.display_name || item.name} 的档案`" @click="openProfile(item.name)"><PrivateImage :src="item.photo ? proxyImage(item.photo) : ''" :alt="item.display_name || item.name" fallback-text="暂无照片" img-class="h-full w-full object-cover" /></button>
           <div class="min-w-0 flex-1">
             <button class="max-w-full truncate text-left text-sm font-medium text-gray-200 hover:text-brand" @click="openProfile(item.name)">{{ item.display_name || item.name }}</button>
-            <p class="mt-1 text-[10px] text-gray-600">{{ item.source === 'profile' ? 'JavDB 档案' : item.source === 'casts' ? '影片演员字段' : '已有演员资料' }}</p>
+            <p class="mt-1 text-[10px] text-gray-600">{{ item.source === 'profile' ? '远程档案' : item.source === 'casts' ? '影片演员字段' : '已有演员资料' }}</p>
             <p v-if="item.aliases?.length || item.name_2" class="mt-1 truncate text-[11px] text-gray-500">{{ Array.isArray(item.aliases) && item.aliases.length ? item.aliases.join(' / ') : item.name_2 }}</p>
             <p v-if="item.limit_date && item.subscribed" class="mt-1 text-[11px] text-gray-500">{{ item.limit_date }} 起订阅</p>
             <div class="mt-2 flex flex-wrap gap-3"><button class="text-[11px] text-brand" @click="openProfile(item.name)">查看档案</button><button class="text-[11px] disabled:opacity-40" :class="item.subscribed ? 'text-gray-500' : 'text-brand'" :disabled="isSubscriptionBusy(item.name)" @click="changeSubscription(item.name, !item.subscribed)">{{ item.subscribed ? '取消订阅' : '订阅演员' }}</button></div>
           </div>
         </article>
       </div>
-      <EmptyState v-else :text="directoryError ? '暂时无法读取演员目录' : keyword ? '没有匹配的本地演员' : directoryMode === 'subscribed' ? '还没有订阅演员' : '本地还没有演员资料'" hint="输入完整演员名可直接打开档案，再从 JavDB 更新资料和作品。" />
+      <EmptyState v-else :text="directoryError ? '暂时无法读取演员目录' : keyword ? '没有匹配的本地演员' : directoryMode === 'subscribed' ? '还没有订阅演员' : '本地还没有演员资料'" hint="输入完整演员名可直接打开档案，再选择来源更新资料和作品。" />
       <div v-if="directoryTotal" class="flex items-center justify-end gap-3 text-xs text-gray-500"><span>{{ directoryTotal }} 位演员 · {{ directoryPage }} / {{ directoryPages }} 页</span><button class="btn-ghost !text-xs" :disabled="loading || directoryPage <= 1" @click="turnDirectoryPage(-1)">上一页</button><button class="btn-ghost !text-xs" :disabled="loading || directoryPage >= directoryPages" @click="turnDirectoryPage(1)">下一页</button></div>
       <details class="card space-y-3"><summary class="cursor-pointer text-sm text-gray-400">按姓名添加演员订阅</summary><div class="flex flex-col gap-2 pt-3 sm:flex-row"><input v-model="newName" class="input sm:flex-1" placeholder="演员姓名" aria-label="订阅演员姓名" @keyup.enter="addSubscription" /><input v-model="newDate" type="date" class="input sm:!w-44" aria-label="订阅起始日期，可选" /><button class="btn-primary" :disabled="!newName.trim() || isSubscriptionBusy(newName.trim())" @click="addSubscription">添加订阅</button></div><p class="text-xs text-gray-600">可选起始日期，只追踪该日期之后发行的作品。</p></details>
     </template>
@@ -302,15 +303,16 @@ onUnmounted(() => { disposed = true; clearTimeout(photoTimer); directoryRequest 
             <p v-if="actorAliases.length" class="mt-2 break-all text-xs text-gray-400">别名 · {{ actorAliases.join(' / ') }}</p>
             <dl v-if="fields.length" class="mt-3 flex flex-wrap gap-x-5 gap-y-2 text-xs"><div v-for="field in fields" :key="field.label" class="flex gap-2"><dt class="text-gray-500">{{ field.label }}</dt><dd class="text-gray-300">{{ field.value }}</dd></div></dl>
             <p v-if="actor.description" class="mt-3 whitespace-pre-line break-words text-xs leading-relaxed text-gray-400">{{ actor.description }}</p>
-            <div class="mt-3 flex flex-wrap gap-3 text-[11px] text-gray-500"><span v-if="actor.updated_at">资料更新 {{ String(actor.updated_at).replace('T', ' ') }}</span><a v-if="sourceUrl" :href="sourceUrl" target="_blank" rel="noopener noreferrer" class="text-brand">JavDB 演员来源 ↗</a></div>
+            <div class="mt-3 flex flex-wrap gap-3 text-[11px] text-gray-500"><span v-if="actor.updated_at">资料更新 {{ String(actor.updated_at).replace('T', ' ') }}</span><a v-if="sourceUrl" :href="sourceUrl" target="_blank" rel="noopener noreferrer" class="text-brand">{{ sourceUrl.includes('avbase.net') ? 'Avbase' : 'JavDB' }} 演员来源 ↗</a></div>
           </div>
-          <div class="flex shrink-0 flex-wrap gap-2 sm:flex-col"><button class="btn-primary !text-xs" :disabled="syncSubmitting || sync.running || profileLoading" @click="refreshProfile">{{ syncSubmitting || sync.running ? 'JavDB 更新中…' : '从 JavDB 更新' }}</button><button class="btn-ghost !text-xs" :disabled="profileLoading || isSubscriptionBusy(actorName)" @click="changeSubscription(actorName, !actor.subscribed)">{{ actor.subscribed ? '取消演员追更' : '订阅演员新作' }}</button></div>
+          <div class="flex shrink-0 flex-wrap gap-2 sm:flex-col"><button class="btn-primary !text-xs" :disabled="syncSubmitting || sync.running || profileLoading" @click="refreshProfile">{{ syncSubmitting || sync.running ? '更新中…' : `从 ${profileSource === 'avbase' ? 'Avbase' : 'JavDB'} 更新` }}</button><button class="btn-ghost !text-xs" :disabled="profileLoading || isSubscriptionBusy(actorName)" @click="changeSubscription(actorName, !actor.subscribed)">{{ actor.subscribed ? '取消演员追更' : '订阅演员新作' }}</button></div>
         </div>
-        <p class="text-xs text-gray-500">JavDB 单次最多同步 3 页。下方目录和统计只覆盖本地已保存、已同步的作品，未表示该演员的完整片单。</p>
+        <div class="flex flex-wrap items-center gap-3 text-xs"><label>作品来源 <select v-model="profileSource" class="input w-32" :disabled="sync.running || syncSubmitting"><option value="javdb">JavDB</option><option value="avbase">Avbase</option></select></label><label v-if="profileSource === 'avbase'" class="flex items-center gap-1"><input v-model="singleWorks" type="checkbox" :disabled="sync.running || syncSubmitting" />仅单人作品</label></div>
+        <p class="text-xs text-gray-500">单次最多同步 3 页。下方目录和统计只覆盖本地已保存、已同步的作品，未表示该演员的完整片单。</p>
         <div v-if="sync.running || sync.phase !== 'idle' || sync.error || syncPollError" class="space-y-1 rounded-lg bg-gray-800/50 p-3 text-xs">
           <p :class="sync.error ? 'text-red-400' : 'text-gray-300'">{{ syncPhase }}<span v-if="sync.imported !== undefined"> · 本次导入 {{ sync.imported }} 部</span><span v-if="sync.remote_pages !== undefined"> · 读取 {{ sync.remote_pages }} 页</span></p>
           <p v-if="sync.running" class="text-gray-500">后台同步会继续执行，可以切换演员或离开页面。</p>
-          <p v-if="sync.error" class="break-all text-red-400">JavDB 更新失败：{{ sync.error }}。已保存的本地档案和作品仍可查看。</p>
+          <p v-if="sync.error" class="break-all text-red-400">资料更新失败：{{ sync.error }}。已保存的本地档案和作品仍可查看。</p>
           <p v-if="syncPollError" class="break-all text-amber-400">暂时无法读取同步进度：{{ syncPollError }}；正在重试。</p>
           <p v-if="sync.truncated || sync.has_more" class="text-amber-400">本次只同步了部分页面，仍可能有尚未导入的作品。</p>
         </div>
@@ -320,12 +322,12 @@ onUnmounted(() => { disposed = true; clearTimeout(photoTimer); directoryRequest 
       <div class="mobile-stat-grid grid grid-cols-2 gap-3 sm:grid-cols-5"><button v-for="filter in workFilters" :key="filter.key" class="rounded-xl border p-3 text-left transition hover:bg-gray-800/50" :class="worksFilter === filter.key ? 'border-brand/50 bg-brand/5' : 'border-gray-800 bg-gray-900/40'" :aria-pressed="worksFilter === filter.key" @click="filterWorks(filter.key)"><p class="text-xs text-gray-500">{{ filter.label }}</p><p class="mt-2 text-xl font-medium tabular-nums text-gray-200">{{ filter.count }}</p></button></div>
       <MobileSection title="演员批量订阅" class="sm:card">
         <div class="flex flex-wrap items-center justify-between gap-3"><h2 class="text-sm font-medium text-gray-300">订阅该演员已收录的未入库影片</h2><button class="btn-primary !text-xs" :disabled="batchBusy || profileLoading || sync.running || syncSubmitting" @click="subscribeWorks">{{ batchBusy ? '正在添加影片订阅…' : '一键订阅未入库影片' }}</button></div>
-        <p class="text-xs text-gray-500">仅处理当前已收录作品，新资料可先从 JavDB 更新。已入库、下载中、已订阅或用户排除的影片会跳过；本次不直接推送下载。未来新作追更使用上方“订阅演员新作”。</p>
+        <p class="text-xs text-gray-500">仅处理当前已收录作品，新资料可先选择来源更新。已入库、下载中、已订阅或用户排除的影片会跳过；本次不直接推送下载。未来新作追更使用上方“订阅演员新作”。</p>
         <p v-if="batchResult" class="text-xs text-gray-400">本次匹配 {{ batchResult.matched || 0 }} 部，新增订阅 {{ batchResult.subscribed || 0 }} 部；已订阅 {{ batchResult.already_subscribed || 0 }}、已入库 {{ batchResult.owned || 0 }}、下载中 {{ batchResult.downloading || 0 }}、已排除 {{ batchResult.excluded || 0 }} 部已跳过。</p>
       </MobileSection>
       <section id="actor-work-results" class="scroll-mt-4 space-y-3">
         <div class="flex flex-wrap items-center justify-between gap-2"><h2 class="text-sm font-medium text-gray-300">{{ workFilters.find(item => item.key === worksFilter)?.label }}<span v-if="!profileLoading" class="ml-2 text-xs text-gray-500">{{ worksTotal }} 部</span></h2><span class="text-xs text-gray-500">收藏和已观看状态来自本地已记录的数据</span></div>
-        <LoadingBlock v-if="profileLoading" :rows="3" /><div v-else-if="works.length" class="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3"><CodeCard v-for="item in works" :key="item.code" :item="item" @changed="loadProfile" /></div><EmptyState v-else :text="profileError ? '作品暂时无法读取' : '当前筛选下没有已保存作品'" hint="可切换筛选，或从 JavDB 更新演员资料与作品。" />
+        <LoadingBlock v-if="profileLoading" :rows="3" /><div v-else-if="works.length" class="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3"><CodeCard v-for="item in works" :key="item.code" :item="item" @changed="loadProfile" /></div><EmptyState v-else :text="profileError ? '作品暂时无法读取' : '当前筛选下没有已保存作品'" hint="可切换筛选，或选择来源更新演员资料与作品。" />
         <div v-if="worksTotal" class="flex items-center justify-end gap-3 text-xs text-gray-500"><span>{{ worksPage }} / {{ worksPages }} 页 · {{ worksTotal }} 部</span><button class="btn-ghost !text-xs" :disabled="profileLoading || worksPage <= 1" @click="turnWorksPage(-1)">上一页</button><button class="btn-ghost !text-xs" :disabled="profileLoading || worksPage >= worksPages" @click="turnWorksPage(1)">下一页</button></div>
       </section>
     </template>

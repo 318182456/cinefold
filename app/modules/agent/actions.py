@@ -20,6 +20,8 @@ PROPOSAL_TTL = 300
 
 # 动作 → (人话, 是否不可逆)
 ACTIONS = {
+    'run_task': ('提交后台任务', False),
+    'download_resource': ('下载本地资源', False),
     "subscribe_codes": ("订阅番号", False),
     "cancel_codes": ("取消番号订阅", False),
     "subscribe_actor": ("订阅演员", False),
@@ -175,6 +177,30 @@ def execute(proposal_id: str, delete_files: bool | None = None) -> dict:
         return {"ok": False, "message": "操作已过期或已执行，请重新提问"}
 
     action = record["action"]
+    if action=='run_task':
+        from app.scheduler import push_job
+        affected=0
+        for target in record['targets']:
+            if target['job_id']=='crawl_avbase_date' and target.get('day'):
+                from functools import partial
+                from app.services.resourcefeeds import crawl_date
+                from app.services.taskruns import submit
+                submit(target['job_id'],partial(crawl_date,target['day']));affected+=1
+            else:affected+=bool(push_job(target['job_id']))
+        return {'ok':bool(affected),'affected':affected,'message':f'已提交 {affected} 个后台任务，请在任务页查看进度'}
+    if action=='download_resource':
+        from app.database.models import ResourcePost
+        from app.database.session import session_scope
+        from app.schemas.torrent import Torrent
+        from app import services
+        affected=0
+        for target in record['targets']:
+            with session_scope() as session:
+                row=session.get(ResourcePost,target['key'])
+                if row is None or row.code!=target['code'] or target['url'] not in row.magnets:continue
+                torrent=Torrent(site='BT',code=row.code,title=row.title,download_url=target['url'])
+            affected+=bool(services.download_torrent(target['code'],torrent,downloader=record.get('client') or 'qbittorrent'))
+        return {'ok':bool(affected),'affected':affected,'message':f'已推送 {affected} 个资源；未推送的请检查下载器或重复下载记录'}
     if action in ("subscribe_codes", "cancel_codes", "subscribe_actor", "cancel_actor"):
         from app import services
         affected = 0

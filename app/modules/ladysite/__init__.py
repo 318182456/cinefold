@@ -413,8 +413,21 @@ def _fetch_actor_identity(site_name: str, name: str) -> dict:
 def get_rank_codes(rank_type: str = "", pages: int = 1) -> list[str]:
     """排行榜番号列表。"""
     from app.modules.ladysite.javdb import Avdb
+    from app.modules.ladysite.ranks import spec
+    from app.modules.ladysite.sources import get_source
+    selected=spec(rank_type)
+    source=get_source(selected['source'])
+    if source and not source.get('enabled'):return []
     try:
-        return Avdb().crawling_top(rank_type, max(pages, 1))
+        if selected['source']=='javlibrary':
+            from app.modules.ladysite.library import Library
+            provider=Library();codes=[]
+            for page in range(1,max(1,min(pages,10))+1):
+                batch=provider.crawling_rank(selected['rank'],page)
+                if not batch:break
+                codes.extend(batch)
+            return list(dict.fromkeys(codes))
+        return Avdb().crawling_top(selected['period'], max(pages, 1), **({'section':selected['section']} if selected['section']!='censored' else {}))
     except Exception as exc:
         logger.warning(f"抓取排行榜失败: {exc}")
         return []

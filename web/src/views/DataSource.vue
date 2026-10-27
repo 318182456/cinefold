@@ -270,6 +270,7 @@ function open(item) {
   clearCookie.value = false
   clearProxy.value = false
   draft.value = {
+    javdb_api_enabled: !!item.options?.api_enabled, javdb_api_host: item.options?.api_host || 'https://api.btyjscl.com',
     host: item.host,
     interval: item.interval,
     priority: item.priority,
@@ -286,6 +287,8 @@ async function save() {
   if (!editingItem.value?.builtin) {
     try { payload.options = JSON.parse(payload.options_text || '{}') } catch { toast.error('解析规则需要合法 JSON'); return }
   } else { delete payload.parser }
+  if (key === 'javdb') payload.options = { ...(editingItem.value?.options || {}), api_enabled: !!payload.javdb_api_enabled, api_host: payload.javdb_api_host }
+  delete payload.javdb_api_enabled; delete payload.javdb_api_host
   delete payload.options_text
   if (clearProxy.value) payload.proxy = null
   else if (!payload.proxy) delete payload.proxy
@@ -567,13 +570,14 @@ onMounted(load)
       class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
       @click.self="editing = null"
     >
-      <div class="card w-full max-w-md space-y-3">
+      <div class="card max-h-[calc(100dvh-2rem)] w-full max-w-md space-y-3 overflow-y-auto">
         <p class="text-sm font-medium text-gray-200">{{ editing }} 设置</p>
         <template v-if="!editingItem?.builtin">
           <label class="label">解析方式</label>
           <select v-model="draft.parser" class="input"><option value="">仅检查连通性</option><option value="http_json">JSON 接口</option><option value="http_html">网页 CSS 规则</option></select>
           <textarea v-if="draft.parser" v-model="draft.options_text" class="input font-mono text-xs" rows="7" aria-label="自定义解析规则" />
         </template>
+        <template v-if="editing === 'javdb'"><label class="flex items-center gap-2 text-xs"><input v-model="draft.javdb_api_enabled" type="checkbox" />启用备用 API（含无码、FC2 榜单及影片详情）</label><input v-if="draft.javdb_api_enabled" v-model="draft.javdb_api_host" class="input" aria-label="JavDB 备用 API 地址" /></template>
         <label class="label">独立代理（留空不修改）</label>
         <input v-model="draft.proxy" class="input" type="password" autocomplete="new-password" placeholder="http://proxy:port" />
         <label v-if="editingItem?.has_proxy" class="flex items-center gap-2 text-xs text-gray-400"><input v-model="clearProxy" type="checkbox" />清除独立代理，使用全局代理</label>
@@ -666,7 +670,7 @@ onMounted(load)
       class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
       @click.self="creating = false"
     >
-      <div class="card w-full max-w-md space-y-3">
+      <div class="card max-h-[calc(100dvh-2rem)] w-full max-w-md space-y-3 overflow-y-auto">
         <p class="text-sm font-medium text-gray-200">添加数据源</p>
         <p class="text-[11px] text-gray-600">
           可接入 JSON 接口或按 CSS 规则抓取网页，返回番号必须与目标一致。

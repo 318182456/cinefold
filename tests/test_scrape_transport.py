@@ -236,6 +236,44 @@ def test_bypass_preserves_final_url_cookie_without_sending_proxy(mock_http, monk
     assert all("proxy" not in option for option in options)
 
 
+def test_age_confirmation_reuses_internal_exit_and_restores_rotation(monkeypatch):
+    from contextlib import contextmanager
+    from app.modules.resourcecrawler import ForumCrawler
+    from app.services import mihomo
+    requests=[]
+    class Manager:
+        config={'enabled':True,'automatic':True,'trawl_host':'cinefold'}
+        nodes=[{},{}]
+        leases=0
+        @contextmanager
+        def lease(self,**kwargs):
+            self.leases+=1
+            yield f'http://node{self.leases}:secret@cinefold:17890'
+        def _proxy_index(self,proxy):return 0 if proxy.startswith('http://node') else None
+        def proxy_name(self,proxy):return 'test-node'
+        def note_result(self,*args):pass
+    manager=Manager()
+    monkeypatch.setattr(mihomo,'get_manager',lambda:manager)
+    monkeypatch.setattr(base,'get_settings',lambda:SimpleNamespace(proxy='',bypass_url='http://solver/v1'))
+    real_client=httpx.Client
+    def handler(request):
+        body=json.loads(request.content);requests.append(body)
+        if len(requests)==1:
+            html="<title>SEHUATANG.ORG</title><script>var safeid='safe-token';</script><body>满18岁请进入</body>"
+        else:
+            html='<table id="threadlisttableid"><tbody id="normalthread_9"></tbody></table>'
+        return httpx.Response(200,json={'status':'ok','solution':{'response':html,'url':body['url'],'status':200}})
+    monkeypatch.setattr(base,'http_client',lambda **kwargs:real_client(transport=httpx.MockTransport(handler)))
+    client=base.SiteClient('https://forum.test',interval=0,bypass_first=True)
+    monkeypatch.setattr(base.SiteClient,'from_source',lambda key:client)
+    assert ForumCrawler('sehuatang').listing('103',1)==[9]
+    assert requests[0]['proxy']==requests[1]['proxy']
+    assert {'name':'_safe','value':'safe-token'} in requests[1]['cookies']
+    assert manager.leases==1 and client.proxy is None
+    base.fetch_via_bypass('https://other.test/')
+    assert manager.leases==2 and requests[2]['proxy']!=requests[1]['proxy']
+
+
 @pytest.mark.parametrize("budgeted", [False, True])
 @pytest.mark.parametrize("tls_reason", ["SSLV3_ALERT_HANDSHAKE_FAILURE", "TLSV1_UNRECOGNIZED_NAME", "UNEXPECTED_EOF_WHILE_READING"])
 @pytest.mark.parametrize("mode", ["bypass", "disabled", "unconfigured"])

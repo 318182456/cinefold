@@ -493,6 +493,9 @@ def parse_schedule(text: str, allow_ai: bool = True) -> tuple[str, str] | None:
     if not text or not text.strip():
         return None
 
+    if _clean(text) in ('关闭自动抓取', '关闭自动执行', '关闭', '停用', '不自动执行', '不自动抓取', '未排班'):
+        return '', '规则'
+
     cron = _rule_parse(text)
     if cron:
         return cron, "规则"
@@ -535,7 +538,7 @@ def parse_interval(text: str) -> int | None:
     # 说法没命中就借道 cron 那套：「每半小时」这类能翻成 */30 的，
     # 换算回分钟数照样能用
     parsed = parse_schedule(text)
-    if not parsed:
+    if not parsed or not parsed[0]:
         return None
     minute, hour = parsed[0].split()[:2]
     if minute.startswith("*/") and hour == "*":

@@ -4,7 +4,7 @@ const { setTimeout, clearTimeout, setInterval, clearInterval } = useVisibleTimer
 import PagePanel from '@/components/PagePanel.vue'
 import { computed, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { getRank, getRankSubscription, refreshRank, subscribeRank, subscribeCode } from '@/api'
+import { getRankOptions, getRank, getRankSubscription, refreshRank, subscribeRank, subscribeCode } from '@/api'
 import { useToast } from '@/composables/useToast'
 import { useCodeSelection } from '@/composables/useCodeSelection'
 import CodeCard from '@/components/CodeCard.vue'
@@ -16,7 +16,7 @@ const toast = useToast()
 const items = ref([])
 const loading = ref(false)
 const route = useRoute(), router = useRouter()
-const rankType = computed({ get: () => ['daily','weekly','monthly'].includes(route.query.rank_type) ? route.query.rank_type : 'daily', set: value => router.replace({ query: { ...route.query, rank_type: value === 'daily' ? undefined : value } }) })
+const rankType = computed({ get: () => typeof route.query.rank_type === 'string' ? route.query.rank_type : 'daily', set: value => router.replace({ query: { ...route.query, rank_type: value === 'daily' ? undefined : value } }) })
 const page = ref(1)
 const size = 12
 const subscription = ref({running:false,phase:'idle'}), subscribing = ref(false), subscriptionError = ref('')
@@ -24,11 +24,12 @@ const rankInfo = ref({refreshing:false,phase:'idle'}), rankError = ref(''), refr
 let rankTimer
 let timer, disposed = false, request = 0, pollRequest = 0
 
-const TYPES = [
+const TYPES = ref([
   { value: 'daily', label: '日榜' },
   { value: 'weekly', label: '周榜' },
   { value: 'monthly', label: '月榜' },
-]
+])
+getRankOptions().then(data => { if (!disposed) TYPES.value = data.items }).catch(error => { if (!disposed) rankError.value=error.message })
 
 // 榜单是一次抓取整批后缓存的，接口没有 offset/total，所以在前端切页
 const pages = computed(() => Math.max(Math.ceil(items.value.length / size), 1))
@@ -123,20 +124,13 @@ onUnmounted(() => { disposed=true; request++; pollRequest++; clearTimeout(timer)
     <template #header>
 
     <div class="flex flex-wrap items-center gap-2">
-      <button
-        v-for="type in TYPES"
-        :key="type.value"
-        class="btn px-3 py-1.5 text-xs"
-        :class="rankType === type.value ? 'bg-brand text-white' : 'btn-ghost'"
-        @click="rankType = type.value"
-      >
-        {{ type.label }}
-      </button>
+      <select v-model="rankType" class="input w-full sm:w-64" aria-label="选择榜单"><option v-for="type in TYPES" :key="type.value" :value="type.value">{{ type.label }}</option></select>
       <button class="btn-ghost ml-auto px-3 py-1.5 text-xs" :disabled="loading || refreshingRank || rankInfo.refreshing" @click="refreshList">{{ refreshingRank || rankInfo.refreshing ? '正在刷新榜单…' : '刷新榜单' }}</button>
       <button class="btn-ghost px-3 py-1.5 text-xs" :disabled="loading || !items.length || subscribing || subscription.running || !!subscriptionError" @click="subscribeAll">
         {{ subscribing || subscription.running ? '正在订阅…' : '一键订阅当前榜单' }}
       </button>
     </div>
+    <p v-if="TYPES.find(item => item.value === rankType)?.requires_api" class="text-xs text-gray-500">FC2 榜单可在 <RouterLink class="text-brand" :to="{name:'DataSource'}">JavDB 数据源设置</RouterLink> 中启用备用 API。网页未返回 FC2 结果时会报告失败，不会混用其他分类榜单。</p>
     </template>
 
 

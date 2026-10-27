@@ -248,7 +248,8 @@ def _import(name, payload):
     return imported
 
 
-def refresh(name, max_pages=3):
+def refresh(name, max_pages=3, *, source='javdb', single=False):
+    if source not in ('javdb','avbase'):raise ValueError('未知演员资料来源')
     name = _name(name)
     if not valid_name(name):
         raise ValueError('请填写有效演员姓名（最多128字）')
@@ -265,7 +266,7 @@ def refresh(name, max_pages=3):
             if not _JOBS[old].get('running'):
                 _JOBS.pop(old)
         _JOBS[key] = {'running': True, 'phase': 'queued', 'error': '', 'imported': 0, 'remote_pages': 0,
-                      'truncated': False, 'max_pages': max_pages}
+                      'truncated': False, 'max_pages': max_pages, 'source':source, 'single':single}
     def work():
         budget = FetchBudget(time.perf_counter() + 45)
         try:
@@ -279,7 +280,13 @@ def refresh(name, max_pages=3):
                     budget.check()
                     with _LOCK:
                         _JOBS[key].update(phase='fetching')
-                    payload = _fetch(lookup, page, actor_url)
+                    if source=='avbase':
+                        from app.modules.ladysite.avbase import Avbase
+                        from app.modules.ladysite.sources import get_source
+                        if not (get_source('avbase') or {}).get('enabled'):raise ValueError('Avbase 数据源未启用')
+                        payload=Avbase().actor_works(lookup,page,single)
+                    else:
+                        payload = _fetch(lookup, page, actor_url if 'avbase.net' not in actor_url else '')
                     budget.check()
                     imported = _import(name, payload)
                     actor_url = payload.get('source_url') or actor_url

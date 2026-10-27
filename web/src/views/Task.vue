@@ -8,22 +8,28 @@ import http from '@/api'
 import { useToast } from '@/composables/useToast'
 import EmptyState from '@/components/EmptyState.vue'
 import LoadingBlock from '@/components/LoadingBlock.vue'
+import ResourceCrawlerSettings from '@/components/ResourceCrawlerSettings.vue'
+import ResourceCrawlerJobs from '@/components/ResourceCrawlerJobs.vue'
+import { useRoute } from 'vue-router'
 
 const toast = useToast()
+const route = useRoute()
+const crawlerSettingsOpen = ref(route.query.section === 'resources')
 const jobs = ref([])
+const crawlerRunning = ref(false), crawlerSources = ref([]), crawlerSettingsVersion = ref(0)
 const loading = ref(false)
 const running = ref('')
 const taskStateKnown = ref(false), taskError = ref('')
 let taskRequest = 0
 const taskPhases = { idle: '未执行', queued: '排队中', running: '执行中', finished: '执行结束', failed: '执行失败', interrupted: '上次中断' }
-const activeJob = job => ['queued', 'running'].includes(job.execution?.phase) || (job.id === COLLECTION_JOB && collection.value.running)
+const activeJob = job => ['queued', 'running'].includes(job.execution?.phase) || (job.id === COLLECTION_JOB && collection.value.running) || (job.id === 'crawl_resources' && crawlerRunning.value)
 const timeText = value => value ? new Date(value * 1000).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' }) : '—'
 const durationText = execution => {
   const value = execution?.duration ?? (execution?.started_at ? (Date.now()/1000 - execution.started_at) : null)
   return value == null ? '—' : `${Math.max(0, value).toFixed(1)} 秒`
 }
 const taskSummary = computed(() => ({
-  running: jobs.value.filter(job => job.execution?.phase === 'running' || (job.id === COLLECTION_JOB && collection.value.running)).length,
+  running: jobs.value.filter(job => job.execution?.phase === 'running' || (job.id === COLLECTION_JOB && collection.value.running) || (job.id === 'crawl_resources' && crawlerRunning.value)).length,
   queued: jobs.value.filter(job => job.execution?.phase === 'queued').length,
   failed: jobs.value.filter(job => ['failed', 'interrupted'].includes(job.execution?.phase)).length,
 }))
@@ -83,6 +89,7 @@ const DESCRIPTIONS = {
   warm_page_cache: '提前抓好推荐/榜单/厂牌页，打开即命中缓存',
   fill_subtitles: '给媒体库里没字幕的影片补抓',
   fill_reviews: '给媒体库里没影评的影片补生成 AI 影评',
+  crawl_avbase_date: '按抓取设置中的日期补充影片与演员资料，留空取今天，不自动订阅',
   crawl_resources: '抓取已启用的论坛资源，支持暂停继续与失败冷却',
   crawl_resource_metadata: '抓取 Avbase 新片、JavDB 和 JavLibrary 榜单及演员资料',
   pt_wait: '同步下载器任务状态',
@@ -220,12 +227,18 @@ onUnmounted(() => {
 
     <div class="flex flex-wrap gap-2">
       <button class="btn-ghost px-3 py-1.5 text-xs" @click="load">刷新</button>
+      <button class="btn-ghost px-3 py-1.5 text-xs" @click="crawlerSettingsOpen = !crawlerSettingsOpen">资源抓取设置</button>
       <button class="btn-ghost px-3 py-1.5 text-xs" :disabled="!taskStateKnown || !!running || jobs.some(job => job.id === 'translate_titles' && activeJob(job))" @click="doTranslate">立即翻译标题</button>
     </div>
     </template>
 
 
     <LoadingBlock v-if="loading && !jobs.length" :rows="4" />
+
+    <details class="card" :open="crawlerSettingsOpen" @toggle="crawlerSettingsOpen = $event.target.open">
+      <summary class="cursor-pointer text-sm font-medium">原生资源爬虫设置</summary>
+      <ResourceCrawlerSettings :jobs="jobs" :sources="crawlerSources" @saved="crawlerSettingsVersion++; load()" />
+    </details>
 
     <p v-if="taskError" class="rounded-lg border border-amber-700/30 p-3 text-xs text-amber-300">状态读取失败：{{ taskError }}。保留上次结果，恢复连接前暂停手动触发。</p>
     <div v-if="jobs.length" class="flex flex-wrap gap-4 text-xs text-gray-400" aria-label="任务状态概览">
@@ -238,7 +251,7 @@ onUnmounted(() => {
           <div class="min-w-0">
             <p class="text-sm font-medium text-gray-200">{{ job.name }}</p>
             <p v-if="job.id !== COLLECTION_JOB" class="mt-1 text-xs" :class="activeJob(job) ? 'text-brand' : ['failed','interrupted'].includes(job.execution?.phase) ? 'text-red-400' : 'text-gray-500'">
-              {{ taskPhases[job.execution?.phase || 'idle'] }}<span v-if="job.execution?.source"> · {{ job.execution.source === 'manual' ? '手动触发' : '定时触发' }}</span>
+              {{ job.id === 'crawl_resources' && crawlerRunning ? '抓取中' : taskPhases[job.execution?.phase || 'idle'] }}<span v-if="job.execution?.source"> · {{ job.execution.source === 'manual' ? '手动触发' : '定时触发' }}</span>
             </p>
             <p class="mt-0.5 text-xs text-gray-500">
               {{ DESCRIPTIONS[job.id] || job.id }}
@@ -270,16 +283,18 @@ onUnmounted(() => {
               :disabled="!!running || !taskStateKnown || activeJob(job) || (job.id === COLLECTION_JOB && (!collectionKnown || collection.running))"
               @click="trigger(job.id)"
             >
-              {{ running === job.id ? '触发中…' : job.id === COLLECTION_JOB && collection.running ? '运行中' : activeJob(job) ? taskPhases[job.execution?.phase] : job.id === COLLECTION_JOB && collection.can_resume ? '继续任务 / 重试失败' : '立即执行' }}
+              {{ job.id === 'crawl_resources' && crawlerRunning ? '抓取中' : running === job.id ? '触发中…' : job.id === COLLECTION_JOB && collection.running ? '运行中' : activeJob(job) ? taskPhases[job.execution?.phase] : job.id === COLLECTION_JOB && collection.can_resume ? '继续任务 / 重试失败' : '立即执行' }}
             </button>
           </div>
         </div>
+
+        <ResourceCrawlerJobs v-if="job.id === 'crawl_resources'" :settings-version="crawlerSettingsVersion" @running="crawlerRunning = $event" @sources="crawlerSources = $event" />
 
         <div v-if="job.id !== COLLECTION_JOB && job.execution?.phase !== 'idle' && job.execution?.phase" class="mt-3 space-y-2 border-t border-gray-800 pt-3 text-xs text-gray-500">
           <p>提交 {{ timeText(job.execution.queued_at) }} · 开始 {{ timeText(job.execution.started_at) }} · 耗时 {{ durationText(job.execution) }}<span v-if="job.execution.processed != null"> · 返回数量 {{ job.execution.processed }}</span></p>
           <p v-if="job.execution.error" class="break-all text-red-400">{{ job.execution.error }}</p>
           <p v-if="job.execution.progress" class="break-all">{{job.execution.progress.message}} · 已处理 {{job.execution.progress.processed}}</p>
-          <RouterLink v-if="job.id === 'crawl_resources'" class="inline-block text-brand" :to="{name:'Resources'}">查看各爬虫进度与资源</RouterLink>
+          <RouterLink v-if="job.id === 'crawl_resources'" class="inline-block text-brand" :to="{name:'Resources'}">查看已抓取资源</RouterLink>
           <p v-if="job.execution.process_memory_after?.rss != null">进程 RSS：执行前 {{ ((job.execution.process_memory_before?.rss || 0) / 1048576).toFixed(1) }} → 执行后 {{ (job.execution.process_memory_after.rss / 1048576).toFixed(1) }} MiB（包含同时运行的其他任务）</p>
           <p v-if="activeJob(job)" class="text-gray-400">任务在后台执行，可以离开此页，稍后回来查看结果。</p>
           <RouterLink :to="{name:'Logs',query:{keyword:job.id}}" class="text-brand">查看任务日志 ↗</RouterLink>

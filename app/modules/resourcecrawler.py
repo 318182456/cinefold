@@ -9,7 +9,7 @@ from urllib.parse import parse_qs, parse_qsl, urlencode, urljoin, urlparse
 import httpx
 from pyquery import PyQuery
 from app.core.config import get_settings
-from app.modules.ladysite.base import SiteClient
+from app.modules.ladysite.base import SiteClient, same_bypass_exit
 from app.modules.ladysite.transport import FetchBudget
 from app.modules.ptsite import extract_torrent_size
 from app.services.mihomo import proxy_lease
@@ -20,6 +20,25 @@ SOURCES = {
     'x1080x': {'name': 'X1080X', 'sections': {'5212':'国产品牌','5206':'有码 HD','5207':'无码 HD','5208':'FC2',
         '5216':'MGS','5479':'中文字幕','5213':'探花','5217':'主播'}},
 }
+
+
+class ForumPageError(ValueError):
+    def __init__(self, message, retryable=True):
+        super().__init__(message)
+        self.retryable = retryable
+
+
+def _page_error(doc, message):
+    title = doc('title').text()
+    if any(word in title for word in ('網站維護', '网站维护')):
+        return ForumPageError('论坛正在维护，暂不开放，请待站点恢复后继续任务', False)
+    text = doc('body').text()
+    if 'x1080x' in title.lower() and ('請使用下面地址' in text or '请使用下面地址' in text):
+        return ForumPageError('当前地址是论坛导航页，请在数据源中更新实际论坛地址', False)
+    notice = doc('#messagetext, .alert_error').text().strip()
+    if any(word in notice for word in ('登录', '登錄', '权限', '權限')):
+        return ForumPageError('论坛要求登录或权限，请在数据源中检查 Cookie', False)
+    return ForumPageError(message)
 
 
 def magnets(text):
@@ -44,12 +63,12 @@ def parse_list(source, html):
     doc = PyQuery(html)
     if source == 'sehuatang':
         if not doc('#threadlist, #threadlisttableid, tbody[id^="normalthread_"]'):
-            raise ValueError('未取得论坛列表，可能仍是验证页')
+            raise _page_error(doc, '未取得论坛列表，可能仍是验证页')
         ids = [int(node.attr('id').split('_')[-1]) for node in doc('tbody[id^="normalthread_"]').items()
                if node.attr('id').split('_')[-1].isdigit()]
     else:
         if not doc('#content'):
-            raise ValueError('未取得论坛归档列表，可能仍是验证页')
+            raise _page_error(doc, '未取得论坛归档列表，可能仍是验证页')
         ids = []
         for link in doc('#content a[href]').items():
             value = parse_qs(urlparse(link.attr('href')).query).get('tid', [''])[0]
@@ -71,7 +90,7 @@ def parse_detail(source, html, url):
         date = doc('p.author').text()
         category = ''
     if not title or not content:
-        raise ValueError('未取得帖子正文，可能仍是登录或验证页')
+        raise _page_error(doc, '未取得帖子正文，可能仍是登录或验证页')
     text = (content.html() or '')+' '+content.text()
     links = magnets(text)
     ed2k = list(dict.fromkeys(re.findall(r'ed2k://\|file\|[^|]+\|\d+\|[a-f0-9]{32}\|/', unescape(text), re.I)))
@@ -107,12 +126,52 @@ class ForumCrawler:
 
     def _get(self, path, params=None):
         html = self._fetch(path, params)
+        if self.source == 'x1080x':
+            doc = PyQuery(html)
+            if 'x1080x' in doc('title').text().lower() and any(word in doc('body').text() for word in ('請使用下面地址', '请使用下面地址')):
+                # Follow the site's own release-page link and meta refresh.
+                # Keep the database address unchanged; future domain changes
+                # can be picked up from the same release page.
+                origin = urlparse(self.client.host)
+                entry = urljoin(self.client.host+'/', doc('a[href]').eq(0).attr('href') or '')
+                if urlparse(entry).hostname == origin.hostname:
+                    release = PyQuery(self._fetch(entry, None))
+                    refresh = release('meta[http-equiv]').filter(lambda i,node: (node.get('http-equiv') or '').lower() == 'refresh').attr('content') or ''
+                    match = re.search(r'(?i)\burl\s*=\s*["\']?(https?://[^\s"\'<>;]+)', refresh)
+                    if match:
+                        destination = urlparse(match[1])
+                        if destination.hostname and not destination.username and not destination.password:
+                            if destination.hostname != origin.hostname:
+                                self.client.cookie = ''
+                            self.client.host = f'{destination.scheme}://{destination.netloc}'
+                            html = self._fetch(path, params)
         if self.source == 'sehuatang':
             match = re.search(r'''safeid\s*=\s*['"]([a-zA-Z0-9_-]{1,128})['"]''', html)
             if match and not PyQuery(html)('#thread_subject, #threadlist, #threadlisttableid'):
                 self.client.cookie = re.sub(r'(?:^|;)\s*_safe=[^;]*', '', self.client.cookie).strip('; ')+'; _safe='+match[1]
-                html = self._fetch(path, params)
+                previous_proxy = self.client.proxy
+                proxy = getattr(html, 'proxy', None)
+                try:
+                    if proxy:
+                        self.client.proxy = proxy
+                    with same_bypass_exit(proxy):
+                        html = self._fetch(path, params)
+                finally:
+                    self.client.proxy = previous_proxy
         return html
+
+    def _read(self, path, params, parse):
+        # A missing layout may be a transient verification page. Retry once via
+        # the existing solver without renewing the total 90-second deadline.
+        with FetchBudget(time.perf_counter()+90).activate():
+            for attempt in range(2):
+                html = self._get(path, params)
+                try:
+                    return parse(html)
+                except ForumPageError as exc:
+                    if not exc.retryable or attempt:
+                        raise
+                    self.client.bypass_first = True
 
     def _fetch(self, path, params):
         for attempt in range(2):
@@ -148,7 +207,7 @@ class ForumCrawler:
                 path, params = '/forum.php', dict(mod='forumdisplay', fid=95, filter='typeid', typeid=716, page=page)
         else:
             path, params = '/forum.php', dict(mod='forumdisplay', fid=244, archiver=1, page=page, filter='typeid', typeid=section)
-        return parse_list(self.source, self.get(path, params))
+        return self._read(path, params, lambda html: parse_list(self.source, html))
 
     def binary(self, url, referer):
         if urlparse(url).hostname != urlparse(self.client.host).hostname:
@@ -171,8 +230,9 @@ class ForumCrawler:
 
     def detail(self, tid):
         path = f'/thread-{tid}-1-2.html' if self.source == 'sehuatang' else f'/forum.php?mod=viewthread&tid={tid}&archiver=1'
+        html = self.get(path)
         url = urljoin(self.client.host+'/',path)
-        row = parse_detail(self.source, self.get(path), url)
+        row = parse_detail(self.source, html, url)
         if not row['magnets']:
             for attachment in row.pop('attachments'):
                 data = self.binary(attachment,url)

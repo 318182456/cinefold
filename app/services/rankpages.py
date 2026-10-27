@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from sqlalchemy import select
 from app.database.models import Cache
+from app.modules.ladysite.ranks import spec
 from app.database.session import session_scope
 
 _LOCK = threading.RLock()
@@ -81,7 +82,7 @@ def read(kind, *, limit=120, force=False):
     fields = ('title', 'cn_title', 'banner', 'poster', 'local_banner', 'portrait_side', 'casts', 'genres')
     items = [{**item, **{key: known[item['code']][key] for key in fields if known.get(item['code'], {}).get(key)}} for item in items]
     return {**result, 'items': services._listing_with_current_status(items), 'stale': stale,
-            'refreshing': result.get('running', False), 'source': 'javdb', 'rank_type': kind}
+            'refreshing': result.get('running', False), 'source': spec(kind)['source'], 'rank_type': kind}
 
 
 def _refresh(kind):
@@ -93,13 +94,13 @@ def _refresh(kind):
             # 只抓榜单、读取库内详情。缺失元数据交给已有“补全缺图”后台任务。
             items = services.get_rank_items(kind, refresh=True, fetch_limit=0)
         if not items:
-            raise ValueError('未获取到有效榜单，请检查 JavDB、代理或过盾服务；已有榜单保留')
+            raise ValueError('未获取到有效榜单，请检查所选榜单的数据源、代理或过盾服务；已有榜单保留')
         with _LOCK:
             _STATES[kind].update(items=items, fetched_at=time.time(), phase='completed', error='')
             _save(kind)
     except Exception:
         with _LOCK:
-            _STATES[kind].update(phase='failed', error='榜单刷新失败或超时，请检查 JavDB、代理或过盾服务；已有榜单保留')
+            _STATES[kind].update(phase='failed', error='榜单刷新失败或超时，请检查所选榜单的数据源、代理或过盾服务；已有榜单保留')
     finally:
         budget.cancel()
         with _LOCK:

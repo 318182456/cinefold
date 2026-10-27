@@ -121,6 +121,39 @@ def test_raw_cron_passes_through():
     assert _cron("0   4  *  *  *") == "0 4 * * *"
 
 
+@pytest.mark.parametrize('text', ['关闭自动抓取', '关闭自动执行', '停用', '不自动执行', '未排班'])
+def test_disable_cron_is_explicit_and_does_not_disable_interval(text):
+    assert parse_schedule(text, allow_ai=False) == ('', '规则')
+    assert parse_interval(text) is None
+
+
+def test_crawler_schedule_preview_save_disable_and_invalid_input(monkeypatch):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from app.api.endpoints import config, get_current_user
+    from app import scheduler
+    writes, restarts = [], []
+    monkeypatch.setattr(config, 'save_settings', writes.append)
+    monkeypatch.setattr(config, 'get_settings', lambda **kwargs: None)
+    monkeypatch.setattr(scheduler, 'restart_scheduler', lambda: restarts.append(True))
+    monkeypatch.setattr('app.services.schedule._ai_parse', lambda text: None)
+    app = FastAPI(); app.include_router(config.router)
+    app.dependency_overrides[get_current_user] = lambda: 'test'
+    with TestClient(app) as client:
+        body = {'job_id': 'crawl_resources', 'text': '每天凌晨四点'}
+        assert client.post('/cron/preview', json=body).json()['data']['schedule'] == '0 4 * * *'
+        assert writes == []
+        assert client.post('/cron', json=body).json()['code'] == 200
+        assert writes == [{'RESOURCE_CRAWL_TIME': '0 4 * * *'}]
+        body = {'job_id': 'crawl_resource_metadata', 'text': '关闭自动抓取'}
+        assert client.post('/cron/preview', json=body).json()['data']['schedule'] == ''
+        assert client.post('/cron', json=body).json()['code'] == 200
+        assert writes[-1] == {'RESOURCE_METADATA_TIME': ''}
+        assert len(restarts) == 2
+        assert client.post('/cron', json={**body, 'text': '不是执行时间'}).json()['code'] == 400
+        assert len(writes) == 2
+
+
 def test_invalid_input_returns_none():
     """认不出来就得返回 None，绝不能猜一个塞进去。"""
     for text in ["", "   ", "随便什么时候", "每 99 小时", "每天25点", "asdf"]:
