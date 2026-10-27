@@ -192,7 +192,7 @@ def test_large_cached_download_page_does_not_copy_entire_snapshot(managed, monke
     import hashlib
     import json
     import tracemalloc
-    signature = hashlib.sha256(json.dumps([('qbittorrent', 'http://qb'), ('transmission', 'http://tr')]).encode()).hexdigest()
+    signature = downloads._signature(downloads.get_settings(), ['qbittorrent', 'transmission'])
     rows = [{'hash': str(i), 'name': f'video-{i}', 'client': 'transmission', 'group': 'seeding',
              'state': 'seeding', 'added_at': i, 'progress': 1, 'stale': False,
              'details': {'values': list(range(30))}} for i in range(7000)]

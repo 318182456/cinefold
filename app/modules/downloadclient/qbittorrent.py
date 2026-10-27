@@ -359,12 +359,12 @@ class QBitTorrentClient:
             self._on_error(exc, "查询任务状态")
             return []
 
-    def list_downloads(self) -> list[dict]:
+    def list_downloads(self, hashes=None) -> list[dict]:
         """管理页全分类快照。失败抛出，不能把断连显示为零个任务。"""
         if not self._ensure_client():
             raise ValueError('qBittorrent 连接失败，请检查下载器配置')
         try:
-            torrents = self.client.torrents_info()
+            torrents = self.client.torrents_info(**({'torrent_hashes': hashes} if hashes is not None else {}))
             _report_ok()
             return [{
                 'hash': t.hash, 'name': t.name, 'progress': float(t.progress), 'state': str(t.state),

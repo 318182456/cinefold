@@ -57,6 +57,8 @@ def setup_database() -> None:
 def update_database() -> None:
     """字段级迁移。旧版本升级上来时补齐新增列。"""
     migrations = [
+        ('scrape_source_root', 'last_full_scan', 'TIMESTAMP'),
+        ('scrape_source_video', 'fingerprint', 'JSON'),
         ("emby_watch", "favorite", "BOOLEAN NOT NULL DEFAULT FALSE"),
         ("emby_watch", "server", "VARCHAR(64) NOT NULL DEFAULT ''"),
         ("code", "cn_title", "TEXT"),
@@ -126,6 +128,24 @@ def update_database() -> None:
     ]
     for table, column in indexes:
         check_and_create_index(engine, table, column)
+
+    # These support bounded queries on existing databases as well as fresh installs.
+    from sqlalchemy import Index, func
+    from app.database.models import Actor, DownloadRecord, History
+    for table, name, columns, options in (
+        (DownloadRecord.__table__, 'ix_download_record_created_key', (DownloadRecord.create_time.desc(), DownloadRecord.key), {}),
+        (DownloadRecord.__table__, 'ix_download_record_hash_folded', (func.lower(DownloadRecord.hash),), {}),
+        (History.__table__, 'ix_history_created_hash', (History.create_time.desc(), History.hash), {}),
+        (Actor.__table__, 'ix_actor_missing_photo_order', (Actor.subscribed.desc(), Actor.update_time.desc(), Actor.name),
+            {'postgresql_where': (Actor.photo.is_(None)) | (Actor.photo == ''), 'sqlite_where': (Actor.photo.is_(None)) | (Actor.photo == '')}),
+    ):
+        index = next((index for index in table.indexes if index.name == name), None)
+        if index is None:
+            index = Index(name, *columns, **options)
+        try:
+            index.create(engine, checkfirst=True)
+        except Exception as exc:
+            logger.warning(f'可选查询索引 {name} 创建失败: {type(exc).__name__}')
 
     backfill_actor_subscribed()
 

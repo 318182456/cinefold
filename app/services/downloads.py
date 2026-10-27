@@ -10,7 +10,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, literal, union_all, or_, exists
 
 from app.core.config import get_settings
 from app.database.models import Cache, Code, DownloadRecord, History
@@ -45,44 +45,97 @@ def _read(name):
     return client.list_downloads()
 
 
+def _read_incremental(name, previous):
+    client = get_download_client(name)
+    if client is None:
+        raise ValueError('下载器连接不可用')
+    if name not in ('qbittorrent', 'transmission'):
+        return _read(name)
+    # Completed tasks are reconciled by the next full poll, at most 60s later.
+    active = [row['hash'] for row in previous if group(row) in ('downloading', 'checking', 'error')]
+    if not active:
+        return previous
+    fresh = client.list_downloads(hashes=active)
+    wanted = set(active)
+    return [row for row in previous if row['hash'] not in wanted] + fresh
+
+
 def invalidate_live():
     global _LIVE
     with _LIVE_LOCK:
         _LIVE = None
 
 
+def _signature(settings, names):
+    values = [[name, *[getattr(settings, name+'_'+field, '') for field in ('url', 'username', 'password', 'apikey')]] for name in names]
+    return hashlib.sha256(json.dumps(values).encode()).hexdigest()
+
+
+def recent_snapshot(name, client):
+    """Reuse a complete successful observation; partial/stale snapshots never mark removals."""
+    settings = get_settings()
+    from app.services.downloadindex import connection
+    if connection(name, client) != connection(name):
+        return None
+    if not getattr(client, 'url', '') or getattr(client, 'url', '').rstrip('/') != getattr(settings, name+'_url', '').rstrip('/'):
+        return None
+    with _LIVE_LOCK:
+        if _LIVE is None or _LIVE.get('signature') != _signature(settings, list_configured_clients()):
+            return None
+        stamp = _LIVE.get('full_at', {}).get(name, 0)
+        if time.time()-stamp > 8 or any(row['client'] == name for row in _LIVE.get('errors', [])):
+            return None
+        observed = _LIVE.get('full_started', {}).get(name)
+        if observed is None:
+            return None
+        return [dict(row) for row in _LIVE['items'] if row['client'] == name], datetime.fromtimestamp(observed)
+
+
 def live(*, client='', state='', keyword='', code_status=None, page=1, size=30):
     global _LIVE
     settings = get_settings()
     names = list_configured_clients()
-    context = [(name, getattr(settings, name+'_url', '')) for name in names]
-    signature = hashlib.sha256(json.dumps(context).encode()).hexdigest()
+    signature = _signature(settings, names)
     with _LIVE_LOCK:
         if _LIVE is None or _LIVE.get('signature') != signature or time.time()-_LIVE['updated_at'] >= 8:
-            futures = {name: _READERS.submit(_read, name) for name in names}
-            rows, errors, answered = [], [], []
+            compatible = _LIVE is not None and _LIVE.get('signature') == signature
+            full_at = dict(_LIVE.get('full_at', {})) if compatible else {}
+            full_started = dict(_LIVE.get('full_started', {})) if compatible else {}
+            poll_started = time.time()
+            failed = {item['client'] for item in _LIVE.get('errors', [])} if compatible else set()
+            full = {name: not compatible or name in failed or time.time() - full_at.get(name, 0) >= 60 for name in names}
+            futures = {name: (_READERS.submit(_read, name) if full[name] else _READERS.submit(_read_incremental, name,
+                [row for row in _LIVE['items'] if row['client'] == name])) for name in names}
+            rows, errors, answered, remember_rows = [], [], [], []
             for name, future in futures.items():
                 try:
                     values = future.result()
                     answered.append(name)
-                    server = dict(context)[name]
+                    if full[name]:
+                        full_at[name] = time.time()
+                        full_started[name] = poll_started
+                    server = getattr(settings, name+'_url', '')
                     for value in values:
-                        item = {**value, 'client': name, 'stale': False, 'snapshot_at': time.time()}
+                        if not full[name] and value.get('snapshot_at') and not value.get('stale'):
+                            rows.append(value)
+                            continue
+                        item = {**value, 'client': name, 'stale': False, 'snapshot_at': value.get('snapshot_at') or time.time()}
                         item['hash'] = str(item.get('hash') or '').lower()
                         if not item['hash']:
                             continue
                         item['key'] = hashlib.sha256(f'{name}|{server}|{item["hash"]}'.encode()).hexdigest()
                         item['group'] = group(item)
                         rows.append(item)
+                        remember_rows.append(item)
                 except Exception:
                     errors.append({'client': name, 'message': '任务读取失败，请检查下载器连接、凭据或兼容性'})
                     if _LIVE and _LIVE.get('signature') == signature:
                         rows.extend({**row, 'stale': True} for row in _LIVE['items'] if row['client'] == name)
-            _remember([row for row in rows if not row.get('stale')])
-            _LIVE = {'items': rows, 'errors': errors, 'clients': names, 'answered': answered,
+            _remember(remember_rows)
+            _LIVE = {'items': rows, 'errors': errors, 'clients': names, 'answered': answered, 'full_at': full_at, 'full_started': full_started,
                      'updated_at': time.time(), 'signature': signature}
         # 完整快照保持只读；只复制当前页，避免每次筛选都深拷贝几千个任务。
-        result = {key: copy.deepcopy(value) for key, value in _LIVE.items() if key not in ('items', 'signature')}
+        result = {key: copy.deepcopy(value) for key, value in _LIVE.items() if key not in ('items', 'signature', 'full_at', 'full_started')}
         rows = list(_LIVE['items'])
     if client:
         rows = [row for row in rows if row['client'] == client]
@@ -102,6 +155,12 @@ def live(*, client='', state='', keyword='', code_status=None, page=1, size=30):
 
 
 def _remember(rows):
+    # ORM instances, JSON payloads and identity maps are bounded per transaction.
+    for offset in range(0, len(rows), 200):
+        _remember_batch(rows[offset:offset+200])
+
+
+def _remember_batch(rows):
     if not rows:
         return
     now = datetime.now()
@@ -139,30 +198,48 @@ def _remember(rows):
 
 
 def history(*, keyword='', client='', code_status=None, page=1, size=30):
+    page, size = max(1, page), min(200, max(1, size))
     with session_scope() as session:
+        recent = select(DownloadRecord.key.label('key'), DownloadRecord.create_time.label('stamp'),
+                        literal('snapshot').label('kind')).outerjoin(Code, Code.code == DownloadRecord.code)
+        legacy = select(History.hash.label('key'), History.create_time.label('stamp'),
+                        literal('legacy').label('kind')).outerjoin(Code, Code.code == History.code).where(
+            ~exists(select(1).where(func.lower(DownloadRecord.hash) == func.lower(History.hash))))
+        if client:
+            recent = recent.where(DownloadRecord.client == client)
+            legacy = legacy.where(literal(False))
+        if code_status is not None:
+            recent, legacy = recent.where(Code.status == code_status), legacy.where(Code.status == code_status)
+        if keyword:
+            word = keyword.lower().replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
+            def matches(columns):
+                joined = literal('')
+                for col in columns:
+                    joined = joined + func.coalesce(col, '') + literal(' ')
+                return func.lower(joined).like('%'+word+'%', escape='\\')
+            recent = recent.where(matches([DownloadRecord.details[k].as_string() for k in ('name','code','hash','save_path')]))
+            legacy = legacy.where(matches([History.code, History.code, History.hash, History.save_path]))
+        combined = union_all(recent, legacy).subquery()
+        total = session.scalar(select(func.count()).select_from(combined))
+        keys = session.execute(select(combined).order_by(combined.c.stamp.desc(), combined.c.key)
+                               .offset((page-1)*size).limit(size)).all()
+        snapshots = {row.key: (row, status) for row, status in session.execute(select(DownloadRecord, Code.status)
+            .outerjoin(Code, Code.code == DownloadRecord.code).where(DownloadRecord.key.in_([r.key for r in keys if r.kind == 'snapshot'])))}
+        old = {row.hash: (row, status) for row, status in session.execute(select(History, Code.status)
+            .outerjoin(Code, Code.code == History.code).where(History.hash.in_([r.key for r in keys if r.kind == 'legacy'])))}
         rows = []
-        statuses = dict(session.execute(select(Code.code, Code.status)).all())
-        hashes = set()
-        for record in session.scalars(select(DownloadRecord)):
-            rows.append({**record.details, 'code_status': statuses.get(record.code), 'last_seen': record.last_seen.isoformat(), 'recorded_at': record.create_time.isoformat()})
-            hashes.add(record.hash.lower())
-        # Include existing system download history from before this feature was installed.
-        for record, status in session.execute(select(History, Code.status).outerjoin(Code, Code.code == History.code)):
-            if record.hash.lower() in hashes:
+        for key, _, kind in keys:
+            pair = (snapshots if kind == 'snapshot' else old).get(key)
+            if pair is None:
                 continue
-            rows.append({'key': 'legacy:'+record.hash, 'hash': record.hash, 'code': record.code, 'name': record.code,
-                         'client': '', 'site': record.site, 'save_path': record.save_path,
-                         'recorded_at': record.create_time.isoformat(), 'last_seen': '', 'code_status': status,
-                         'state': '历史推送记录', 'group': 'history'})
-    if client:
-        rows = [row for row in rows if row.get('client') == client]
-    if code_status is not None:
-        rows = [row for row in rows if row.get('code_status') == code_status]
-    if keyword:
-        word = keyword.casefold()
-        rows = [row for row in rows if word in ' '.join(str(row.get(k) or '') for k in ('name', 'code', 'hash', 'save_path')).casefold()]
-    rows.sort(key=lambda row: row.get('recorded_at') or '', reverse=True)
-    return {'items': rows[(page-1)*size:page*size], 'total': len(rows), 'page': page, 'size': size}
+            record, status = pair
+            if kind == 'snapshot':
+                rows.append({**record.details, 'code_status': status, 'last_seen': record.last_seen.isoformat(), 'recorded_at': record.create_time.isoformat()})
+            else:
+                rows.append({'key': 'legacy:'+record.hash, 'hash': record.hash, 'code': record.code, 'name': record.code,
+                    'client': '', 'site': record.site, 'save_path': record.save_path, 'recorded_at': record.create_time.isoformat(),
+                    'last_seen': '', 'code_status': status, 'state': '历史推送记录', 'group': 'history'})
+    return {'items': rows, 'total': total, 'page': page, 'size': size}
 
 
 def _save():

@@ -282,11 +282,12 @@ export const proxyImage = (url, code = '', kind = 'banner') => {
 }
 
 // 番号封面。库里存了 local_banner 时优先用它，后端直接读盘不出网。
-export const codeCover = (item) => {
+export const codeCover = (item, thumb = false) => {
   if (!item) return ''
   const local = (item.local_banner || '').split(',')[0]
-  if (local) return `/api/v1/image-local?path=${encodeURIComponent(local)}`
-  return proxyImage(item.banner || item.poster, item.code)
+  if (local) return `/api/v1/image-local?path=${encodeURIComponent(local)}${thumb ? '&thumb=true' : ''}`
+  const url = proxyImage(item.banner || item.poster, item.code)
+  return url && thumb ? `${url}&thumb=true` : url
 }
 
 // ---------------------------------------------------------------- 维护工具

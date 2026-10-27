@@ -269,11 +269,11 @@ class TransmissionClient:
             logger.error(f"查询 Transmission 任务状态失败: {exc}")
             return []
 
-    def list_downloads(self) -> list[dict]:
+    def list_downloads(self, hashes=None) -> list[dict]:
         if not self._ensure_client():
             raise ValueError('Transmission 连接失败，请检查下载器配置')
         try:
-            torrents = self.client.get_torrents(arguments=[
+            torrents = self.client.get_torrents(**({'ids': hashes} if hashes is not None else {}), arguments=[
                 'id', 'hashString', 'name', 'percentDone', 'status', 'downloadDir', 'totalSize',
                 'rateDownload', 'rateUpload', 'peersConnected', 'trackerStats', 'downloadedEver',
                 'uploadedEver', 'uploadRatio', 'eta', 'addedDate', 'doneDate', 'error', 'errorString',

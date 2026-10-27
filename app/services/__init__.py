@@ -1436,6 +1436,8 @@ def cache_lack_photos(limit: int = PHOTO_CACHE_LIMIT) -> int:
             select(Code.code, Code.banner, Code.poster)
             .where((Code.local_banner.is_(None)) | (Code.local_banner == ""))
             .where((Code.banner.isnot(None)) & (Code.banner != ""))
+            .where(imagecache.important_condition() if settings.photo_cache_scope != 'all' else True)
+            .order_by(Code.update_time.desc(), Code.code)
             .limit(limit)
         ).all()
 
@@ -1496,13 +1498,18 @@ def cache_lack_photos(limit: int = PHOTO_CACHE_LIMIT) -> int:
 
 def fill_lack_actors(limit: int = 50) -> int:
     from app.utils.actornames import valid
-    with session_scope() as session:
-        names = session.scalars(
-            select(Actor.name)
-            .where((Actor.photo.is_(None)) | (Actor.photo == ""))
-            .order_by(Actor.subscribed.desc(), Actor.update_time.desc())
-        ).all()
-    return fill_lack_actors_by_list([name for name in names if valid(name)][:limit])
+    names, offset = [], 0
+    while len(names) < limit:
+        with session_scope() as session:
+            batch = session.scalars(select(Actor.name)
+                .where((Actor.photo.is_(None)) | (Actor.photo == ""))
+                .order_by(Actor.subscribed.desc(), Actor.update_time.desc(), Actor.name)
+                .offset(offset).limit(200)).all()
+        if not batch:
+            break
+        names.extend(name for name in batch if valid(name))
+        offset += len(batch)
+    return fill_lack_actors_by_list(names[:limit])
 
 
 def fill_lack_actors_by_list(names: list[str]) -> int:

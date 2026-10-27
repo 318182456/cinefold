@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.executors.pool import ThreadPoolExecutor as SchedulerPool
 from loguru import logger
 
 from app.core.config import get_settings
@@ -260,6 +261,24 @@ def sync_download_index() -> int:
     return sync()
 
 
+def storage_maintenance() -> int:
+    from app.services.storagepolicy import prune_snapshots
+    from app.services import cachemaintenance, subtitleindex
+    count = prune_snapshots()
+    settings = get_settings()
+    if settings.subtitle_local_dir:
+        try:
+            subtitleindex.refresh(settings.subtitle_local_dir, force=True)
+        except OSError as exc:
+            logger.warning(f'字幕目录暂不可用，保留索引: {type(exc).__name__}')
+    if settings.image_cache_auto_clean:
+        try:
+            cachemaintenance.start('clean')
+        except ValueError:
+            pass
+    return count
+
+
 def poll_playback() -> int:
     """每分钟只读 Emby 会话，持续记录播放。"""
     from app.services.playback import poll
@@ -270,7 +289,7 @@ def scan_scrape_sources() -> int:
     """扫描下载目录，补刮失败或未经过下载器回调的影片。"""
     from app.services.scrapeinventory import refresh_now
     from app.services.scrapewatch import scan
-    refresh_now()
+    refresh_now(incremental=True)
     return scan()
 
 
@@ -503,6 +522,7 @@ JOBS: dict[str, dict] = {
 
 # 固定间隔任务，不走 crontab
 INTERVAL_JOBS: dict[str, dict] = {
+    'storage_maintenance': {'func': storage_maintenance, 'name': '存储缓存维护与字幕索引对账', 'minutes': 1440},
     'sync_download_index': {'func': sync_download_index, 'name': '更新下载器文件索引', 'minutes': 30,
                             'interval_key': 'download_index_interval'},
     "sync_download_history": {"func": sync_download_history, "name": "保存下载历史", "minutes": 5},
@@ -611,6 +631,7 @@ def start_scheduler() -> BackgroundScheduler:
     _scheduler = BackgroundScheduler(
         timezone="Asia/Shanghai",
         jobstores=_build_jobstores(),
+        executors={'default': SchedulerPool(3), 'realtime': SchedulerPool(2)},
     )
 
     for job_id, meta in JOBS.items():
@@ -624,8 +645,10 @@ def start_scheduler() -> BackgroundScheduler:
                 args=[job_id],
                 id=job_id,
                 name=meta["name"],
+                executor='realtime' if job_id in ('poll_playback', 'sync_download_history', 'pt_wait') else 'default',
                 replace_existing=True,
                 max_instances=1,
+                coalesce=True,
                 misfire_grace_time=3600,
             )
         except ValueError as exc:
@@ -653,8 +676,10 @@ def start_scheduler() -> BackgroundScheduler:
             minutes=minutes,
             id=job_id,
             name=meta["name"],
+            executor='realtime' if job_id in ('poll_playback', 'sync_download_history', 'pt_wait') else 'default',
             replace_existing=True,
             max_instances=1,
+            coalesce=True,
         )
 
     _scheduler.start()

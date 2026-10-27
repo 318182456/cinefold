@@ -341,7 +341,7 @@ class Settings:
     scrape_overwrite: bool = False
     scrape_duplicate_policy: str = 'versions'
     # 落几张剧照到 extrafanart。0 表示不下剧照（每张都要跨境下载）
-    scrape_still_limit: int = 5
+    scrape_still_limit: int = 0
     scrape_metadata_timeout: int = 25
     scrape_merge_grace: int = 3
     scrape_source_dirs: str = ""
@@ -382,6 +382,13 @@ class Settings:
     # --- 图片 ---
     image_mode: str = "BLUR"
     enable_photo_cache: bool = False
+    image_cache_webp: bool = True
+    image_cache_auto_clean: bool = False
+    image_cache_quality: int = 85
+    image_cache_max_gb: int = 5
+    image_cache_days: int = 30
+    image_still_days: int = 7
+    photo_cache_scope: str = 'important'
     enable_auto_complete: bool = True
 
     # --- 云盘 CD2 ---
@@ -669,7 +676,7 @@ def load_settings() -> Settings:
         scrape_category=_env("SCRAPE_CATEGORY", "日本AV").strip("'\""),
         scrape_overwrite=_env_bool("SCRAPE_OVERWRITE", False),
         scrape_duplicate_policy=os.getenv('SCRAPE_DUPLICATE_POLICY', 'versions'),
-        scrape_still_limit=_env_int("SCRAPE_STILL_LIMIT", 5),
+        scrape_still_limit=_env_int("SCRAPE_STILL_LIMIT", 0),
         scrape_metadata_timeout=_env_int("SCRAPE_METADATA_TIMEOUT", 25),
         scrape_merge_grace=_env_int("SCRAPE_MERGE_GRACE", 3),
         scrape_source_dirs=_env("SCRAPE_SOURCE_DIRS"),
@@ -696,6 +703,13 @@ def load_settings() -> Settings:
 
         image_mode=_env("IMAGE_MODE", "BLUR"),
         enable_photo_cache=_env_bool("ENABLE_PHOTO_CACHE"),
+        image_cache_webp=_env_bool('IMAGE_CACHE_WEBP', True),
+        image_cache_auto_clean=_env_bool('IMAGE_CACHE_AUTO_CLEAN', False),
+        image_cache_quality=max(60, min(95, _env_int('IMAGE_CACHE_QUALITY', 85))),
+        image_cache_max_gb=max(1, _env_int('IMAGE_CACHE_MAX_GB', 5)),
+        image_cache_days=max(1, _env_int('IMAGE_CACHE_DAYS', 30)),
+        image_still_days=max(1, _env_int('IMAGE_STILL_DAYS', 7)),
+        photo_cache_scope=_env('PHOTO_CACHE_SCOPE', 'important'),
         enable_auto_complete=_env_bool("ENABLE_AUTO_COMPLETE", True),
 
         cloudnas_url=_env("CLOUDNAS_URL"),

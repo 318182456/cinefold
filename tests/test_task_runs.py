@@ -45,7 +45,7 @@ def test_manual_and_schedule_share_ownership_and_persist(runs):
         assert json.loads(row.content)['run_id'] == result['run_id']
 
 
-def test_manual_pool_limits_running_and_keeps_fourth_queued(runs):
+def test_manual_pool_limits_heavy_work_and_keeps_remaining_queued(runs):
     release = threading.Event()
     entered = [threading.Event() for _ in range(4)]
     def work(i):
@@ -54,8 +54,10 @@ def test_manual_pool_limits_running_and_keeps_fourth_queued(runs):
     try:
         for i in range(4):
             taskruns.submit(str(i), lambda i=i: work(i))
-        assert all(event.wait(3) for event in entered[:3])
+        assert all(event.wait(3) for event in entered[:2])
+        assert not entered[2].is_set()
         assert not entered[3].is_set()
+        assert taskruns.states()['2']['phase'] == 'queued'
         assert taskruns.states()['3']['phase'] == 'queued'
     finally:
         release.set()

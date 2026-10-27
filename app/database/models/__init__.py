@@ -9,6 +9,8 @@ from app.database.models.history import History
 from app.database.models.deletionrecord import DeletionRecord
 from app.database.models.downloadrecord import DownloadRecord
 from app.database.models.downloadindex import TorrentManifest, TorrentFile
+from app.database.models.localindex import SubtitleDirectory, SubtitleFile
+from app.database.models.imagecache import ImageCacheFile
 from app.database.models.medialink import MediaLink
 from app.database.models.mediamerge import MediaMerge
 from app.database.models.passkey import Passkey
@@ -27,6 +29,8 @@ from app.database.models.curation import (
 )
 
 __all__ = [
+    'ImageCacheFile',
+    'SubtitleDirectory', 'SubtitleFile',
     'TorrentManifest', 'TorrentFile',
     'DeletionRecord',
     "Actor", "ActorProfile", "EmbyCollectionLink", "Cache", "Code", "CodeAlias", "CodeStatus", "DataSource", "History", "DownloadRecord",

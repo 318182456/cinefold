@@ -109,6 +109,12 @@ def get_version():
     return ResponseEntity.ok({"version": VERSION})
 
 
+@router.get('/runtime/memory')
+def runtime_memory(current_user: str = Depends(get_current_user)):
+    from app.services.memoryusage import snapshot
+    return ResponseEntity.ok(snapshot())
+
+
 @router.get("/version/check")
 def check_version(
     refresh: bool = False, current_user: str = Depends(get_current_user)

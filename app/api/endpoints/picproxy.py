@@ -6,10 +6,11 @@
 from __future__ import annotations
 
 from urllib.parse import urlparse
+import asyncio
 
 import httpx
 from fastapi import APIRouter, Depends, Request, Response
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from loguru import logger
 from pydantic import BaseModel
 
@@ -92,8 +93,11 @@ def _is_allowed(url: str, extra: str = "") -> bool:
     )
 
 
-def _cached_response(path, request: Request) -> Response:
+def _cached_response(path, request: Request, thumb: bool = False) -> Response:
     """返回缓存文件，带 ETag 协商。"""
+    imagecache.touch(path)
+    if thumb:
+        path = imagecache.thumbnail(path)
     etag = imagecache.etag_for(path)
     if request.headers.get("if-none-match") == etag:
         return Response(status_code=304, headers={**CACHE_HEADERS, "ETag": etag})
@@ -113,7 +117,8 @@ def _as_poster(content: bytes, side: str) -> bytes:
     """
     from app.modules.scrape.images import crop_poster
 
-    return crop_poster(content, side)
+    with imagecache._ENCODERS:
+        return crop_poster(content, side)
 
 
 def _portrait_side(code: str) -> str:
@@ -138,6 +143,7 @@ async def image_proxy(
     code: str = "",
     kind: str = "banner",
     poster: bool = False,
+    thumb: bool = False,
 ):
     """代理一张图片。
 
@@ -163,14 +169,14 @@ async def image_proxy(
         if poster:
             try:
                 return Response(
-                    content=_as_poster(cached.read_bytes(), _portrait_side(code)),
+                    content=await asyncio.to_thread(lambda: _as_poster(cached.read_bytes(), _portrait_side(code))),
                     media_type="image/jpeg",
                     headers=dict(CACHE_HEADERS),
                 )
             except OSError:
                 pass
         else:
-            return _cached_response(cached, request)
+            return await asyncio.to_thread(_cached_response, cached, request, thumb)
 
     settings = get_settings()
     if not _is_allowed(url, settings.image_proxy_hosts):
@@ -185,20 +191,20 @@ async def image_proxy(
         logger.debug(f"图片代理失败 {url[:60]}: {exc}")
         return Response(status_code=404, content=b"fetch failed")
 
-    # 原图照常入缓存 —— 裁切只影响这次响应，缓存里始终是完整原图
-    stored = imagecache.store(content, url, code, kind)
+    # Cache the whole composition; conversion may choose a smaller WebP.
+    stored = await asyncio.to_thread(imagecache.store, content, url, code, kind)
 
     if poster:
         return Response(
-            content=_as_poster(content, _portrait_side(code)),
+            content=await asyncio.to_thread(lambda: _as_poster(content, _portrait_side(code))),
             media_type="image/jpeg",
             headers=dict(CACHE_HEADERS),
         )
 
-    headers = dict(CACHE_HEADERS)
     if stored is not None:
-        headers["ETag"] = imagecache.etag_for(stored)
+        return await asyncio.to_thread(_cached_response, stored, request, thumb)
 
+    headers = dict(CACHE_HEADERS)
     return Response(
         content=content,
         media_type=response.headers.get("content-type", "image/jpeg"),
@@ -207,7 +213,7 @@ async def image_proxy(
 
 
 @router.get("/image-local")
-def image_local(request: Request, path: str, poster: bool = False):
+def image_local(request: Request, path: str, poster: bool = False, thumb: bool = False):
     """直接返回已缓存的图片。
 
     path 是库里 local_banner 存的相对路径（如 JUR-119/banner.jpg），
@@ -218,6 +224,14 @@ def image_local(request: Request, path: str, poster: bool = False):
     """
     target = imagecache.resolve_relative(path)
     if target is None:
+        from urllib.parse import urlencode
+        parts = path.replace('\\', '/').split('/')
+        if len(parts) == 2 and parts[1].split('.')[0] == 'banner' and get_true_code(parts[0]) == parts[0]:
+            with session_scope() as session:
+                row = session.get(Code, parts[0])
+                source = (row.banner or row.poster) if row else ''
+            if source and source.startswith(('https://', 'http://')):
+                return RedirectResponse('/api/v1/image-proxy?' + urlencode(dict(url=source, code=parts[0], thumb=str(thumb).lower(), poster=str(poster).lower())), status_code=307)
         return Response(status_code=404, content=b"not found")
 
     if poster:
@@ -231,7 +245,7 @@ def image_local(request: Request, path: str, poster: bool = False):
         except OSError:
             return Response(status_code=404, content=b"not found")
 
-    return _cached_response(target, request)
+    return _cached_response(target, request, thumb)
 
 
 @router.get("/image-cache/stats")
@@ -242,6 +256,32 @@ def image_cache_stats(current_user: str = Depends(get_current_user)):
 
 class RefetchRequest(BaseModel):
     code: str
+
+
+class CacheMaintenanceRequest(BaseModel):
+    mode: str = 'preview'
+    resume: bool = False
+
+
+@router.get('/image-cache/maintenance')
+def cache_maintenance_state(current_user: str = Depends(get_current_user)):
+    from app.services.cachemaintenance import state
+    return ResponseEntity.ok(state())
+
+
+@router.post('/image-cache/maintenance')
+def cache_maintenance_start(body: CacheMaintenanceRequest, current_user: str = Depends(get_current_user)):
+    from app.services.cachemaintenance import start
+    try:
+        return ResponseEntity.ok(start(body.mode, body.resume))
+    except ValueError as exc:
+        return ResponseEntity.fail(str(exc), code=400)
+
+
+@router.post('/image-cache/maintenance/stop')
+def cache_maintenance_stop(current_user: str = Depends(get_current_user)):
+    from app.services.cachemaintenance import stop
+    return ResponseEntity.ok(stop())
 
 
 class RedetectRequest(BaseModel):

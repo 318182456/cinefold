@@ -764,18 +764,21 @@ def test_local_indexes_directory_once(subs_dir, monkeypatch):
     """目录里可能有几千个文件，一轮补漏只该扫一遍。"""
     site = _local(subs_dir)
     calls = []
-    original = site._build_index
+    from app.services import subtitleindex
+    subtitleindex._recent.clear()
+    original = subtitleindex.os.scandir
 
-    def counted():
+    def counted(*args, **kwargs):
         calls.append(1)
-        return original()
+        return original(*args, **kwargs)
 
-    monkeypatch.setattr(site, "_build_index", counted)
+    monkeypatch.setattr(subtitleindex.os, "scandir", counted)
     site.search("SSNI-497")
+    first_scan = len(calls)
     site.search("MIDE-123")
     site.search("SONE-895")
 
-    assert len(calls) == 1
+    assert first_scan > 0 and len(calls) == first_scan
 
 
 def test_local_missing_directory_is_not_an_error(tmp_path):

@@ -1,4 +1,6 @@
 <script setup>
+import { useVisibleTimers } from '@/composables/useVisibleTimers'
+const { setTimeout, clearTimeout, setInterval, clearInterval } = useVisibleTimers()
 import PagePanel from '@/components/PagePanel.vue'
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import {

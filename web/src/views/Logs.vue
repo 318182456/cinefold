@@ -1,4 +1,6 @@
 <script setup>
+import { useVisibleTimers } from '@/composables/useVisibleTimers'
+const { setTimeout, clearTimeout, setInterval, clearInterval } = useVisibleTimers()
 import MobileSection from '@/components/MobileSection.vue'
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'

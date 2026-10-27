@@ -15,6 +15,7 @@ class ScrapeSourceRoot(DBBase):
     available: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     error: Mapped[str] = mapped_column(Text, default="")
     last_scan: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_full_scan: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 class ScrapeSourceVideo(DBBase):
@@ -29,6 +30,7 @@ class ScrapeSourceVideo(DBBase):
     artifact_status: Mapped[str] = mapped_column(String(24), default="pending")
     links: Mapped[list] = mapped_column(JSON, default=list)
     indexed_at: Mapped[datetime] = mapped_column(DateTime)
+    fingerprint: Mapped[list | None] = mapped_column(JSON, nullable=True)
 
 
 class ScrapeSourceMembership(DBBase):

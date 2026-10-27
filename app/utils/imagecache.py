@@ -11,6 +11,9 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import tempfile
+import threading
+import time
 from pathlib import Path
 
 from loguru import logger
@@ -33,6 +36,79 @@ CONTENT_TYPES = {
 
 # 小于这个尺寸基本是错误页或占位图，不值得当成缓存写下去
 MIN_IMAGE_BYTES = 512
+_LOCKS = [threading.RLock() for _ in range(32)]
+_ENCODERS = threading.BoundedSemaphore(2)
+
+
+def file_lock(path):
+    return _LOCKS[int(hashlib.sha256(str(path.with_suffix('')).encode()).hexdigest()[:8], 16) % len(_LOCKS)]
+
+
+def important_condition():
+    from sqlalchemy import exists, select, or_
+    from app.database.models import Code, CollectionItem, LibraryPreference, MediaLink
+    return or_(Code.status.in_((1, 2, 3, 4)),
+        exists(select(1).where(LibraryPreference.code == Code.code, LibraryPreference.favorite.is_(True))),
+        exists(select(1).where(CollectionItem.code == Code.code)),
+        exists(select(1).where(MediaLink.code == Code.code)))
+
+
+def optimized(content: bytes):
+    with _ENCODERS:
+        return _optimized(content)
+
+
+def _optimized(content: bytes):
+    """Convert still images once, only when WebP is smaller; preserve alpha/animation."""
+    from app.core.config import get_settings
+    settings = get_settings()
+    if not settings.image_cache_webp:
+        return content, None
+    try:
+        import io
+        from PIL import Image, ImageOps
+        with Image.open(io.BytesIO(content)) as src:
+            if src.format not in ('JPEG', 'PNG') or getattr(src, 'is_animated', False):
+                return content, None
+            if src.width * src.height > 16_000_000:
+                return content, None
+            src.load()
+            with ImageOps.exif_transpose(src) as image:
+                mode = 'RGBA' if 'A' in image.getbands() or 'transparency' in image.info else 'RGB'
+                out = image if image.mode == mode else image.convert(mode)
+                try:
+                    buf = io.BytesIO()
+                    out.save(buf, format='WEBP', quality=max(60, min(95, settings.image_cache_quality)), method=4,
+                             **({'icc_profile': src.info['icc_profile']} if src.info.get('icc_profile') else {}))
+                    data = buf.getvalue()
+                finally:
+                    if out is not image:
+                        out.close()
+        if MIN_IMAGE_BYTES <= len(data) < len(content):
+            return data, '.webp'
+    except Exception as exc:
+        logger.debug(f'图片优化跳过: {type(exc).__name__}')
+    return content, None
+
+
+def atomic_write(target, content):
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(prefix='.'+target.name, suffix='.tmp', dir=target.parent)
+    try:
+        with os.fdopen(fd, 'wb') as stream:
+            stream.write(content)
+        os.replace(name, target)
+    finally:
+        Path(name).unlink(missing_ok=True)
+
+
+def touch(path):
+    try:
+        stat = path.stat()
+        if time.time() - stat.st_atime > 3600:
+            os.utime(path, (time.time(), stat.st_mtime))
+    except OSError:
+        pass
 
 
 def _safe_code(code: str) -> str:
@@ -61,6 +137,10 @@ def cache_path(url: str, code: str = "", kind: str = "banner") -> Path | None:
     if safe:
         # 旧版封面固定叫 banner.jpg，poster 与 banner 在本项目里同源，共用一份
         name = "banner" if kind in ("banner", "poster") else kind
+        if kind == 'still':
+            name = 'still_' + hashlib.sha256(url.encode()).hexdigest()[:24]
+        if not re.fullmatch(r'[a-zA-Z0-9_-]{1,80}', name):
+            return None
         return PIC_DIR / safe / f"{name}{suffix}"
 
     digest = hashlib.sha256(url.encode("utf-8")).hexdigest()
@@ -94,7 +174,7 @@ def store(content: bytes, url: str, code: str = "", kind: str = "banner") -> Pat
     """把回源拿到的图片写入缓存，返回落盘路径。
 
     写临时文件再 rename，避免并发请求同一张图时读到写了一半的内容。
-    图片一律完整存盘：双拼封面只在显示时偏到人像那半边（前端按
+    保留完整画面，较小的 WebP 可替代原编码：双拼封面只在显示时偏到人像那半边（前端按
     code.portrait_side 设 object-position），点开灯箱还要看完整原图。
     """
     if not content or len(content) < MIN_IMAGE_BYTES:
@@ -105,11 +185,20 @@ def store(content: bytes, url: str, code: str = "", kind: str = "banner") -> Pat
         return None
 
     try:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        # 带 pid 后缀，多 worker 部署时临时文件不会互相踩
-        tmp = target.with_name(f".{target.name}.{os.getpid()}.tmp")
-        tmp.write_bytes(content)
-        os.replace(tmp, target)
+        content, suffix = optimized(content)
+        if suffix is None:
+            if content.startswith(b'RIFF') and content[8:12] == b'WEBP':
+                suffix = '.webp'
+            elif content.startswith(b'\x89PNG\r\n\x1a\n'):
+                suffix = '.png'
+            elif content.startswith((b'GIF87a', b'GIF89a')):
+                suffix = '.gif'
+            elif content.startswith(b'\xff\xd8'):
+                suffix = '.jpg'
+        with file_lock(target):
+            if suffix:
+                target = target.with_suffix(suffix)
+            atomic_write(target, content)
         return target
     except OSError as exc:
         logger.warning(f"写入图片缓存失败 {target}: {exc}")
@@ -163,8 +252,38 @@ def resolve_relative(relative: str) -> Path | None:
         logger.warning(f"拒绝越界的图片路径: {relative[:80]}")
         return None
     if not target.is_file():
-        return None
+        # Keep old database/local URLs usable after format-only migration.
+        target = next((target.with_suffix(ext) for ext in CONTENT_TYPES if target.with_suffix(ext).is_file()), None)
+        if target is None or not target.resolve().is_relative_to(base):
+            return None
     return target
+
+
+def thumbnail(path: Path, width=480):
+    """A bounded-size list image; lightboxes continue to request the full image."""
+    target = path.with_name(path.stem + '.thumb.webp')
+    try:
+        with file_lock(path), _ENCODERS:
+            if target.is_file() and target.stat().st_mtime_ns >= path.stat().st_mtime_ns:
+                return target
+            import io
+            from PIL import Image, ImageOps
+            with Image.open(path) as src:
+                if getattr(src, 'is_animated', False):
+                    return path
+                if src.format == 'JPEG':
+                    src.draft('RGB', (width*2, width*2))
+                if src.width*src.height > 16_000_000:
+                    return path
+                with ImageOps.exif_transpose(src) as image:
+                    image.thumbnail((width, width), Image.Resampling.LANCZOS)
+                    with image.convert('RGBA' if 'A' in image.getbands() or 'transparency' in image.info else 'RGB') as out:
+                        buf = io.BytesIO()
+                        out.save(buf, format='WEBP', quality=80)
+                        atomic_write(target, buf.getvalue())
+        return target
+    except Exception:
+        return path
 
 
 def relative_of(path: Path) -> str:

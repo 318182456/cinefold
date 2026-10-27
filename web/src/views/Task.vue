@@ -1,4 +1,6 @@
 <script setup>
+import { useVisibleTimers } from '@/composables/useVisibleTimers'
+const { setTimeout, clearTimeout, setInterval, clearInterval } = useVisibleTimers()
 import PagePanel from '@/components/PagePanel.vue'
 import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
 import { listCron, previewSchedule, runTask, updateSchedule } from '@/api'
@@ -275,6 +277,7 @@ onUnmounted(() => {
         <div v-if="job.id !== COLLECTION_JOB && job.execution?.phase !== 'idle' && job.execution?.phase" class="mt-3 space-y-2 border-t border-gray-800 pt-3 text-xs text-gray-500">
           <p>提交 {{ timeText(job.execution.queued_at) }} · 开始 {{ timeText(job.execution.started_at) }} · 耗时 {{ durationText(job.execution) }}<span v-if="job.execution.processed != null"> · 返回数量 {{ job.execution.processed }}</span></p>
           <p v-if="job.execution.error" class="break-all text-red-400">{{ job.execution.error }}</p>
+          <p v-if="job.execution.process_memory_after?.rss != null">进程 RSS：执行前 {{ ((job.execution.process_memory_before?.rss || 0) / 1048576).toFixed(1) }} → 执行后 {{ (job.execution.process_memory_after.rss / 1048576).toFixed(1) }} MiB（包含同时运行的其他任务）</p>
           <p v-if="activeJob(job)" class="text-gray-400">任务在后台执行，可以离开此页，稍后回来查看结果。</p>
           <RouterLink :to="{name:'Logs',query:{keyword:job.id}}" class="text-brand">查看任务日志 ↗</RouterLink>
           <details v-if="job.execution.history?.length"><summary class="cursor-pointer">最近 {{ job.execution.history.length }} 次执行</summary><p v-for="run in [...job.execution.history].reverse()" :key="run.run_id" class="mt-2 break-all">{{ timeText(run.started_at || run.queued_at) }} · {{ taskPhases[run.phase] }} · {{ durationText(run) }}<span v-if="run.error" class="text-red-400"> · {{ run.error }}</span></p></details>

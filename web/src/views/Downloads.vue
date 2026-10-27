@@ -1,4 +1,6 @@
 <script setup>
+import { useVisibleTimers } from '@/composables/useVisibleTimers'
+const { setTimeout, clearTimeout, setInterval, clearInterval } = useVisibleTimers()
 import PagePanel from '@/components/PagePanel.vue'
 import { computed, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
@@ -53,7 +55,7 @@ async function refresh() {
   if (results[1].status === 'fulfilled') { transfer.value = results[1].value; transferError.value = '' }
   else transferError.value = results[1].reason.message
   busy.value = false
-  timer = setTimeout(refresh, current.value.running ? 2500 : 10000)
+  timer = setTimeout(refresh, current.value.running ? 2500 : tab.value === 'history' ? 60000 : 10000)
 }
 function openTransfer() { if (!selectedRows.value.length) return; deleteSource.value = false; confirm.value = true }
 async function start(resume = false) {

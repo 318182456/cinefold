@@ -9,7 +9,7 @@ from __future__ import annotations
 import threading
 
 from loguru import logger
-from sqlalchemy import select
+from sqlalchemy import select, func, bindparam
 
 from app.database.models import Code
 from app.database.session import session_scope
@@ -62,16 +62,26 @@ def redetect_all(only_missing: bool = False) -> int:
             query = query.where(
                 (Code.portrait_side.is_(None)) | (Code.portrait_side == "")
             )
-        rows = session.execute(query).all()
+        total = session.scalar(select(func.count()).select_from(query.subquery()))
 
-    _reset(len(rows))
-    if not rows:
+    _reset(total)
+    if not total:
         _finish("没有需要判断的封面")
         return 0
 
     updates: list[tuple[str, str]] = []
     missing = 0
-    for code, local_banner in rows:
+    def batches():
+        cursor = ''
+        while True:
+            with session_scope() as session:
+                rows = session.execute(query.where(Code.code > cursor).order_by(Code.code).limit(200)).all()
+            if not rows:
+                return
+            yield from rows
+            cursor = rows[-1][0]
+
+    for code, local_banner in batches():
         relative = (local_banner or "").split(",")[0]
         path = imagecache.resolve_relative(relative)
         if path is None:
@@ -104,10 +114,9 @@ def redetect_all(only_missing: bool = False) -> int:
 
 def _flush(updates: list[tuple[str, str]]) -> None:
     with session_scope() as session:
-        for code, side in updates:
-            row = session.get(Code, code)
-            if row is not None:
-                row.portrait_side = side
+        session.execute(Code.__table__.update().where(Code.code == bindparam('target_code'))
+            .values(portrait_side=bindparam('side')),
+            [{'target_code': code, 'side': side} for code, side in updates])
 
 
 def start_redetect(only_missing: bool = False) -> bool:
@@ -117,10 +126,20 @@ def start_redetect(only_missing: bool = False) -> bool:
 
     def run() -> None:
         try:
-            redetect_all(only_missing=only_missing)
+            from app.services.resourcebudget import slot
+            with slot():
+                redetect_all(only_missing=only_missing)
         except Exception as exc:
             logger.exception(f"封面人像面重判异常: {exc}")
             _finish(f"判断异常: {exc}")
 
-    threading.Thread(target=run, daemon=True).start()
+    with _lock:
+        if _state['running']:
+            return False
+        _state.update(running=True, message='等待后台资源', done=0, total=0, tally={})
+    try:
+        threading.Thread(target=run, daemon=True).start()
+    except Exception:
+        _finish('无法启动后台线程')
+        raise
     return True

@@ -9,7 +9,7 @@ import os
 import re
 import threading
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from loguru import logger
@@ -85,10 +85,10 @@ def _begin(root: str):
     return paths
 
 
-def refresh_now(root: str = '') -> dict:
+def refresh_now(root: str = '', *, incremental=False) -> dict:
     paths = _begin(root)
     if paths is not None:
-        _run(paths)
+        _run(paths, incremental=incremental)
     return state()
 
 
@@ -167,23 +167,25 @@ def _flush(root_key, batch, started):
         session.execute(_insert(session, ScrapeSourceMembership).on_conflict_do_nothing(), members)
 
 
-def _run(paths):
+def _run(paths, *, incremental=False):
     from app.services.scrapemaintenance import activity, MaintenanceBusy
     try:
-        with activity():
-            return _run_active(paths)
+        from app.services.resourcebudget import slot
+        with slot(), activity():
+            return _run_active(paths, incremental=incremental)
     except MaintenanceBusy as exc:
         with _STATE_LOCK:
             _STATE.update(running=False, current='', errors=[str(exc)], finished_at=datetime.now().isoformat())
         _LOCK.release()
 
 
-def _run_active(paths):
+def _run_active(paths, *, incremental=False):
     try:
         if not paths:
             return
         from app.services import scrapesources, scrapewatch
-        repair_filename_codes()
+        if not incremental:
+            repair_filename_codes()
         with session_scope() as session:
             sync_roots(session)
             links = defaultdict(list)
@@ -203,6 +205,10 @@ def _run_active(paths):
             with _STATE_LOCK:
                 _STATE['current'] = raw
             identity = key(raw)
+            with session_scope() as session:
+                saved_root = session.get(ScrapeSourceRoot, identity)
+                reuse = bool(incremental and saved_root and saved_root.last_full_scan and
+                    saved_root.last_full_scan > datetime.now()-timedelta(days=1))
             seen, batch, errors = set(), [], []
             resolved, available = '', False
             try:
@@ -217,7 +223,13 @@ def _run_active(paths):
                 identity_resolver = SourceIdentityResolver()
                 for folder, dirs, files in os.walk(root, followlinks=False, onerror=onerror):
                     dirs[:] = [d for d in dirs if d not in {'@eaDir', '#recycle', '.unwanted'} and not Path(folder, d).is_symlink()]
-                    for name in files:
+                    previous = {}
+                    for index, name in enumerate(files):
+                        if reuse and index % 200 == 0:
+                            keys = [key(Path(folder, item)) for item in files[index:index+200]]
+                            with session_scope() as session:
+                                previous = {row.source_key: {col.name: getattr(row, col.name) for col in ScrapeSourceVideo.__table__.columns}
+                                    for row in session.scalars(select(ScrapeSourceVideo).where(ScrapeSourceVideo.source_key.in_(keys)))}
                         path = Path(folder, name)
                         if path.is_symlink() or not is_adoptable_video(path):
                             continue
@@ -228,19 +240,26 @@ def _run_active(paths):
                             stat = path.stat()
                             if not path.is_file():
                                 continue
-                            info = inspect_source(path, subtitle_probe, identity_resolver)
+                            fingerprint = [stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns]
                             target_links = links.get(source_key, [])
-                            code = overrides.get(source_key) or info.code
-                            status = 'pending'
-                            if info.ignored:
-                                status = 'ignored'
-                            elif target_links:
-                                status = 'complete' if scrapewatch._complete(path, code, target_links) else 'incomplete'
-                                if status == 'complete':
-                                    from app.services.duplicatepolicy import disposition
-                                    status = disposition(path, target_links)
+                            old = previous.get(source_key)
+                            if (old and old.get('fingerprint') == fingerprint and old['links'] == target_links
+                                    and (not overrides.get(source_key) or overrides[source_key] == old['detected_code'])):
+                                detected_code, part, status = old['detected_code'], old['part'], old['artifact_status']
+                            else:
+                                info = inspect_source(path, subtitle_probe, identity_resolver)
+                                detected_code, part = info.code, info.part
+                                code = overrides.get(source_key) or info.code
+                                status = 'pending'
+                                if info.ignored:
+                                    status = 'ignored'
+                                elif target_links:
+                                    status = 'complete' if scrapewatch._complete(path, code, target_links) else 'incomplete'
+                                    if status == 'complete':
+                                        from app.services.duplicatepolicy import disposition
+                                        status = disposition(path, target_links)
                             batch.append({'source_key': source_key, 'path': str(path), 'name': name,
-                                'detected_code': info.code, 'part': info.part, 'size': stat.st_size, 'mtime': stat.st_mtime,
+                                'detected_code': detected_code, 'part': part, 'size': stat.st_size, 'mtime': stat.st_mtime, 'fingerprint': fingerprint,
                                 'artifact_status': status, 'links': target_links, 'indexed_at': started})
                             seen.add(source_key)
                             with _STATE_LOCK:
@@ -261,6 +280,8 @@ def _run_active(paths):
                     session.add(row)
                 row.resolved, row.available, row.error, row.last_scan = resolved, available, '\n'.join(errors[:20]), datetime.now()
                 if not errors:
+                    if not reuse:
+                        row.last_full_scan = started
                     # 只有完整成功扫描才清理消失文件的清单引用；断挂载不清空缓存。
                     old = set(session.scalars(select(ScrapeSourceMembership.source_key).where(ScrapeSourceMembership.root_key == identity)))
                     missing = list(old - seen)

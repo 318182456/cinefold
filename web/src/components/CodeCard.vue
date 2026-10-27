@@ -192,7 +192,7 @@ async function reset() {
       @click.stop="selectable ? emit('toggle-select', item.code) : (lightboxOpen = true)"
     >
       <PrivateImage
-        :src="imageFailed ? '' : cover"
+        :src="imageFailed || !cover ? '' : `${cover}&thumb=true`"
         :alt="item.code"
         title="点击查看完整封面"
         img-class="h-full w-full cursor-pointer object-cover"

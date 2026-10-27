@@ -60,9 +60,8 @@ class LocalSubtitle:
             directory = get_settings().subtitle_local_dir
 
         self.directory = Path(directory) if directory else None
-        # 番号 → 文件路径。第一次 search 时建，之后整轮复用 ——
-        # 目录里可能有几千个文件，每部片都遍历一遍太浪费。
-        # 不做失效：实例只在单轮补漏里活着，缓存活得越久读到的目录越旧
+        # DB catalog is shared across instances/restarts. This dictionary is only
+        # a per-round fallback when the database is unavailable.
         self._index: dict[tuple[str, int], Path] | None = None
 
     def search(self, code: str, part: int = 0) -> SubtitleItem | None:
@@ -70,15 +69,15 @@ class LocalSubtitle:
         if not code:
             return None
 
-        index = self._ensure_index()
-        if not index:
+        if self.directory is None:
             return None
-
-        path = index.get((code, part))
-        if path is None:
-            # 精确没中，再试剥掉版本后缀的形态：媒体库里是 SSNI-497-C，
-            # 素材库里可能只放了 SSNI-497 的字幕，那是同一部片
-            path = index.get((_strip_version(code), part))
+        try:
+            from app.services.subtitleindex import find
+            path = find(self.directory, code, part)
+        except Exception as exc:
+            logger.debug(f'字幕持久化索引暂不可用，使用本轮索引: {type(exc).__name__}')
+            index = self._ensure_index()
+            path = index.get((code, part)) or index.get((_strip_version(code), part))
         if path is None:
             return None
 
@@ -166,7 +165,10 @@ class LocalSubtitle:
         按 UTF-8 硬读会出乱码。繁体在这里一并转成简体。
         """
         try:
-            raw = path.read_bytes()
+            if path.stat().st_size > MAX_SUBTITLE_BYTES:
+                return ''
+            with path.open('rb') as stream:
+                raw = stream.read(MAX_SUBTITLE_BYTES + 1)
         except OSError as exc:
             logger.warning(f"[字幕] 读本地字幕失败 {path}: {exc}")
             return ""

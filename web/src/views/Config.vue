@@ -1,4 +1,6 @@
 <script setup>
+import { useVisibleTimers } from '@/composables/useVisibleTimers'
+const { setTimeout, clearTimeout, setInterval, clearInterval } = useVisibleTimers()
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import {
   checkVersion, deletePasskey, deleteTelegramWebhook, getConfig, getOidcRedirectUri,
@@ -401,7 +403,7 @@ const GROUPS = [
         title: '图片输出',
         tab: 'images',
         fields: [
-          { k: 'scrape_still_limit', label: '剧照张数', t: 'number', ph: '5',
+          { k: 'scrape_still_limit', label: '剧照张数', t: 'number', ph: '0',
             hint: '落进影片旁的 extrafanart 目录。每张都要跨境下载，0 表示不下' },
           { k: 'scrape_require_images', label: '严格校验图片', t: 'bool', hint: '主图或已请求的剧照下载、写入失败时不标记完成' },
           { k: 'scrape_poster_crop', label: '海报裁切', t: 'select', options: ['auto', 'always', 'never'], hint: 'auto 仅普通有码自动裁切；always 总是裁切宽图；never 保留完整图片' },
@@ -649,7 +651,14 @@ const GROUPS = [
           { k: 'max_actor', label: '最大共演人数' },
           { k: 'image_mode', label: '图片模式', t: 'select',
             options: ['BLUR', 'VISIBLE', 'INVISIBLE'] },
-          { k: 'enable_photo_cache', label: '图片持久化', t: 'bool' },
+          { k: 'enable_photo_cache', label: '提前缓存封面', t: 'bool', hint: '关闭后仍会按需缓存浏览过的图片' },
+          { k: 'photo_cache_scope', label: '提前缓存范围', t: 'select', options: ['important', 'all'], hint: 'important 只缓存订阅、入库与收藏影片；all 缓存全部情报' },
+          { k: 'image_cache_webp', label: '新图片自动转 WebP', t: 'bool' },
+          { k: 'image_cache_quality', label: 'WebP 质量', t: 'number', hint: '60–95，默认 85；只保存体积更小的转换结果' },
+          { k: 'image_cache_max_gb', label: '网页缓存目标容量（GiB）', t: 'number', hint: '默认 5；重要封面与无可确认来源的图片受保护，可能超过目标' },
+          { k: 'image_cache_days', label: '普通缓存保留天数', t: 'number', hint: '默认 30，按最后访问时间' },
+          { k: 'image_still_days', label: '网页剧照保留天数', t: 'number', hint: '默认 7；不清理媒体目录 extrafanart' },
+          { k: 'image_cache_auto_clean', label: '每天自动清理网页缓存', t: 'bool', hint: '默认关闭；建议先在维护页预览，确认后开启' },
         ],
       },
     ],

@@ -95,20 +95,33 @@ def _finish(job_id, run_id, phase, *, result=None, error=''):
 
 
 def _execute(job_id, func, run_id):
+    # Playback polling remains responsive while scans/imports wait in queued state.
+    from contextlib import nullcontext
+    from app.services.resourcebudget import slot
+    with (nullcontext() if job_id in ('poll_playback', 'sync_download_history', 'pt_wait') else slot()):
+        return _execute_reserved(job_id, func, run_id)
+
+
+def _execute_reserved(job_id, func, run_id):
+    from app.services.memoryusage import snapshot
     with _LOCK:
         state = _STATES[job_id]
-        state.update(phase='running', started_at=time.time())
+        state.update(phase='running', started_at=time.time(), process_memory_before=snapshot())
         _save(job_id)
     logger.info(f'[任务:{job_id}] 开始执行，来源={state["source"]}')
     try:
         result = func()
     except BaseException as exc:
+        with _LOCK:
+            state['process_memory_after'] = snapshot()
         message = re.sub(r'(?i)\b[a-z][a-z0-9+.-]*://[^\s<>"\']+', '[地址已隐藏]', str(exc))
         message = re.sub(r'(?i)\b(passkey|token|api[_-]?key|password)\s*[=:]\s*[^\s&,;]+', r'\1=[已隐藏]', message)
         _finish(job_id, run_id, 'failed', error=f'{type(exc).__name__}: {message}'[:500])
         logger.exception(f'[任务:{job_id}] 执行失败')
         raise
     else:
+        with _LOCK:
+            state['process_memory_after'] = snapshot()
         _finish(job_id, run_id, 'finished', result=result)
         logger.info(f'[任务:{job_id}] 执行结束，返回数量={result if type(result) is int else "未提供"}')
         return result

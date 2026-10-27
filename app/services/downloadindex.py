@@ -87,7 +87,12 @@ def _due_snapshot(name, client):
 def refresh_snapshot(name, client):
     started = datetime.now()
     # Unlike monitor_torrent(), this method raises on RPC/authentication failure.
-    rows = client.list_downloads()
+    from app.services.downloads import recent_snapshot
+    cached = recent_snapshot(name, client)
+    if cached is None:
+        rows = client.list_downloads()
+    else:
+        rows, started = cached
     remember(name, rows, client=client, full=True, started=started)
     return len(rows)
 

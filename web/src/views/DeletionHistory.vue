@@ -1,4 +1,6 @@
 <script setup>
+import { useVisibleTimers } from '@/composables/useVisibleTimers'
+const { setTimeout, clearTimeout, setInterval, clearInterval } = useVisibleTimers()
 import { onMounted, onUnmounted, ref } from 'vue'
 import http, { subscribeCode } from '@/api'
 import PagePanel from '@/components/PagePanel.vue'
