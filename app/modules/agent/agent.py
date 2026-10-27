@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import json
+import ssl
 
 import httpx
 from loguru import logger
 
 from app.core.config import get_settings
 from app.core.version import APP_VERSION
+from app.services.mihomo import get_manager, proxy_lease
 
 from .tools import PROPOSAL_TOOLS, REGISTRY, TOOL_SCHEMAS, call_tool
 
@@ -124,6 +126,39 @@ class ChatAgent:
         response.raise_for_status()
         return response.json()
 
+    def _request(self, messages: list[dict], before_request) -> dict:
+        # 每次模型请求独立租用已预检的出口；连接阶段失败才能重试，不能重跑工具循环。
+        for attempt in range(2):
+            before_request()
+            with proxy_lease(self.proxy, source_key="agent", url=self.endpoint) as proxy:
+                before_request()  # 等待节点预检期间，用户可能已取消。
+                try:
+                    with httpx.Client(
+                        timeout=httpx.Timeout(90, connect=10, pool=10),
+                        proxy=proxy, trust_env=False,
+                    ) as client:
+                        data = self._post(client, messages)
+                except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ProxyError) as exc:
+                    # 证书校验失败不可通过重试/放宽校验绕过；读超时也不重发，避免重复计费。
+                    cause = exc
+                    seen = set()
+                    while cause is not None and id(cause) not in seen:
+                        seen.add(id(cause))
+                        if isinstance(cause, ssl.SSLCertVerificationError) or "CERTIFICATE_VERIFY_FAILED" in str(cause):
+                            raise
+                        cause = cause.__cause__ or cause.__context__
+                    get_manager().note_result(self.endpoint, proxy, False)
+                    if attempt:
+                        raise
+                    logger.info("agent 连接节点失败，重新选择出口后重试")
+                    continue
+                except httpx.HTTPStatusError:
+                    # 上游已响应，认证或模型配置错误不属于节点连接故障。
+                    get_manager().note_result(self.endpoint, proxy, True)
+                    raise
+                get_manager().note_result(self.endpoint, proxy, True)
+                return data
+
     def chat(self, question: str, history: list[dict] | None = None, *, on_progress=None, stop=None) -> dict:
         """跑一轮问答，返回答复与本轮实际调用过的工具。
 
@@ -176,59 +211,57 @@ class ChatAgent:
             if on_progress:on_progress({'phase':phase,'tool':tool})
 
         try:
-            with httpx.Client(timeout=90, proxy=self.proxy, trust_env=False) as client:
-                for _ in range(MAX_TOOL_ROUNDS):
-                    progress('thinking')
-                    data = self._post(client, messages)
-                    choices = data.get("choices") or []
-                    if not choices:
-                        return {
-                            "answer": "AI 接口没有返回内容，稍后再试。",
-                            "tools_used": tools_used,
-                            "proposals": proposals,
-                            "enabled": True,
-                        }
+            for _ in range(MAX_TOOL_ROUNDS):
+                data = self._request(messages, lambda: progress('thinking'))
+                choices = data.get("choices") or []
+                if not choices:
+                    return {
+                        "answer": "AI 接口没有返回内容，稍后再试。",
+                        "tools_used": tools_used,
+                        "proposals": proposals,
+                        "enabled": True,
+                    }
 
-                    message = choices[0].get("message") or {}
-                    tool_calls = (message.get("tool_calls") or [])[:MAX_TOOL_CALLS]
+                message = choices[0].get("message") or {}
+                tool_calls = (message.get("tool_calls") or [])[:MAX_TOOL_CALLS]
 
-                    if not tool_calls:
-                        answer = (message.get("content") or "").strip()
-                        return {
-                            "answer": answer or "没能得出结论，换个说法再问问？",
-                            "tools_used": tools_used,
-                            "proposals": proposals,
-                            "enabled": True,
-                        }
+                if not tool_calls:
+                    answer = (message.get("content") or "").strip()
+                    return {
+                        "answer": answer or "没能得出结论，换个说法再问问？",
+                        "tools_used": tools_used,
+                        "proposals": proposals,
+                        "enabled": True,
+                    }
 
-                    # 带着 tool_calls 原样回填，再逐个附上执行结果
+                # 带着 tool_calls 原样回填，再逐个附上执行结果
+                messages.append({
+                    "role": "assistant",
+                    "content": message.get("content") or "",
+                    "tool_calls": tool_calls,
+                })
+
+                for call in tool_calls:
+                    func = call.get("function") or {}
+                    name = func.get("name") or ""
+                    progress('tool',name)
+                    arguments=func.get('arguments') or '{}'
+                    try:cache_key=(name,json.dumps(json.loads(arguments) if isinstance(arguments,str) else arguments,sort_keys=True,ensure_ascii=False))
+                    except (ValueError,TypeError):cache_key=(name,str(arguments))
+                    cached=cache_key in tool_cache
+                    if cached:result=tool_cache[cache_key]
+                    elif tool_count>=MAX_TOOL_CALLS:result=json.dumps({'error':'本轮工具调用已达上限，请缩小查询范围'},ensure_ascii=False)
+                    else:
+                        result=call_tool(name,arguments);tool_cache[cache_key]=result;tool_count+=1
+                    if name in REGISTRY and not cached:
+                        tools_used.append(name)
+                    if name in PROPOSAL_TOOLS and not cached:
+                        proposals += _extract_proposals(result)
                     messages.append({
-                        "role": "assistant",
-                        "content": message.get("content") or "",
-                        "tool_calls": tool_calls,
+                        "role": "tool",
+                        "tool_call_id": call.get("id") or "",
+                        "content": result if len(result)<=MAX_TOOL_RESULT_CHARS else json.dumps({"truncated":True,"preview":result[:MAX_TOOL_RESULT_CHARS],"message":"结果已截断，请使用更精确的查询条件"},ensure_ascii=False),
                     })
-
-                    for call in tool_calls:
-                        func = call.get("function") or {}
-                        name = func.get("name") or ""
-                        progress('tool',name)
-                        arguments=func.get('arguments') or '{}'
-                        try:cache_key=(name,json.dumps(json.loads(arguments) if isinstance(arguments,str) else arguments,sort_keys=True,ensure_ascii=False))
-                        except (ValueError,TypeError):cache_key=(name,str(arguments))
-                        cached=cache_key in tool_cache
-                        if cached:result=tool_cache[cache_key]
-                        elif tool_count>=MAX_TOOL_CALLS:result=json.dumps({'error':'本轮工具调用已达上限，请缩小查询范围'},ensure_ascii=False)
-                        else:
-                            result=call_tool(name,arguments);tool_cache[cache_key]=result;tool_count+=1
-                        if name in REGISTRY and not cached:
-                            tools_used.append(name)
-                        if name in PROPOSAL_TOOLS and not cached:
-                            proposals += _extract_proposals(result)
-                        messages.append({
-                            "role": "tool",
-                            "tool_call_id": call.get("id") or "",
-                            "content": result if len(result)<=MAX_TOOL_RESULT_CHARS else json.dumps({"truncated":True,"preview":result[:MAX_TOOL_RESULT_CHARS],"message":"结果已截断，请使用更精确的查询条件"},ensure_ascii=False),
-                        })
 
             # 轮次用尽还在调工具，说明模型绕不出来了
             logger.warning(f"agent 工具调用超过 {MAX_TOOL_ROUNDS} 轮仍未收敛")
@@ -245,6 +278,14 @@ class ChatAgent:
             logger.warning(f"agent 接口返回错误: {exc.response.status_code} {exc}")
             return {
                 "answer": f"AI 接口返回错误（HTTP {exc.response.status_code}），请检查接口地址、模型名与 API Key。",
+                "tools_used": tools_used,
+                "proposals": proposals,
+                "enabled": True,
+            }
+        except (httpx.TransportError, TimeoutError) as exc:
+            logger.warning(f"agent 网络连接失败: {type(exc).__name__}")
+            return {
+                "answer": "AI 接口连接失败，请检查代理节点和网关连通性；内置代理启用时会预检节点，连接失败后最多重试一次。证书错误需检查网关证书配置。",
                 "tools_used": tools_used,
                 "proposals": proposals,
                 "enabled": True,
