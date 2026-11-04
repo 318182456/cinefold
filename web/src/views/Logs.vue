@@ -29,10 +29,10 @@ const filtered = computed(() => {
 })
 
 function lineClass(line) {
-  if (line.includes('| ERROR')) return 'text-red-400'
-  if (line.includes('| WARNING')) return 'text-amber-400'
-  if (line.includes('| DEBUG')) return 'text-gray-600'
-  return 'text-gray-400'
+  if (/\|\s*(ERROR|CRITICAL)\b/.test(line)) return 'log-error'
+  if (/\|\s*WARNING\b/.test(line)) return 'log-warning'
+  if (/\|\s*(DEBUG|TRACE)\b/.test(line)) return 'log-debug'
+  return 'log-info'
 }
 
 async function load() {
@@ -115,14 +115,14 @@ onUnmounted(() => { disposed = true; revision++; controller?.abort(); clearTimeo
     <div
       v-if="filtered.length"
       ref="box"
-      class="min-h-0 flex-1 overflow-auto overscroll-contain rounded-xl border border-gray-800 bg-black/40 p-3"
+      class="log-console min-h-0 flex-1 overflow-auto overscroll-contain rounded-xl border border-gray-800"
       tabindex="0"
       aria-label="日志内容"
     >
       <pre
         v-for="(line, index) in filtered"
         :key="index"
-        class="whitespace-pre-wrap break-all font-mono text-[11px] leading-5"
+        class="log-line whitespace-pre-wrap break-words font-mono"
         :class="lineClass(line)"
         >{{ line }}</pre
       >
@@ -131,3 +131,14 @@ onUnmounted(() => { disposed = true; revision++; controller?.abort(); clearTimeo
     <EmptyState v-else text="没有日志" hint="日志文件位于数据目录的 logs 子目录" />
   </div>
 </template>
+
+<style scoped>
+.log-console { background: #fff; padding: 8px 0; }
+.log-line { margin: 0; padding: 3px 12px; font-size: 13px; line-height: 1.7; overflow-wrap: anywhere; tab-size: 2; }
+.log-line:nth-child(even) { background: #f3f6f3; }
+.log-line:hover { background: #e8efe9; }
+.log-info { color: #243d2e; }
+.log-debug { color: #61766a; }
+.log-warning { color: #854d0e; background: #fffbeb !important; border-left: 3px solid #b45309; padding-left: 9px; }
+.log-error { color: #991b1b; background: #fef2f2 !important; border-left: 3px solid #b91c1c; padding-left: 9px; }
+</style>

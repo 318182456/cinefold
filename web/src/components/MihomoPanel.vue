@@ -79,7 +79,7 @@ onUnmounted(() => { disposed = true; clearInterval(timer) })
     <div class="flex flex-wrap items-center justify-between gap-2">
       <h3 class="text-sm font-medium">内置 Mihomo 代理</h3>
       <span class="text-xs" :class="state?.running ? 'text-brand' : 'text-gray-500'">
-        {{ state?.running ? '运行中' : state?.installed ? '已停止' : '未安装内核' }}
+        {{ state?.running ? state.ready === false ? '正在就绪' : '运行中' : state?.installed ? '已停止' : '未安装内核' }}
         {{ state?.version || '' }}
       </span>
     </div>
@@ -92,7 +92,7 @@ onUnmounted(() => { disposed = true; clearInterval(timer) })
       <label class="flex items-center gap-2 text-sm">
         <input v-model="form.automatic" type="checkbox" class="accent-emerald-500" />自动选择可用节点
       </label>
-      <p class="text-xs text-gray-500">自动模式最多尝试 3 个节点，成功结果按站点保留 10 分钟，失败节点避开 2 分钟；404 不换节点。指定节点作为该数据源的优先节点，关闭自动模式后固定使用。</p>
+      <p class="text-xs text-gray-500">请求先等待内核就绪，再并行检测候选节点的连通性；通过预检仍可能遇到目标站验证。TRAWL 最多尝试 3 个出口，成功结果按站点保留 10 分钟，失败节点避开 2 分钟；404 不换节点。关闭自动模式后固定使用指定节点。</p>
       <div>
         <label for="mihomo-subscription" class="label">Clash/Mihomo 订阅地址</label>
         <input id="mihomo-subscription" v-model="form.subscription" type="password" autocomplete="off" class="input" placeholder="https://…" />
@@ -155,8 +155,8 @@ onUnmounted(() => { disposed = true; clearInterval(timer) })
         </select>
         <input id="mihomo-target" v-model="target" class="input" />
         <div class="flex flex-wrap gap-2">
-          <button class="btn-ghost text-xs" :disabled="!state?.running || !state?.enabled" @click="test(false)">测试本机代理</button>
-          <button class="btn-ghost text-xs" :disabled="!state?.running || !state?.enabled" @click="test(true)">测试 TRAWL 代理</button>
+          <button class="btn-ghost text-xs" :disabled="!state?.running || !state?.enabled || state?.ready === false" @click="test(false)">测试本机代理</button>
+          <button class="btn-ghost text-xs" :disabled="!state?.running || !state?.enabled || state?.ready === false" @click="test(true)">测试 TRAWL 代理</button>
         </div>
       </div>
     </fieldset>

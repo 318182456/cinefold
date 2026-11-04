@@ -30,6 +30,7 @@ def _loop(generation: int) -> None:
 
     offset = 0
     backoff = 1
+    connected = False
 
     def outdated() -> bool:
         return _stop.is_set() or generation != _generation
@@ -47,6 +48,7 @@ def _loop(generation: int) -> None:
         try:
             # 每轮重建，配置改了 token/代理后无需重启线程
             updates = TelegramNotifier().get_updates(offset, POLL_TIMEOUT)
+            recovered = backoff > 1
             backoff = 1
         except Exception as exc:
             if outdated():
@@ -59,6 +61,9 @@ def _loop(generation: int) -> None:
         # 长轮询期间可能已被停止或重启，这批消息交给新线程重新取
         if outdated():
             break
+        if not connected or recovered:
+            logger.info("[TG] 长轮询连接正常" if not connected else "[TG] 长轮询连接已恢复")
+            connected = True
 
         for update in updates:
             # 先推进 offset 再处理：处理失败也不该让同一条消息卡住整个队列

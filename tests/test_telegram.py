@@ -14,6 +14,7 @@ def notifier(monkeypatch):
         telegram_bot_token='123:private-token', telegram_chat_id='456', telegram_spoiler=False,
         proxy='socks5://user:password@proxy.test:1080'))
     monkeypatch.setattr(telegram.time, 'sleep', lambda _: None)
+    monkeypatch.setattr(telegram, 'get_manager', lambda: SimpleNamespace(note_result=lambda *args: None))
     @contextmanager
     def lease(fallback=None, **kwargs):
         yield fallback
@@ -161,3 +162,35 @@ def test_image_download_preflights_image_host(notifier,monkeypatch):
     install_transport(monkeypatch,lambda request:httpx.Response(200,content=b'image'))
     assert notifier.download_image('https://artwork.example/cover.jpg')==b'image'
     assert targets==['https://artwork.example/cover.jpg']
+
+
+@pytest.mark.parametrize('status,healthy', [(200, True), (401, True), (403, True), (429, False), (502, False)])
+def test_real_telegram_response_updates_exit_health(notifier, monkeypatch, status, healthy):
+    results = []
+    monkeypatch.setattr(telegram, 'get_manager', lambda: SimpleNamespace(note_result=lambda *args: results.append(args)))
+    install_transport(monkeypatch, lambda request: httpx.Response(status, json={'ok': status == 200}))
+    notifier.test_connection()
+    assert results == [(telegram.API_BASE, notifier.proxy, healthy)]
+
+
+def test_photo_fallback_releases_original_node_before_text(notifier, monkeypatch):
+    active = []
+    @contextmanager
+    def lease(*args, **kwargs):
+        assert not active, 'fallback must not queue behind its own node lease'
+        active.append(True)
+        try:
+            yield notifier.proxy
+        finally:
+            active.pop()
+    monkeypatch.setattr(telegram, 'proxy_lease', lease)
+    install_transport(monkeypatch, lambda request: httpx.Response(
+        400 if request.url.path.endswith('/sendPhoto') else 200, json={'ok': True}))
+    assert notifier.send_photo_message('https://image.example/cover.jpg', 'caption')
+    assert not active
+
+
+def test_polling_rejected_payload_is_not_a_successful_empty_poll(notifier, monkeypatch):
+    install_transport(monkeypatch, lambda request: httpx.Response(200, json={'ok': False}))
+    with pytest.raises(ValueError, match='未接受'):
+        notifier.get_updates()

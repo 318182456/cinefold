@@ -200,6 +200,114 @@ def test_parallel_requests_use_different_verified_nodes(manager, network):
     assert not manager.allocated
 
 
+def test_startup_waits_for_listener_before_probing_and_does_not_poison_exits(manager, network):
+    entered = threading.Event()
+    manager.binary.write_bytes(b'core')
+    manager.monitor = threading.current_thread()
+    manager.process = type('Process', (), {'poll': lambda self: None})()
+    async def target(index, request):
+        entered.set()
+        return httpx.Response(302)
+    network(target)
+    def request():
+        with manager.lease(source_key='telegram', url='https://api.telegram.org/', timeout=2):
+            return True
+    try:
+        with ThreadPoolExecutor(1) as pool:
+            future = pool.submit(request)
+            assert not entered.wait(0.1)
+            assert not manager.health and not manager.allocated
+            manager.ready.set()
+            with manager.available:
+                manager.available.notify_all()
+            assert future.result(timeout=1)
+        assert entered.is_set() and not manager.health
+    finally:
+        manager.monitor = None
+        manager.process = None
+
+
+def test_unready_kernel_times_out_without_testing_any_exit(manager, network):
+    manager.binary.write_bytes(b'core')
+    manager.monitor = threading.current_thread()
+    async def target(index, request):
+        pytest.fail('a closed local listener must not be tested as a failed exit')
+    requests, _ = network(target)
+    try:
+        with pytest.raises(TimeoutError, match='尚未就绪'):
+            with manager.lease(url='https://source.example/', timeout=0.1):
+                pytest.fail('cannot assign an unready listener')
+        assert not requests and not manager.health and not manager.allocated
+    finally:
+        manager.monitor = None
+
+
+def test_shared_lease_cools_down_real_transport_failure_and_next_request_changes_exit(manager, network):
+    async def target(index, request):
+        return httpx.Response(200)
+    network(target)
+    url = 'https://api.telegram.org/'
+    with pytest.raises(httpx.RemoteProtocolError):
+        with mihomo.proxy_lease(source_key='telegram', url=url) as first:
+            raise httpx.RemoteProtocolError('server disconnected')
+    with mihomo.proxy_lease(source_key='telegram', url=url) as second:
+        assert manager._probe_key(first, url) != manager._probe_key(second, url)
+    assert not manager.allocated
+
+
+def test_monitor_starts_kernel_immediately_instead_of_waiting_first_interval(manager, monkeypatch):
+    started = threading.Event()
+    manager.binary.write_bytes(b'core')
+    monkeypatch.setattr(manager, '_start', started.set)
+    manager.start_monitor()
+    assert started.wait(1)
+
+
+def test_verified_kernel_restart_discards_old_listener_failures(manager, monkeypatch):
+    from types import SimpleNamespace
+    manager.binary.write_bytes(b'core')
+    proxy = manager.proxy(url='https://api.telegram.org/')
+    manager.note_result('https://api.telegram.org/', proxy, False)
+    assert manager.health
+    monkeypatch.setattr(manager, '_validate', lambda: None)
+    monkeypatch.setattr(mihomo.subprocess, 'Popen', lambda *args, **kwargs: SimpleNamespace(
+        poll=lambda: None, terminate=lambda: None, wait=lambda **kw: None))
+    original = httpx.Client
+    monkeypatch.setattr(mihomo.httpx, 'Client', lambda **kwargs: original(
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, json={'version': 'test'}))))
+    manager._start()
+    assert manager.ready.is_set() and not manager.health and not manager.probes and not manager.winners
+    assert manager.proxy(url='https://api.telegram.org/')
+    manager._stop()
+    assert not manager.ready.is_set()
+
+
+def test_telegram_poll_disconnect_changes_actual_exit_on_next_poll(manager, network, monkeypatch):
+    from types import SimpleNamespace
+    from app.modules.notify import telegram
+    async def target(index, request):
+        return httpx.Response(302)
+    network(target)
+    monkeypatch.setattr(telegram, 'get_settings', lambda: SimpleNamespace(
+        telegram_bot_token='private-token', telegram_chat_id='chat', telegram_spoiler=False, proxy=''))
+    exits = []
+    def transport(**kwargs):
+        exits.append(manager.proxy_name(kwargs['proxy']))
+        def respond(request):
+            if len(exits) == 1:
+                raise httpx.RemoteProtocolError('disconnected', request=request)
+            return httpx.Response(200, json={'ok': True, 'result': []})
+        return httpx.MockTransport(respond)
+    monkeypatch.setattr(telegram.httpx, 'HTTPTransport', transport)
+    notifier = telegram.TelegramNotifier()
+    with pytest.raises(RuntimeError, match='disconnected'):
+        notifier.get_updates()
+    assert notifier.get_updates() == []
+    assert len(exits) == 2 and exits[0] != exits[1]
+    assert manager.winners['api.telegram.org'][0] == exits[1]
+    assert not manager.allocated
+
+
 def test_authenticated_proxy_tunnel_and_real_target_tls(manager, tmp_path, monkeypatch):
     """No HTTP mocks: tunnel TLS to a local HTTPS server through an auth proxy."""
     import base64

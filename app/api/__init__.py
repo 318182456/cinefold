@@ -72,12 +72,13 @@ def init_cinefold() -> None:
 async def lifespan(app: FastAPI):
     init_cinefold()
     yield
+    # Stop consumers before closing the proxy listener they are still using.
+    from app.modules.notify.tgpolling import stop_polling
+    stop_polling()
     from app.services.mihomo import get_manager
     get_manager().shutdown()
     from app.api.endpoints.picproxy import close_client
     await close_client()
-    from app.modules.notify.tgpolling import stop_polling
-    stop_polling()
     from app.modules.watcher import stop_watching
     stop_watching()
     from app.scheduler import stop_scheduler

@@ -143,6 +143,7 @@ class Mihomo:
         self.operation = threading.Lock()
         self.stopping = threading.Event()
         self.monitor = None
+        self.ready = threading.Event()
         # A crash between binary replacement and health verification must
         # restore the previous executable before any automatic start.
         marker, backup = root / "installing.json", root / "previous"
@@ -188,6 +189,7 @@ class Mihomo:
                     "preflight": self._probe_status(),
                     "installed": self.binary.exists(), "version": self.version,
                     "running": self.process is not None and self.process.poll() is None,
+                    "ready": self.ready.is_set(),
                     "nodes": [{"name": node["name"], "type": node["type"]} for node in self.nodes],
                     "latest": self.latest and self.latest["version"], "task": dict(self.state)}
 
@@ -249,6 +251,7 @@ class Mihomo:
         with self.lock:
             if self.process is not None and self.process.poll() is None:
                 return
+            self.ready.clear()
             self.probes.clear()
             command = [str(self.binary), "-d", str(self.root), "-f", str(self.root / "config.json")]
             if sys.platform.startswith("linux"):
@@ -265,6 +268,14 @@ class Mihomo:
                     response = client.get(f"{CONTROLLER}/version", headers={"Authorization": f"Bearer {self._credentials()['secret']}"})
                     if response.status_code == 200:
                         self.version = response.json().get("version", self.version)
+                        with self.available:
+                            # Failures while the previous listener was down do
+                            # not describe the recovered kernel's exits.
+                            self.health.clear()
+                            self.probes.clear()
+                            self.winners.clear()
+                            self.ready.set()
+                            self.available.notify_all()
                         return
             except httpx.HTTPError:
                 pass
@@ -274,6 +285,7 @@ class Mihomo:
 
     def _stop(self):
         with self.lock:
+            self.ready.clear()
             process, self.process = self.process, None
         if process is not None:
             if process.poll() is None:
@@ -575,6 +587,16 @@ class Mihomo:
                 if self.draining:
                     self.available.wait(0.05)
                     continue
+                # Startup is asynchronous. Never probe a closed local listener:
+                # a single refused connection otherwise poisons every exit for
+                # this host for two minutes before the kernel even starts.
+                if self.monitor is not None and (not self.ready.is_set() or self.process is None or self.process.poll() is not None):
+                    if not self.binary.exists() or not self.nodes:
+                        raise RuntimeError("内置代理尚未安装内核或没有可用节点，请先完成配置")
+                    self.available.wait(min(0.05, max(0, deadline - now)))
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError("内置代理内核尚未就绪，请查看内核运行状态")
+                    continue
                 busy = {self._identity(node) for node in self.nodes if node["name"] in self.allocated}
                 excluded = set()
                 for node in self.nodes:
@@ -739,22 +761,19 @@ class Mihomo:
 
         def watch():
             attempts = 0
-            while not self.stopping.wait(5):
+            while not self.stopping.is_set():
                 if not self.config["enabled"] or self.status()["running"]:
                     attempts = 0
-                    continue
-                if self.operation.locked() or not self.binary.exists() or not self.nodes or attempts >= 3:
-                    continue
-                if not self.operation.acquire(blocking=False):
-                    continue
-                try:
-                    self._start()
-                    attempts = 0
-                except Exception as exc:
-                    attempts += 1
-                    self._progress("failed", _error(exc), running=False)
-                finally:
-                    self.operation.release()
+                elif self.binary.exists() and self.nodes and attempts < 3 and self.operation.acquire(blocking=False):
+                    try:
+                        self._start()
+                        attempts = 0
+                    except Exception as exc:
+                        attempts += 1
+                        self._progress("failed", _error(exc), running=False)
+                    finally:
+                        self.operation.release()
+                self.stopping.wait(5)
 
         self.monitor = threading.Thread(target=watch, name="mihomo-monitor", daemon=True)
         self.monitor.start()
@@ -789,5 +808,12 @@ def proxy_lease(fallback=None, explicit=None, source_key="", url=""):
     if explicit is not None:
         yield explicit
     else:
-        with get_manager().lease(source_key=source_key, url=url) as proxy:
-            yield proxy or fallback
+        manager = get_manager()
+        with manager.lease(source_key=source_key, url=url) as proxy:
+            try:
+                yield proxy or fallback
+            except httpx.TransportError:
+                # Shared by notifications, subtitles, artwork and crawlers.
+                # A successful HEAD is not proof the real request will work.
+                manager.note_result(url, proxy, False)
+                raise

@@ -13,7 +13,7 @@ import httpx
 from loguru import logger
 
 from app.core.config import get_settings
-from app.services.mihomo import proxy_lease
+from app.services.mihomo import get_manager, proxy_lease
 
 API_BASE = "https://api.telegram.org"
 
@@ -55,8 +55,14 @@ class TelegramNotifier:
         # global proxy must not bypass an enabled, working in-app proxy core.
         with proxy_lease(self.proxy, source_key="telegram", url=target) as proxy:
             transport = _ConnectRetryTransport(proxy)
+            def feedback(response):
+                # Telegram 400/401/403 are API/authentication results, not a
+                # broken tunnel. Rate limiting and upstream failures cool down.
+                get_manager().note_result(target, proxy,
+                    response.status_code < 500 and response.status_code not in (407, 408, 429))
             with httpx.Client(timeout=httpx.Timeout(timeout, connect=min(timeout, 10)),
-                              transport=transport, trust_env=False) as client:
+                              transport=transport, trust_env=False,
+                              event_hooks={"response": [feedback]}) as client:
                 yield client
 
     @staticmethod
@@ -73,8 +79,7 @@ class TelegramNotifier:
             message = message.replace(self.token, '[token]')
         message = re.sub(r'(?<=//)[^/@\s]+:[^/@\s]+@', '[credentials]@', message)
         if isinstance(exc, httpx.ConnectError) and any(word in message.lower() for word in ('ssl', 'tls', 'handshake')):
-            route = '经代理' if self.proxy else '直连'
-            return f'TLS 握手失败（{route}，建连重试后仍失败，请检查代理节点或网络链路）：{message}'
+            return f'TLS 握手失败（建连重试后仍失败，请检查当前代理节点或网络链路）：{message}'
         return message
 
     # ------------------------------------------------------------------
@@ -117,12 +122,10 @@ class TelegramNotifier:
         try:
             with self._client() as client:
                 response = client.post(self._api("sendPhoto"), json=payload)
-                if response.status_code >= 400:
-                    logger.warning(
-                        f"Telegram 发图失败({response.status_code})，降级为文本"
-                    )
-                    return self.send_text_message(caption, chat_id)
-                self._accepted(response)
+            if response.status_code >= 400:
+                logger.warning(f"Telegram 发图失败({response.status_code})，降级为文本")
+                return self.send_text_message(caption, chat_id)
+            self._accepted(response)
             return True
         except Exception as exc:
             logger.error(f"Telegram 发图异常: {self._safe_error(exc)}，降级为文本")
@@ -208,8 +211,7 @@ class TelegramNotifier:
         try:
             with self._client() as client:
                 response = client.get(self._api("getWebhookInfo"))
-                response.raise_for_status()
-                return response.json().get("result") or {}
+                return self._accepted(response).get("result") or {}
         except Exception as exc:
             logger.warning(f"获取 webhook 信息失败: {self._safe_error(exc)}")
             return {}
@@ -267,8 +269,7 @@ class TelegramNotifier:
         try:
             with self._client(timeout + 15) as client:
                 response = client.post(self._api("getUpdates"), json=params)
-                response.raise_for_status()
-                return response.json().get("result") or []
+                return self._accepted(response).get("result") or []
         except httpx.HTTPError as exc:
             # 上层轮询线程会记录异常，避免其中带出 Bot API URL 内的 token。
             raise RuntimeError(self._safe_error(exc)) from None
