@@ -16,7 +16,8 @@ const configStore = useConfigStore()
 const menuOpen = ref(false)
 const menuButton = ref(null)
 const sidebar = ref(null)
-const version = ref('')
+const version = __APP_VERSION__
+const backendVersion = ref('')
 // 检测不到新版本时（镜像私有、无网络）保持为空，不显示红点
 const update = ref(null)
 
@@ -125,7 +126,7 @@ onMounted(async () => {
   configStore.load()
   try {
     const data = await getVersion()
-    version.value = data?.version || ''
+    backendVersion.value = data?.version || ''
   } catch {
     // 版本获取失败不影响使用
   }
@@ -159,6 +160,7 @@ onMounted(async () => {
       </nav>
       <div class="sidebar-footer">
         <RouterLink :to="{name:'Profile'}" class="sidebar-account"><span class="account-avatar"><AppIcon name="user" :size="17" /></span><span class="min-w-0 flex-1"><span class="block text-xs text-gray-200">我的工作区</span><span class="block text-[11px] text-gray-500">{{ version ? `cinefold v${version}` : '账户与安全' }}</span></span><AppIcon name="chevron" :size="14" /></RouterLink>
+        <RouterLink v-if="backendVersion && backendVersion !== version" :to="{name:'Config',query:{group:'upgrade'}}" class="mt-2 block text-[11px] text-amber-400" :title="`当前界面 v${version}，服务 v${backendVersion}`">界面与服务版本不同 · 检查更新</RouterLink>
         <div class="mt-3 flex items-center justify-between"><RouterLink :to="{name:'Config',query:{group:'other'}}" class="text-[11px] text-gray-500 hover:text-gray-200">{{ update ? `可更新 v${update.latest}` : '设置与偏好' }}</RouterLink><button class="icon-button !h-8 !w-8" aria-label="退出登录" title="退出登录" @click="logout"><AppIcon name="logout" :size="16" /></button></div>
       </div>
     </aside>

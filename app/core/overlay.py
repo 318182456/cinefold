@@ -17,6 +17,7 @@ import os
 import re
 import shutil
 import sys
+import time
 from pathlib import Path
 
 _SEMVER_RE = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)(?:-(\d+))?$")
@@ -86,7 +87,7 @@ def web_version() -> str:
 def read_version(root: Path) -> str:
     try:
         return (root / _VERSION_FILE).read_text(encoding="utf-8").strip()
-    except OSError:
+    except (OSError, UnicodeError):
         return ""
 
 
@@ -123,6 +124,45 @@ def _should_use(overlay: Path, image: Path) -> tuple[bool, str]:
     return True, ""
 
 
+def retire_stale_web(image: Path, bundled_web: Path | None = None) -> Path | None:
+    """镜像追上前端更新时，保留旧包并退出覆盖，避免 nginx 永远读旧界面。"""
+    bundled_web = bundled_web or Path('/usr/share/nginx/html')
+    current = web_current()
+    if not current.is_dir() or current.is_symlink():
+        return None
+    bundled_version = read_version(bundled_web) if (bundled_web / 'VERSION').exists() else read_version(image)
+    image_version = parse_version(bundled_version)
+    current_version = parse_version(read_version(current))
+    if (not image_version or not current_version or current_version > image_version
+            or not (bundled_web / 'index.html').is_file()):
+        return None
+    try:
+        html = (bundled_web / 'index.html').read_text(encoding='utf-8')
+        assets = re.findall(r'''(?:src|href)\s*=\s*["'](/assets/[^"']+)["']''', html)
+        # 入口页存在还不够；新镜像缺主 JS/CSS 时保留当前可用前端。
+        if not assets:
+            return None
+        bundled_root = bundled_web.resolve()
+        for asset in assets:
+            target = (bundled_web / asset.lstrip('/').split('?', 1)[0]).resolve()
+            if not target.is_relative_to(bundled_root) or not target.is_file():
+                return None
+    except (OSError, UnicodeError):
+        return None
+    # ASVS 5.3.2：仅在配置的更新目录内生成归档名，不接收用户路径、不删除文件。
+    parent = current.parent.resolve()
+    if current.resolve().parent != parent:
+        return None
+    version = '-'.join(map(str, current_version))
+    retired = parent / f'retired-{version}-{time.time_ns()}'
+    try:
+        current.rename(retired)
+    except OSError as exc:
+        print(f'[启动] 旧前端覆盖目录未能退出，保留原目录：{type(exc).__name__}', file=sys.stderr)
+        return None
+    return retired
+
+
 def activate() -> str:
     """挂载 overlay，返回实际生效的版本号。
 
@@ -130,6 +170,10 @@ def activate() -> str:
     也省下挂载卷的空间。删失败不影响启动。
     """
     image = image_root()
+    # 前后端分别安装；不能因后端没有 overlay，就跳过前端的版本选择。
+    retired_web = retire_stale_web(image)
+    if retired_web:
+        print(f'[启动] 镜像前端已接管，旧前端保留于 {retired_web.name}', file=sys.stderr)
     overlay = backend_current()
 
     use, reason = _should_use(overlay, image)

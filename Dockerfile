@@ -8,6 +8,8 @@ COPY web/package.json web/package-lock.json ./
 RUN npm ci
 
 COPY web/ ./
+# 与后端共用唯一版本源；构建时将实际界面版本写入资源。
+COPY VERSION /VERSION
 RUN npm run build
 
 
@@ -92,6 +94,7 @@ COPY main.py /app/main.py
 COPY VERSION /app/VERSION
 
 COPY --from=web /web/dist /usr/share/nginx/html
+COPY VERSION /usr/share/nginx/html/VERSION
 
 COPY deploy/nginx.conf /etc/nginx/nginx.conf
 COPY deploy/starting.html /etc/nginx/html/__starting.html
