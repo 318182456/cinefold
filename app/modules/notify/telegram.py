@@ -6,12 +6,14 @@ webhook 由 Telegram 回调本机（需公网 HTTPS），polling 靠 getUpdates 
 from __future__ import annotations
 
 import re
+from contextlib import contextmanager
 import time
 
 import httpx
 from loguru import logger
 
 from app.core.config import get_settings
+from app.services.mihomo import proxy_lease
 
 API_BASE = "https://api.telegram.org"
 
@@ -47,12 +49,23 @@ class TelegramNotifier:
     def _api(self, method: str) -> str:
         return f"{API_BASE}/bot{self.token}/{method}"
 
-    def _client(self, timeout: float = 30) -> httpx.Client:
-        # 只重试建连阶段：读取响应超时可能意味着消息已经发出，不能自动重发。
-        # 显式使用设置中的代理，避免继承容器里意外设置的代理变量。
-        transport = _ConnectRetryTransport(self.proxy)
-        return httpx.Client(timeout=httpx.Timeout(timeout, connect=min(timeout, 10)),
-                            transport=transport, trust_env=False)
+    @contextmanager
+    def _client(self, timeout: float = 30, target: str = API_BASE):
+        # Use the same preflight and node lease as the agent and scraper. A stale
+        # global proxy must not bypass an enabled, working in-app proxy core.
+        with proxy_lease(self.proxy, source_key="telegram", url=target) as proxy:
+            transport = _ConnectRetryTransport(proxy)
+            with httpx.Client(timeout=httpx.Timeout(timeout, connect=min(timeout, 10)),
+                              transport=transport, trust_env=False) as client:
+                yield client
+
+    @staticmethod
+    def _accepted(response: httpx.Response) -> dict:
+        response.raise_for_status()
+        payload = response.json()
+        if not payload.get("ok"):
+            raise ValueError("Telegram 未接受请求")
+        return payload
 
     def _safe_error(self, exc: Exception) -> str:
         message = str(exc)
@@ -79,7 +92,7 @@ class TelegramNotifier:
                         "disable_web_page_preview": True,
                     },
                 )
-                response.raise_for_status()
+                self._accepted(response)
             return True
         except Exception as exc:
             logger.error(f"Telegram 发送文本失败: {self._safe_error(exc)}")
@@ -109,6 +122,7 @@ class TelegramNotifier:
                         f"Telegram 发图失败({response.status_code})，降级为文本"
                     )
                     return self.send_text_message(caption, chat_id)
+                self._accepted(response)
             return True
         except Exception as exc:
             logger.error(f"Telegram 发图异常: {self._safe_error(exc)}，降级为文本")
@@ -151,7 +165,7 @@ class TelegramNotifier:
                         "reply_to_message_id": message_id,
                     },
                 )
-                response.raise_for_status()
+                self._accepted(response)
             return True
         except Exception as exc:
             logger.error(f"Telegram 回复失败: {self._safe_error(exc)}")
@@ -160,7 +174,7 @@ class TelegramNotifier:
     def download_image(self, url: str) -> bytes | None:
         """部分图源有防盗链，需要带 Referer 才能取到。"""
         try:
-            with self._client() as client:
+            with self._client(target=url) as client:
                 response = client.get(
                     url,
                     headers={"Referer": "https://www.javbus.com/"},
@@ -178,8 +192,8 @@ class TelegramNotifier:
         try:
             with self._client() as client:
                 response = client.get(self._api("getMe"))
-                response.raise_for_status()
-                name = response.json().get("result", {}).get("username", "")
+                payload = self._accepted(response)
+                name = payload.get("result", {}).get("username", "")
                 return True, f"连接成功，Bot @{name}"
         except Exception as exc:
             return False, self._safe_error(exc)

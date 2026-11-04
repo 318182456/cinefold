@@ -1,5 +1,6 @@
 """Telegram 代理建连重试、重复发送保护与错误脱敏。"""
 from types import SimpleNamespace
+from contextlib import contextmanager
 
 import httpx
 import pytest
@@ -13,6 +14,10 @@ def notifier(monkeypatch):
         telegram_bot_token='123:private-token', telegram_chat_id='456', telegram_spoiler=False,
         proxy='socks5://user:password@proxy.test:1080'))
     monkeypatch.setattr(telegram.time, 'sleep', lambda _: None)
+    @contextmanager
+    def lease(fallback=None, **kwargs):
+        yield fallback
+    monkeypatch.setattr(telegram, 'proxy_lease', lease)
     return telegram.TelegramNotifier()
 
 
@@ -124,3 +129,35 @@ def test_photo_response_timeout_does_not_duplicate_unknown_delivery(notifier, mo
     install_transport(monkeypatch,handler)
     assert not notifier.send_photo_bytes(b'image-data','caption')
     assert len(requests)==1
+
+
+def test_notifier_uses_lease_proxy_instead_of_stale_fallback(notifier, monkeypatch):
+    leases=[]
+    @contextmanager
+    def lease(fallback=None, **kwargs):
+        leases.append((fallback,kwargs))
+        yield 'http://working-node.test:18080'
+    monkeypatch.setattr(telegram,'proxy_lease',lease)
+    options=install_transport(monkeypatch,lambda request:httpx.Response(200,json={'ok':True}))
+    assert notifier.send_text_message('test')
+    assert options[0]['proxy']=='http://working-node.test:18080'
+    assert leases[0][1]=={'source_key':'telegram','url':telegram.API_BASE}
+
+
+def test_http_200_rejection_is_not_reported_as_delivery(notifier,monkeypatch):
+    calls=[]
+    install_transport(monkeypatch,lambda request:(calls.append(request) or httpx.Response(200,json={'ok':False})))
+    assert not notifier.send_text_message('test')
+    assert len(calls)==1
+
+
+def test_image_download_preflights_image_host(notifier,monkeypatch):
+    targets=[]
+    @contextmanager
+    def lease(fallback=None,**kwargs):
+        targets.append(kwargs['url'])
+        yield fallback
+    monkeypatch.setattr(telegram,'proxy_lease',lease)
+    install_transport(monkeypatch,lambda request:httpx.Response(200,content=b'image'))
+    assert notifier.download_image('https://artwork.example/cover.jpg')==b'image'
+    assert targets==['https://artwork.example/cover.jpg']

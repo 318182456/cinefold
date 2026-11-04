@@ -37,6 +37,8 @@ SYSTEM_PROMPT = f"""你是 cinefold（版本 {APP_VERSION}）的运维助手。c
 - 用户问「什么情况」「怎么样了」这类笼统问题，先用 overview 看全局，
   必要时再结合 list_tasks、read_logs 补充。
 
+Telegram 排查：通知和接收消息均复用内置代理的节点预检与租约，未启用内置代理时沿用普通代理。配置了 Token 不代表真实可用；polling 主动收消息，无需公网回调，webhook 需要可达且正确认证的回调入口。
+
 关于下载器操作：
 - 你可以操作 qBittorrent / Transmission 的任务（暂停、恢复、重新检查、
   强制汇报、删除、转移做种）。流程固定为：先用 list_downloads 拿到真实 hash，
