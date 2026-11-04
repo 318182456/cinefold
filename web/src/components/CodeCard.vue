@@ -179,7 +179,7 @@ async function reset() {
 
 <template>
   <div
-    class="card flex gap-3 transition-colors hover:border-gray-700"
+    class="card media-card flex gap-3 transition-colors hover:border-gray-700"
     :class="[
       selectable ? 'cursor-pointer' : '',
       selectable && selected ? 'border-brand bg-brand/5' : '',
@@ -188,7 +188,7 @@ async function reset() {
   >
     <!-- 封面 -->
     <div
-      class="relative h-28 w-20 shrink-0 overflow-hidden rounded-lg bg-gray-800"
+      class="media-cover relative h-28 w-20 shrink-0 overflow-hidden rounded-lg bg-gray-800"
       @click.stop="selectable ? emit('toggle-select', item.code) : (lightboxOpen = true)"
     >
       <PrivateImage
@@ -258,7 +258,7 @@ async function reset() {
           下载
         </button>
         <div class="code-card-more" :class="{ 'code-card-more-open': moreOpen }" @click.stop>
-          <button type="button" class="btn-ghost px-2.5 py-1 text-xs sm:hidden" :aria-expanded="moreOpen" @click="moreOpen = !moreOpen">{{ moreOpen ? '收起' : '更多' }}</button>
+          <button type="button" class="btn-ghost px-2.5 py-1 text-xs" :aria-expanded="moreOpen" :aria-label="`${item.code} ${moreOpen ? '收起操作' : '更多操作'}`" @click="moreOpen = !moreOpen">{{ moreOpen ? '收起' : '更多' }}</button>
           <div class="code-card-more-items">
         <button
           class="btn-ghost px-2.5 py-1 text-xs"
@@ -298,12 +298,7 @@ async function reset() {
 </template>
 
 <style scoped>
-@media (min-width: 640px) {
-  .code-card-more, .code-card-more-items { display: contents; }
-}
-@media (max-width: 639px) {
   .code-card-more-open { flex-basis: 100%; }
   .code-card-more-items { display: flex; flex-wrap: wrap; gap: 0.375rem; padding-top: 0.375rem; }
   .code-card-more:not(.code-card-more-open) > .code-card-more-items { display: none; }
-}
 </style>

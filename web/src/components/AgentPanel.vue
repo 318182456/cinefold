@@ -40,11 +40,14 @@ const inputRef = ref(null)
 
 // 窄屏放不下固定尺寸，按视口留边收一下
 const panelSize = ref({ w: PANEL_W, h: PANEL_H })
+const viewportBottom = ref(window.innerHeight)
 
 function measure() {
+  const navigation = document.querySelector('.mobile-bottom-nav')?.getBoundingClientRect()
+  viewportBottom.value = navigation?.height ? navigation.top : window.innerHeight
   panelSize.value = {
     w: Math.min(PANEL_W, window.innerWidth - MARGIN * 2),
-    h: Math.min(PANEL_H, window.innerHeight - MARGIN * 2),
+    h: Math.min(PANEL_H, viewportBottom.value - MARGIN * 2),
   }
 }
 
@@ -57,7 +60,7 @@ let start = { x: 0, y: 0, px: 0, py: 0 }
 
 function clamp(x, y) {
   const maxX = window.innerWidth - BALL - MARGIN
-  const maxY = window.innerHeight - BALL - MARGIN
+  const maxY = viewportBottom.value - BALL - MARGIN
   return {
     x: Math.min(Math.max(x, MARGIN), Math.max(maxX, MARGIN)),
     y: Math.min(Math.max(y, MARGIN), Math.max(maxY, MARGIN)),
@@ -66,15 +69,20 @@ function clamp(x, y) {
 
 /** 面板贴着球展开，并保证整体不出视口。 */
 const panelStyle = computed(() => {
-  const { w, h } = panelSize.value
+  const { w } = panelSize.value
+  const above = Math.max(0, pos.value.y - MARGIN - 8)
+  const below = Math.max(0, viewportBottom.value - pos.value.y - BALL - MARGIN - 8)
+  const upwards = above >= below
+  // 拖到屏幕中部或旋转后，缩短面板，而不是让面板覆盖悬浮球。
+  const h = Math.min(panelSize.value.h, upwards ? above : below)
   const left = pos.value.x + BALL / 2 > window.innerWidth / 2
     ? pos.value.x + BALL - w   // 球在右半屏：面板向左展开
     : pos.value.x
-  const top = pos.value.y + BALL / 2 > window.innerHeight / 2
+  const top = upwards
     ? pos.value.y - h - 8      // 球在下半屏：面板向上展开
     : pos.value.y + BALL + 8
   const maxLeft = window.innerWidth - w - MARGIN
-  const maxTop = window.innerHeight - h - MARGIN
+  const maxTop = viewportBottom.value - h - MARGIN
   return {
     left: `${Math.min(Math.max(left, MARGIN), Math.max(maxLeft, MARGIN))}px`,
     top: `${Math.min(Math.max(top, MARGIN), Math.max(maxTop, MARGIN))}px`,
@@ -322,11 +330,12 @@ onBeforeUnmount(() => {
   <div v-if="available">
     <!-- 悬浮球：按下拖动，轻点开关面板 -->
     <button
-      class="fixed z-50 flex items-center justify-center rounded-full bg-brand text-white shadow-lg
+      class="agent-launcher fixed z-20 flex items-center justify-center rounded-full bg-brand text-white shadow-lg
              transition-colors hover:bg-brand-hover"
       :class="dragging ? 'cursor-grabbing' : 'cursor-grab'"
       :style="{ left: `${pos.x}px`, top: `${pos.y}px`, width: `${BALL}px`, height: `${BALL}px`, touchAction: 'none' }"
       :title="open ? '收起助手' : 'AI 助手（可拖动）'"
+      :aria-label="open ? '收起 AI 助手' : '打开 AI 助手'"
       @pointerdown="onPointerDown"
     >
       <svg v-if="!open" class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24">
@@ -344,7 +353,7 @@ onBeforeUnmount(() => {
     <!-- 对话面板 -->
     <div
       v-show="open"
-      class="fixed z-50 flex flex-col overflow-hidden rounded-xl border border-gray-800
+      class="agent-window fixed z-20 flex flex-col overflow-hidden rounded-xl border border-gray-800
              bg-gray-900 shadow-2xl"
       :style="panelStyle"
     >
@@ -363,6 +372,7 @@ onBeforeUnmount(() => {
           class="text-gray-500 hover:text-gray-300"
           :class="messages.length ? '' : 'ml-auto'"
           title="收起"
+          aria-label="收起助手面板"
           @click="open = false"
         >
           <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
@@ -371,7 +381,7 @@ onBeforeUnmount(() => {
         </button>
       </div>
 
-      <div ref="bodyRef" class="flex-1 space-y-3 overflow-y-auto p-3">
+      <div ref="bodyRef" class="min-h-0 flex-1 space-y-3 overflow-y-auto p-3">
         <div v-if="!messages.length" class="space-y-3">
           <p class="text-xs leading-relaxed text-gray-500">
             可以直接问系统当前的情况。助手会实时查库、读日志、看任务，
@@ -581,7 +591,7 @@ onBeforeUnmount(() => {
   background: rgb(17 24 39);
   padding: 0.05rem 0.3rem;
   font-size: 0.8rem;
-  color: #10b981;
+  color: #3ecf9b;
 }
 /* 表格可能比面板宽，让它自己横向滚动，不要把面板撑开 */
 .agent-md :deep(.md-table-wrap) {
@@ -604,7 +614,7 @@ onBeforeUnmount(() => {
   font-weight: 500;
 }
 .agent-md :deep(a) {
-  color: #10b981;
+  color: #3ecf9b;
   text-decoration: underline;
 }
 </style>

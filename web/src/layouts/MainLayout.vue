@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { checkVersion, getVersion } from '@/api'
 import { useConfigStore } from '@/stores/config'
@@ -7,12 +7,15 @@ import AppLogo from '@/components/AppLogo.vue'
 import AgentPanel from '@/components/AgentPanel.vue'
 import PrivacyToggle from '@/components/PrivacyToggle.vue'
 import CommandMenu from '@/components/CommandMenu.vue'
+import AppIcon from '@/components/AppIcon.vue'
 
 const route = useRoute()
 const router = useRouter()
 const configStore = useConfigStore()
 
 const menuOpen = ref(false)
+const menuButton = ref(null)
+const sidebar = ref(null)
 const version = ref('')
 // 检测不到新版本时（镜像私有、无网络）保持为空，不显示红点
 const update = ref(null)
@@ -74,13 +77,44 @@ const groups = [{ title: '工作区', items: [
   workspace('Logs', '运行记录', [['Logs', '日志'], ['Task', '任务'], ['DeletionHistory', '删除历史']]),
   workspace('Config', '设置', [['Config', '系统配置'], ['ToolConnections', '工具接入'], ['DataSource', '数据源'], ['Maintenance', '维护'], ['Profile', '账户']]),
 ] }]
-const activeWorkspace = computed(() => groups[0].items.find(item => item.name === route.name || item.pages.some(page => page.name === route.name)))
+const workspaces = groups[0].items
+const navigationGroups = [
+  { title: '工作区', items: workspaces.slice(0, 3) },
+  { title: '探索与整理', items: workspaces.slice(3, 5) },
+  { title: '管理', items: workspaces.slice(5) },
+]
+const activeWorkspace = computed(() => workspaces.find(item => item.name === route.name || item.pages.some(page => page.name === route.name)))
+const mobileDestinations = [
+  { name: 'Dashboard', label: '总览', icon: 'grid', workspace: 'Dashboard' },
+  { name: 'Library', label: '媒体库', icon: 'library', workspace: 'Library' },
+  { name: 'Subscribe', label: '订阅', icon: 'bookmark', workspace: 'Subscribe' },
+  { name: 'Search', label: '发现', icon: 'search', workspace: 'Search' },
+  { name: 'Task', label: '任务', icon: 'task', workspace: 'Logs' },
+]
 
 // 抽屉打开时保持页面外壳锁定。
-watch(menuOpen, (open) => {
+watch(menuOpen, async (open) => {
   document.body.classList.toggle('overflow-hidden', open)
+  await nextTick()
+  if (open) sidebar.value?.querySelector('a')?.focus()
+  else if (window.innerWidth < 1024) menuButton.value?.focus()
 })
-onUnmounted(() => document.body.classList.remove('overflow-hidden'))
+watch(() => route.fullPath, () => { menuOpen.value = false })
+function drawerKeys(event) {
+  if (!menuOpen.value) return
+  if (event.key === 'Escape') { menuOpen.value = false; return }
+  if (event.key !== 'Tab') return
+  const controls = [...sidebar.value.querySelectorAll('a,button')].filter(el => el.getClientRects().length)
+  const target = event.shiftKey && document.activeElement === controls[0] ? controls.at(-1)
+    : !event.shiftKey && document.activeElement === controls.at(-1) ? controls[0] : null
+  if (target) { event.preventDefault(); target.focus() }
+}
+function onResize() { if (window.innerWidth >= 1024) menuOpen.value = false }
+onMounted(() => window.addEventListener('resize', onResize))
+onUnmounted(() => {
+  document.body.classList.remove('overflow-hidden')
+  window.removeEventListener('resize', onResize)
+})
 
 function logout() {
   localStorage.removeItem('token')
@@ -105,106 +139,47 @@ onMounted(async () => {
 </script>
 
 <template>
-  <div class="flex h-full min-h-0 overflow-hidden">
-    <!-- 移动端遮罩 -->
-    <div
-      v-if="menuOpen"
-      class="fixed inset-0 z-30 bg-black/60 lg:hidden"
-      @click="menuOpen = false"
-    />
-
-    <!-- 侧边栏 -->
-    <aside
-      class="fixed inset-y-0 left-0 z-40 flex w-60 flex-col border-r border-gray-800 bg-gray-900 transition-transform lg:static lg:translate-x-0"
-      :class="menuOpen ? 'translate-x-0' : '-translate-x-full'"
-    >
-      <div
-        class="flex min-h-14 items-center gap-2 border-b border-gray-800 px-5 pt-[env(safe-area-inset-top)] lg:pt-0"
-      >
-        <AppLogo :size="28" />
-        <span class="font-semibold tracking-tight">cinefold</span>
-      </div>
-
-      <nav class="flex-1 space-y-5 overflow-y-auto p-3">
-        <div v-for="group in groups" :key="group.title">
-          <p class="px-2 pb-1.5 text-[11px] font-medium uppercase tracking-wider text-gray-600">
-            {{ group.title }}
-          </p>
-          <RouterLink
-            v-for="item in group.items"
-            :key="item.name"
-            :to="{ name: item.name }"
-            class="flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-sm transition-colors"
-            :class="
-              activeWorkspace?.name === item.name
-                ? 'bg-brand/10 text-brand'
-                : 'text-gray-400 hover:bg-gray-800 hover:text-gray-200'
-            "
-            @click="menuOpen = false"
-          >
-            <svg class="h-4 w-4 shrink-0" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" :d="item.icon" />
-            </svg>
-            {{ item.label }}
-            <span
-              v-if="update && item.name === 'Config'"
-              class="ml-auto h-1.5 w-1.5 rounded-full bg-red-500"
-              :title="`有新版本 v${update.latest}`"
-            />
+  <div class="app-shell flex h-full min-h-0 overflow-hidden" @keydown="drawerKeys">
+    <div v-if="menuOpen" class="fixed inset-0 z-30 bg-black/60 lg:hidden" aria-hidden="true" @click="menuOpen = false" />
+    <aside ref="sidebar" class="app-sidebar fixed inset-y-0 left-0 z-40 flex w-56 flex-col transition-transform lg:static lg:translate-x-0" :class="menuOpen ? 'translate-x-0' : '-translate-x-full'" :role="menuOpen ? 'dialog' : undefined" :aria-modal="menuOpen ? true : undefined" aria-label="主导航">
+      <RouterLink :to="{name:'Dashboard'}" class="sidebar-brand" @click="menuOpen = false">
+        <AppLogo :size="32" />
+        <div><span class="block text-base font-semibold tracking-tight text-gray-100">cinefold<span class="text-brand">.</span></span><span class="whitespace-nowrap text-[10px] tracking-[0.12em] text-gray-500">个人媒体工作区</span></div>
+      </RouterLink>
+      <button v-if="menuOpen" class="drawer-close icon-button lg:hidden" aria-label="关闭导航菜单" @click="menuOpen = false"><AppIcon name="close" /></button>
+      <nav class="sidebar-navigation min-h-0 flex-1 overflow-y-auto" aria-label="工作区导航">
+        <div v-for="group in navigationGroups" :key="group.title" class="nav-group">
+          <p class="nav-group-label">{{ group.title }}</p>
+          <RouterLink v-for="item in group.items" :key="item.name" :to="{name:item.name}" class="sidebar-link" :class="{'is-active': activeWorkspace?.name === item.name}" :aria-current="activeWorkspace?.name === item.name ? 'page' : undefined" @click="menuOpen = false">
+            <svg class="h-[18px] w-[18px] shrink-0" fill="none" stroke="currentColor" stroke-width="1.75" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" :d="item.icon" /></svg>
+            <span>{{ item.label === '看板' ? '总览' : item.label }}</span>
+            <span v-if="update && item.name === 'Config'" class="ml-auto h-1.5 w-1.5 rounded-full bg-brand" :title="`有新版本 v${update.latest}`" />
           </RouterLink>
         </div>
       </nav>
-
-      <div class="border-t border-gray-800 p-3 pb-[calc(0.75rem+env(safe-area-inset-bottom))]">
-        <CommandMenu />
-        <p v-if="version" class="flex items-center gap-1.5 px-2 pb-2 text-[11px] text-gray-600">
-          <span>v{{ version }}</span>
-          <template v-if="update">
-            <span class="h-1.5 w-1.5 shrink-0 rounded-full bg-red-500" />
-            <span class="text-gray-400">可更新 v{{ update.latest }}</span>
-          </template>
-        </p>
-        <button class="btn-ghost w-full text-xs" @click="logout">退出登录</button>
+      <div class="sidebar-footer">
+        <RouterLink :to="{name:'Profile'}" class="sidebar-account"><span class="account-avatar"><AppIcon name="user" :size="17" /></span><span class="min-w-0 flex-1"><span class="block text-xs text-gray-200">我的工作区</span><span class="block text-[11px] text-gray-500">{{ version ? `cinefold v${version}` : '账户与安全' }}</span></span><AppIcon name="chevron" :size="14" /></RouterLink>
+        <div class="mt-3 flex items-center justify-between"><RouterLink :to="{name:'Config',query:{group:'other'}}" class="text-[11px] text-gray-500 hover:text-gray-200">{{ update ? `可更新 v${update.latest}` : '设置与偏好' }}</RouterLink><button class="icon-button !h-8 !w-8" aria-label="退出登录" title="退出登录" @click="logout"><AppIcon name="logout" :size="16" /></button></div>
       </div>
     </aside>
-
-    <!-- 主区 -->
     <div class="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-      <!-- 顶部导航保留安全区，内容在下方局部滚动。 -->
-      <header
-        class="app-header sticky top-0 z-20 flex min-h-12 shrink-0 items-center gap-2 border-b border-gray-800 bg-gray-950/90 px-2 pt-[env(safe-area-inset-top)] backdrop-blur sm:min-h-14 sm:gap-3 sm:px-4 lg:px-6"
-      >
-        <button class="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-gray-400 hover:bg-gray-800 lg:hidden" aria-label="打开导航菜单" @click="menuOpen = true">
-          <svg class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
-            <path stroke-linecap="round" d="M4 6h16M4 12h16M4 18h16" />
-          </svg>
-        </button>
-        <h1 class="text-sm font-medium text-gray-300">{{ route.meta.title || '' }}</h1>
-
-        <!-- 有人在旁边时一键遮住封面，改的就是设置里那项「图片模式」 -->
-        <PrivacyToggle class="ml-auto" />
+      <header class="app-header flex shrink-0 items-center gap-3">
+        <button ref="menuButton" class="icon-button lg:hidden" aria-label="打开导航菜单" :aria-expanded="menuOpen" @click="menuOpen = true"><AppIcon name="menu" /></button>
+        <div class="flex min-w-0 items-center gap-2 text-xs"><span class="hidden text-gray-500 sm:inline">{{ activeWorkspace?.label === '看板' ? '工作区' : activeWorkspace?.label || '工作区' }}</span><AppIcon name="chevron" :size="12" class="hidden text-gray-700 sm:block" /><h1 class="truncate text-sm font-medium text-gray-200">{{ route.name === 'Dashboard' ? '总览' : route.meta.title }}</h1></div>
+        <div class="ml-auto flex shrink-0 items-center gap-2"><CommandMenu /><span class="header-divider" /><PrivacyToggle /></div>
       </header>
-
-      <!-- 工作区导航固定，路由页面负责自己的内容滚动。 -->
-      <main class="workspace-main flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden p-2 pb-[calc(0.5rem+env(safe-area-inset-bottom))] sm:p-4 lg:p-6">
-        <nav v-if="activeWorkspace?.pages.length > 1" class="workspace-tabs mobile-tabs mb-1.5 flex shrink-0 gap-1 overflow-x-auto rounded-xl border border-gray-800 bg-gray-900/50 p-0.5 sm:mb-5 sm:p-1" :aria-label="`${activeWorkspace.label}功能`">
-          <RouterLink v-for="page in activeWorkspace.pages" :key="page.name" :to="{ name: page.name }" class="shrink-0 rounded-lg px-3 py-2 text-sm transition" :class="route.name === page.name ? 'bg-brand/10 text-brand' : 'text-gray-500 hover:bg-gray-800 hover:text-gray-300'" :aria-current="route.name === page.name ? 'page' : undefined">{{ page.label }}</RouterLink>
+      <main class="workspace-main flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+        <nav v-if="activeWorkspace?.pages.length > 1" class="workspace-tabs mobile-tabs flex shrink-0 overflow-x-auto" :aria-label="`${activeWorkspace.label}功能`">
+          <RouterLink v-for="page in activeWorkspace.pages" :key="page.name" :to="{name:page.name}" :class="{'is-active':route.name === page.name}" :aria-current="route.name === page.name ? 'page' : undefined">{{ page.label }}</RouterLink>
         </nav>
-        <div class="min-h-0 min-w-0 flex-1 overflow-hidden">
-        <RouterView v-slot="{ Component }">
-          <Transition
-            enter-active-class="transition duration-150"
-            enter-from-class="opacity-0"
-            mode="out-in"
-          >
-            <component :is="Component" />
-          </Transition>
-        </RouterView>
+        <div class="route-content min-h-0 min-w-0 flex-1 overflow-hidden">
+          <RouterView v-slot="{Component}"><Transition enter-active-class="transition duration-150" enter-from-class="opacity-0" mode="out-in"><component :is="Component" /></Transition></RouterView>
         </div>
       </main>
+      <nav class="mobile-bottom-nav shrink-0 lg:hidden" aria-label="常用页面">
+        <RouterLink v-for="item in mobileDestinations" :key="item.name" :to="{name:item.name}" :class="{'is-active':activeWorkspace?.name === item.workspace}" :aria-current="activeWorkspace?.name === item.workspace ? 'page' : undefined"><AppIcon :name="item.icon" :size="19" /><span>{{ item.label }}</span></RouterLink>
+      </nav>
     </div>
-
-    <!-- 全站可用的悬浮助手 -->
     <AgentPanel />
   </div>
 </template>

@@ -9,7 +9,7 @@
  *
  * 收进组件后这些行为默认就有，页面只管弹窗里的内容。
  */
-import { onBeforeUnmount, onMounted, watch } from 'vue'
+import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 const props = defineProps({
   // v-model:open。用 open 而不是 v-if 包在外面，是为了让组件能在
@@ -29,6 +29,9 @@ const props = defineProps({
 })
 
 const emit = defineEmits(['update:open', 'close'])
+const dialog = ref(null)
+let previousFocus = null
+const focusable = 'button:not(:disabled), a[href], input:not(:disabled), textarea:not(:disabled), select:not(:disabled), [tabindex="0"]'
 
 const SIZES = {
   sm: 'max-w-sm',
@@ -49,15 +52,28 @@ function onBackdrop() {
 }
 
 function onKeydown(event) {
-  if (event.key === 'Escape' && props.open && props.closeOnEsc) close()
+  if (!props.open || [...document.querySelectorAll('.modal-content')].at(-1) !== dialog.value) return
+  if (event.key === 'Escape' && props.closeOnEsc) close()
+  if (event.key !== 'Tab') return
+  const controls = [...dialog.value.querySelectorAll(focusable)].filter(el => el.getClientRects().length)
+  if (!controls.length) { event.preventDefault(); dialog.value.focus(); return }
+  const target = event.shiftKey && document.activeElement === controls[0] ? controls.at(-1)
+    : !event.shiftKey && document.activeElement === controls.at(-1) ? controls[0] : null
+  if (target) { event.preventDefault(); target.focus() }
 }
 
 // 弹窗打开时锁住 body 滚动。移动端尤其明显 —— 不锁的话背景会跟着滑，
 // 手指想滚弹窗内容却滚了整页。与 MainLayout 抽屉的做法一致
 watch(
   () => props.open,
-  (open) => {
+  async (open) => {
+    if (open) previousFocus = document.activeElement
     document.body.classList.toggle('overflow-hidden', open)
+    await nextTick()
+    if (open) {
+      const field = dialog.value?.querySelector('input:not(:disabled), textarea:not(:disabled), select:not(:disabled)')
+      ;(field || dialog.value?.querySelector(focusable) || dialog.value)?.focus()
+    } else if (previousFocus?.isConnected) previousFocus.focus()
   },
 )
 
@@ -82,7 +98,9 @@ onBeforeUnmount(() => {
       @click.self="onBackdrop"
     >
       <div
+        ref="dialog" tabindex="-1"
         class="modal-content card w-full space-y-3 overflow-y-auto overscroll-contain"
+        role="dialog" aria-modal="true" :aria-label="title || '对话框'"
         :style="{ maxHeight: scrollable ? '85dvh' : 'calc(100dvh - 2rem)' }"
         :class="[
           SIZES[size] || SIZES.md,

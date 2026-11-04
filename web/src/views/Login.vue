@@ -8,6 +8,7 @@ import {
 import { useToast } from '@/composables/useToast'
 import { PasskeyCancelled, getCredential, isSupported } from '@/utils/webauthn'
 import AppLogo from '@/components/AppLogo.vue'
+import AppIcon from '@/components/AppIcon.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -93,58 +94,27 @@ onMounted(async () => {
 </script>
 
 <template>
-  <div class="flex h-full min-h-0 overflow-auto px-4 py-6">
-    <div class="m-auto w-full max-w-sm shrink-0">
-      <div class="mb-8 flex flex-col items-center gap-3">
-        <AppLogo :size="48" />
-        <h1 class="text-xl font-semibold tracking-tight">cinefold</h1>
+  <div class="login-page flex h-full min-h-0 overflow-auto px-5 py-6">
+    <div class="login-shell shrink-0">
+      <aside class="login-story" aria-label="cinefold 媒体工作区">
+        <div><div class="flex items-center gap-3"><AppLogo :size="34" /><span class="text-lg font-semibold tracking-tight">cinefold<span class="text-brand">.</span></span></div><h2>好影片，<br>值得<span>好好收藏。</span></h2><p class="mt-4 max-w-xs">发现、订阅、下载与入库。<br>让每一部想看的影片，都有自己的位置。</p></div>
+        <div class="mt-8"><div class="login-feature"><AppIcon name="bookmark" :size="17" />从发现到订阅，持续追踪更新</div><div class="login-feature"><AppIcon name="library" :size="17" />统一管理媒体库与个人片单</div><div class="login-feature"><AppIcon name="task" :size="17" />自动整理，让收藏保持有序</div></div>
+      </aside>
+      <div class="login-form-panel">
+        <div class="mb-8 flex items-center gap-2 lg:hidden"><AppLogo :size="32" /><span class="text-lg font-semibold">cinefold<span class="text-brand">.</span></span></div>
+        <p class="section-eyebrow">WELCOME BACK</p><h1>欢迎回来</h1><p class="mt-2 text-xs text-gray-500">登录你的媒体工作区，继续发现与收藏。</p>
+        <form class="space-y-5" @submit.prevent="submit">
+          <div><label for="login-username" class="label">用户名</label><input id="login-username" v-model.trim="username" class="input" autocomplete="username" placeholder="输入用户名" /></div>
+          <div><label for="login-password" class="label">密码</label><input id="login-password" v-model="password" type="password" class="input" autocomplete="current-password" placeholder="输入密码" /></div>
+          <button type="submit" class="btn-primary w-full" :disabled="loading">{{ loading ? '登录中…' : '登录工作区' }}<AppIcon v-if="!loading" name="arrow" :size="16" /></button>
+          <template v-if="methods.oidc?.enabled || (methods.passkey?.enabled && passkeySupported)">
+            <div class="flex items-center gap-3 py-1"><span class="h-px flex-1 bg-gray-800" /><span class="text-[11px] text-gray-500">其他登录方式</span><span class="h-px flex-1 bg-gray-800" /></div>
+            <button v-if="methods.oidc?.enabled" type="button" class="btn-ghost w-full" @click="ssoLogin">使用 {{ methods.oidc.display_name }} 登录</button>
+            <button v-if="methods.passkey?.enabled && passkeySupported" type="button" class="btn-ghost w-full" :disabled="passkeyBusy" @click="passkeyLogin">{{ passkeyBusy ? '等待验证…' : '使用 Passkey 登录' }}</button>
+          </template>
+        </form>
+        <p class="mt-7 border-t border-gray-800 pt-5 text-xs leading-relaxed text-gray-500">无法登录？请联系管理员检查账户或身份验证设置。</p>
       </div>
-
-      <form class="card space-y-4" @submit.prevent="submit">
-        <div>
-          <label class="label">用户名</label>
-          <input v-model.trim="username" class="input" autocomplete="username" />
-        </div>
-        <div>
-          <label class="label">密码</label>
-          <input v-model="password" type="password" class="input" autocomplete="current-password" />
-        </div>
-        <button type="submit" class="btn-primary w-full" :disabled="loading">
-          {{ loading ? '登录中…' : '登入' }}
-        </button>
-
-        <!-- 其他登录方式 -->
-        <template v-if="methods.oidc?.enabled || (methods.passkey?.enabled && passkeySupported)">
-          <div class="flex items-center gap-3 py-1">
-            <span class="h-px flex-1 bg-gray-800" />
-            <span class="text-[11px] text-gray-600">或</span>
-            <span class="h-px flex-1 bg-gray-800" />
-          </div>
-
-          <button
-            v-if="methods.oidc?.enabled"
-            type="button"
-            class="btn-ghost w-full"
-            @click="ssoLogin"
-          >
-            使用 {{ methods.oidc.display_name }} 登录
-          </button>
-
-          <button
-            v-if="methods.passkey?.enabled && passkeySupported"
-            type="button"
-            class="btn-ghost w-full"
-            :disabled="passkeyBusy"
-            @click="passkeyLogin"
-          >
-            {{ passkeyBusy ? '等待验证…' : '使用 Passkey 登录' }}
-          </button>
-        </template>
-      </form>
-
-      <p class="mt-4 text-center text-xs text-gray-600">
-        忘记密码？删除数据目录下的 cinefold.db 中 user 表记录后重启，会重新生成账号
-      </p>
     </div>
   </div>
 </template>

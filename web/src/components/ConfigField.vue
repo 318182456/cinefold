@@ -1,5 +1,5 @@
 <script setup>
-import { computed } from 'vue'
+import { computed, useId } from 'vue'
 import TagInput from '@/components/TagInput.vue'
 import SortRuleInput from '@/components/SortRuleInput.vue'
 import ScrapeSourceInput from '@/components/ScrapeSourceInput.vue'
@@ -13,6 +13,7 @@ const props = defineProps({
 })
 
 const choices = computed(() => props.options || props.field.options || [])
+const inputId = `config-${useId()}`
 
 const value = computed({
   get() {
@@ -32,15 +33,15 @@ const value = computed({
 </script>
 
 <template>
-  <div>
-    <label class="label">{{ field.label }}</label>
+  <div class="config-field" :role="['sources', 'sort', 'tags'].includes(field.t) ? 'group' : undefined" :aria-labelledby="`${inputId}-label`">
+    <label :id="`${inputId}-label`" class="label" :for="['sources', 'sort', 'tags'].includes(field.t) ? undefined : inputId">{{ field.label }}</label>
 
     <label v-if="field.t === 'bool'" class="flex items-center gap-2">
-      <input v-model="value" type="checkbox" class="h-4 w-4 accent-emerald-500" />
+      <input :id="inputId" v-model="value" type="checkbox" class="h-4 w-4 accent-emerald-500" />
       <span class="text-sm text-gray-400">启用</span>
     </label>
 
-    <select v-else-if="field.t === 'select'" v-model="value" class="input">
+    <select v-else-if="field.t === 'select'" :id="inputId" v-model="value" class="input">
       <option v-for="option in choices" :key="option" :value="option">
         {{ field.optionLabels?.[option] || option || '（默认）' }}
       </option>
@@ -48,6 +49,7 @@ const value = computed({
 
     <textarea
       v-else-if="field.t === 'textarea'"
+      :id="inputId"
       v-model="value"
       class="input font-mono text-xs"
       rows="3"
@@ -66,6 +68,7 @@ const value = computed({
 
     <input
       v-else
+      :id="inputId"
       v-model="value"
       :type="field.t === 'password' ? 'password' : 'text'"
       class="input"

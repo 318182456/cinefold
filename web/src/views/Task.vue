@@ -246,7 +246,7 @@ onUnmounted(() => {
     </div>
 
     <div v-if="jobs.length" class="space-y-2">
-      <div v-for="job in jobs" :key="job.id" class="card">
+      <div v-for="job in jobs" :key="job.id" class="card task-row" :data-phase="job.execution?.phase || 'idle'">
         <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div class="min-w-0">
             <p class="text-sm font-medium text-gray-200">{{ job.name }}</p>

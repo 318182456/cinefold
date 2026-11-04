@@ -22,7 +22,7 @@ onUnmounted(() => window.removeEventListener('sw:updated', onUpdated))
   >
     <div
       v-if="show"
-      class="fixed inset-x-4 bottom-[calc(1rem+env(safe-area-inset-bottom))] z-[100] mx-auto flex max-w-md items-center gap-3 rounded-lg border border-gray-700 bg-gray-900/95 px-4 py-3 text-sm shadow-lg backdrop-blur"
+      class="update-prompt fixed inset-x-4 bottom-[calc(1rem+env(safe-area-inset-bottom))] z-[100] mx-auto flex max-w-md items-center gap-3 rounded-lg border border-gray-700 bg-gray-900/95 px-4 py-3 text-sm shadow-lg backdrop-blur"
     >
       <span class="flex-1 text-gray-200">有新版本，刷新后生效</span>
       <button class="btn-primary px-3 py-1.5 text-xs" @click="location.reload()">刷新</button>

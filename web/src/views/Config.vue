@@ -1154,12 +1154,13 @@ onUnmounted(stopUpgradePoll)
 </script>
 
 <template>
-  <div class="flex h-full min-h-0 min-w-0 flex-col gap-4 overflow-hidden lg:flex-row">
+  <div class="settings-layout flex h-full min-h-0 min-w-0 flex-col gap-4 overflow-hidden lg:flex-row">
     <!-- 分组导航。窄屏横向滚动一排，宽屏收成左侧竖栏。
          宽屏时右侧内容很长，导航 sticky 钉在顶上不跟着滚；自身超过一屏才内部滚动 -->
     <nav
-      class="flex max-h-[35%] shrink-0 gap-4 overflow-auto overscroll-contain px-1 pb-2 lg:max-h-full
+      class="settings-nav flex max-h-[35%] shrink-0 gap-4 overflow-auto overscroll-contain px-1 pb-2 lg:max-h-full
              lg:w-44 lg:flex-col lg:pb-0"
+      aria-label="设置分类"
     >
       <div v-for="cat in CATEGORIES" :key="cat.key" class="shrink-0 lg:shrink">
         <p class="mb-1.5 hidden px-1 text-[11px] font-medium uppercase tracking-wide text-gray-600 lg:block">
@@ -1172,6 +1173,7 @@ onUnmounted(stopUpgradePoll)
             class="btn whitespace-nowrap px-3 py-1.5 text-xs lg:text-left"
             :class="activeGroup === group.key ? 'bg-brand text-white' : 'btn-ghost'"
             @click="activeGroup = group.key"
+            :aria-current="activeGroup === group.key ? 'page' : undefined"
           >
             {{ group.title }}
           </button>
@@ -1179,11 +1181,12 @@ onUnmounted(stopUpgradePoll)
       </div>
     </nav>
 
-    <div class="min-h-0 min-w-0 flex-1 space-y-4 overflow-auto overscroll-contain" tabindex="0" aria-label="设置内容">
+    <div class="settings-content min-h-0 min-w-0 flex-1 space-y-4 overflow-auto overscroll-contain" tabindex="0" aria-label="设置内容">
     <LoadingBlock v-if="loading" :rows="6" />
 
     <template v-else>
       <div v-for="group in GROUPS" v-show="activeGroup === group.key" :key="group.key" class="space-y-4">
+        <div class="settings-heading"><p class="section-eyebrow">PREFERENCES</p><h2>{{ group.title }}</h2><p>按分组编辑并保存配置，更改前可重新加载已保存的内容。</p></div>
         <MihomoPanel v-if="group.key === 'network' && activeGroup === 'network'" />
         <div v-if="group.key === 'scrape'" class="card space-y-3">
           <div class="flex flex-wrap items-center justify-between gap-2"><div><p class="font-medium">刮削设置</p><p class="mt-1 text-xs text-gray-500">长期规则在这里设置，视频操作与任务进度在刮削工作台。</p></div><RouterLink :to="{ name: 'Scrape' }" class="text-sm text-brand">打开工作台 ↗</RouterLink></div>
@@ -1659,11 +1662,12 @@ onUnmounted(stopUpgradePoll)
           </div>
         </div>
 
-        <div class="flex gap-2">
+        <div class="settings-save-bar">
           <button class="btn-primary" :disabled="saving" @click="save">
             {{ saving ? '保存中…' : `保存「${group.title}」` }}
           </button>
           <button class="btn-ghost" @click="load">重新加载</button>
+          <span class="ml-auto hidden text-[11px] text-gray-500 xl:block">仅保存当前分组 · 掩码凭据保持原值</span>
         </div>
       </div>
 
