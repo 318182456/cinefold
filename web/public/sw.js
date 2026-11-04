@@ -9,7 +9,7 @@
  *
  * 版本号跟着构建走：每次发版换掉 CACHE，activate 时清掉旧的。
  */
-const CACHE = 'cinefold-v2'
+const CACHE = 'cinefold-v3'
 
 // 装机时预取的最小集合。index.html 不预缓存 —— 它必须每次都拿新的，
 // 否则热更新后浏览器会按旧清单去加载已经不存在的 js

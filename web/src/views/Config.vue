@@ -22,6 +22,7 @@ const configStore = useConfigStore()
 
 const form = reactive({})
 const loading = ref(true)
+const hasLoaded = ref(false)
 const saving = ref(false)
 const route = useRoute()
 const router = useRouter()
@@ -872,6 +873,7 @@ async function load() {
   try {
     const data = await getConfig()
     Object.assign(form, data || {})
+    hasLoaded.value = true
     form.scrape_duplicate_policy = data?.scrape_duplicate_policy || 'versions'
     form.scrape_watermark = {
       enabled: false, targets: 'poster,thumb', types: 'sub,crack,leak,uncensored,censored,resolution',
@@ -1182,7 +1184,8 @@ onUnmounted(stopUpgradePoll)
     </nav>
 
     <div class="settings-content min-h-0 min-w-0 flex-1 space-y-4 overflow-auto overscroll-contain" tabindex="0" aria-label="设置内容">
-    <LoadingBlock v-if="loading" :rows="6" />
+    <LoadingBlock v-if="loading && hasLoaded" :rows="0" label="正在重新加载设置，保留当前表单…" />
+    <LoadingBlock v-if="loading && !hasLoaded" :rows="6" />
 
     <template v-else>
       <div v-for="group in GROUPS" v-show="activeGroup === group.key" :key="group.key" class="space-y-4">

@@ -12,6 +12,7 @@ const toast = useToast()
 const items = ref([])
 const removed = ref([])
 const loading = ref(false)
+const hasLoaded = ref(false)
 const checking = ref('')
 const checkingAll = ref(false)
 const editing = ref(null)
@@ -66,6 +67,7 @@ async function load() {
     const data = await listDataSources()
     items.value = data.items || []
     removed.value = data.removed || []
+    hasLoaded.value = true
   } catch (err) {
     toast.error(err.message)
   } finally {
@@ -336,7 +338,8 @@ onMounted(load)
     </template>
 
 
-    <LoadingBlock v-if="loading" :rows="4" />
+    <LoadingBlock v-if="loading && hasLoaded" :rows="0" label="正在更新数据源，保留当前内容…" />
+    <LoadingBlock v-if="loading && !hasLoaded" :rows="4" />
 
     <template v-else>
       <!-- 已接入抓取的源 -->

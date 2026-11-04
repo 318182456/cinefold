@@ -383,7 +383,7 @@ onUnmounted(() => { disposed = true; request++; rebuildRequest++; clearTimeout(t
         <div class="min-w-0 flex-1">
           <button class="block max-w-full text-left focus-visible:outline focus-visible:outline-brand" :aria-label="`查看 ${row.name} 的刮削资料`" @click="showDetail(row)">
             <span class="flex flex-wrap items-center gap-2"><span class="font-mono text-sm font-medium text-brand">{{ row.status === 'ignored' ? '广告视频' : row.code || '待识别' }}</span><span class="rounded border px-2 py-0.5 text-[10px]" :class="row.status === 'complete' ? 'border-emerald-500/20 bg-emerald-500/10 text-emerald-400' : ['failed', 'interrupted'].includes(row.status) ? 'border-red-500/20 bg-red-500/10 text-red-400' : 'border-gray-700 bg-gray-800 text-gray-400'">{{ LABELS[row.status] || row.status }}</span></span>
-            <span class="mt-1.5 block break-all text-sm text-gray-300 group-hover:text-white">{{ row.title || row.name }}</span>
+            <span class="mt-1.5 block break-all text-sm text-gray-300 group-hover:text-brand">{{ row.title || row.name }}</span>
             <span v-if="row.title" class="mt-1 block break-all text-xs text-gray-500">{{ row.name }}</span>
           </button>
           <p class="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-gray-500"><span>{{ formatSize(row.size) }}</span><span v-if="row.part">分集 {{ row.part }}</span><span v-if="row.last_run">上次处理 {{ row.last_run }}</span></p>

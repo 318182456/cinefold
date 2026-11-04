@@ -41,6 +41,9 @@ const loading = ref(false)
 // 两者数据源不同（后者要问下载器），共用搜索框与分页，切换时重置页码
 const view = ref('all')
 const isOrphan = computed(() => view.value === 'orphan')
+const listScope = computed(() => JSON.stringify([view.value, keyword.value.trim(), missingOnly.value, sort.value, minGb.value, maxGb.value, subtitleFilter.value, page.value, size.value]))
+let loadedScope = '', listRequest = 0, listDisposed = false
+onUnmounted(() => { listDisposed = true; listRequest++ })
 const orphanSourceGone = ref(0)
 const orphanTorrentGone = ref(0)
 
@@ -296,6 +299,8 @@ function deleteLabel(hold) {
 }
 
 async function load() {
+  const id = ++listRequest, scope = listScope.value
+  if (scope !== loadedScope) { items.value = []; total.value = 0 }
   loading.value = true
   try {
     // refresh 只在用户显式点「重新扫描」时为真：默认走后端缓存，
@@ -317,7 +322,9 @@ async function load() {
           page: page.value,
           size: size.value,
         })
+    if (listDisposed || id !== listRequest || scope !== listScope.value) return
     items.value = data.items || []
+    loadedScope = scope
     total.value = data.total || 0
     deleteEnabled.value = !!data.delete_enabled
     if (isOrphan.value) {
@@ -327,14 +334,15 @@ async function load() {
       libraryPath.value = data.library_path || ''
     }
   } catch (err) {
-    toast.error(err.message)
+    if (!listDisposed && id === listRequest) toast.error(err.message)
   } finally {
-    loading.value = false
+    if (!listDisposed && id === listRequest) loading.value = false
   }
 }
 
 // 重新扫描：绕过后端缓存，重新问一次下载器与磁盘
 async function rescanOrphans() {
+  const id = ++listRequest, scope = listScope.value
   loading.value = true
   try {
     const data = await listMediaLinkOrphans({
@@ -343,7 +351,9 @@ async function rescanOrphans() {
       size: size.value,
       refresh: true,
     })
+    if (listDisposed || id !== listRequest || scope !== listScope.value) return
     items.value = data.items || []
+    loadedScope = scope
     total.value = data.total || 0
     orphanSourceGone.value = data.source_gone || 0
     orphanTorrentGone.value = data.torrent_gone || 0
@@ -351,9 +361,9 @@ async function rescanOrphans() {
     clearPicked()
     toast.success(`扫描完成，共 ${data.total || 0} 条`)
   } catch (err) {
-    toast.error(err.message)
+    if (!listDisposed && id === listRequest) toast.error(err.message)
   } finally {
-    loading.value = false
+    if (!listDisposed && id === listRequest) loading.value = false
   }
 }
 
@@ -1028,7 +1038,8 @@ onMounted(() => {
       </button>
     </div>
 
-    <LoadingBlock v-if="loading" :rows="5" />
+    <LoadingBlock v-if="loading && items.length" :rows="0" label="正在更新关联记录，保留当前内容…" />
+    <LoadingBlock v-if="loading && !items.length" :rows="5" />
 
     <!-- 孤儿一览：下载侧已删、媒体库侧仍在。
          不按番号分组 —— 每条都是要单独处置的问题记录，分组会把它藏起来 -->

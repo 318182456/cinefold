@@ -531,7 +531,7 @@ onBeforeUnmount(() => {
         <p v-if="historyLoading" class="text-xs text-gray-500">读取聊天记录中…</p>
         <button v-if="hasMoreHistory" class="text-xs text-brand" :disabled="historyLoading || sending" @click="loadHistory(true)">加载更早的聊天记录</button>
         <div v-if="sending" class="flex items-center gap-1.5 px-1 text-xs text-gray-500">
-          <span class="h-1.5 w-1.5 animate-pulse rounded-full bg-brand" />
+          <span class="h-1.5 w-1.5 rounded-full bg-brand" />
           {{ progressText }}
         </div>
       </div>
@@ -584,14 +584,14 @@ onBeforeUnmount(() => {
 }
 .agent-md :deep(strong) {
   font-weight: 600;
-  color: #fff;
+  color: #183423;
 }
 .agent-md :deep(code) {
   border-radius: 3px;
-  background: rgb(17 24 39);
+  background: #f3f6f3;
   padding: 0.05rem 0.3rem;
   font-size: 0.8rem;
-  color: #3ecf9b;
+  color: #197653;
 }
 /* 表格可能比面板宽，让它自己横向滚动，不要把面板撑开 */
 .agent-md :deep(.md-table-wrap) {
@@ -604,17 +604,17 @@ onBeforeUnmount(() => {
 }
 .agent-md :deep(th),
 .agent-md :deep(td) {
-  border: 1px solid rgb(55 65 81);
+  border: 1px solid #b8c9bd;
   padding: 0.2rem 0.45rem;
   text-align: left;
   white-space: nowrap;
 }
 .agent-md :deep(th) {
-  background: rgb(31 41 55);
+  background: #e8efe9;
   font-weight: 500;
 }
 .agent-md :deep(a) {
-  color: #3ecf9b;
+  color: #197653;
   text-decoration: underline;
 }
 </style>

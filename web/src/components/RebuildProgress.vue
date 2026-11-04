@@ -19,7 +19,7 @@ function duration(value) {
         <span v-if="percent !== null">{{ percent.toFixed(1) }}%</span>
       </div>
       <div v-if="percent !== null" class="h-1.5 overflow-hidden rounded-full bg-gray-800" role="progressbar" :aria-label="progress.label" :aria-valuenow="progress.done || 0" :aria-valuemin="0" :aria-valuemax="progress.total"><div class="h-full rounded-full bg-brand transition-all" :style="{ width: `${percent}%` }"></div></div>
-      <div v-else-if="state.running" class="h-1.5 overflow-hidden rounded-full bg-gray-800" role="progressbar" :aria-label="progress.label"><div class="h-full w-1/3 animate-pulse rounded-full bg-brand"></div></div>
+      <div v-else-if="state.running" class="h-1.5 overflow-hidden rounded-full bg-gray-800" role="progressbar" :aria-label="progress.label"><div class="h-full w-1/3 loading-indeterminate rounded-full bg-brand"></div></div>
       <p v-if="progress.bytes_total" class="text-gray-400">已备份 {{ bytes(progress.bytes_done) }} / {{ bytes(progress.bytes_total) }}</p>
       <p v-if="progress.current" class="break-all font-mono text-gray-400">当前：{{ progress.current }}</p>
       <p v-if="progress.current_total_bytes" class="text-gray-500">当前文件读写 {{ bytes(progress.current_bytes) }} / {{ bytes(progress.current_total_bytes) }}</p>

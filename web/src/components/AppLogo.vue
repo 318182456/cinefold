@@ -22,8 +22,8 @@ defineProps({
   >
     <rect width="32" height="32" rx="8" class="fill-brand" />
 
-    <path d="M8 8h13v17L8 22V8Z" fill="#09261c" />
-    <path d="m21 8 5 4v10l-5 3V8Z" fill="#09261c" opacity=".6" />
-    <path d="M11 11h2m-2 4h2m-2 4h2m4-8h1m-1 4h1m-1 4h1" stroke="#3ecf9b" stroke-width="1.5" stroke-linecap="round" />
+    <path d="M8 8h13v17L8 22V8Z" fill="#ffffff" />
+    <path d="m21 8 5 4v10l-5 3V8Z" fill="#ffffff" opacity=".6" />
+    <path d="M11 11h2m-2 4h2m-2 4h2m4-8h1m-1 4h1m-1 4h1" stroke="#197653" stroke-width="1.5" stroke-linecap="round" />
   </svg>
 </template>

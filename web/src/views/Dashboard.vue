@@ -83,7 +83,8 @@ onMounted(load)
     </div>
     <section>
       <div class="section-heading"><div class="flex flex-wrap items-center gap-3"><h2>今日上新</h2><span class="badge border border-gray-800 text-gray-400">{{ today.length }} 部</span><SelectionBar v-if="today.length" :sel="sel" /></div><RouterLink :to="{name:'Rank'}" class="flex items-center gap-1 text-xs text-gray-400 hover:text-brand">浏览榜单<AppIcon name="arrow" :size="14" /></RouterLink></div>
-      <LoadingBlock v-if="loading" :rows="2" />
+      <LoadingBlock v-if="loading && stats" :rows="0" label="正在更新总览，保留当前内容…" />
+      <LoadingBlock v-if="loading && !stats" :rows="2" />
       <div v-else-if="today.length" class="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3"><CodeCard v-for="item in today" :key="item.code" :item="item" :selectable="sel.active.value" :selected="sel.isSelected(item.code)" @toggle-select="sel.toggle" @changed="load" /></div>
       <EmptyState v-else text="今天还没有新片" hint="抓取完成后，新发现的影片会出现在这里。"><RouterLink :to="{name:'Task'}" class="btn-ghost mt-2 !text-xs">查看抓取任务<AppIcon name="arrow" :size="13" /></RouterLink></EmptyState>
     </section>

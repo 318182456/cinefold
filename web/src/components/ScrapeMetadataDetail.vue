@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import http from '@/api'
 import ModalDialog from '@/components/ModalDialog.vue'
 import PrivateImage from '@/components/PrivateImage.vue'
+import LoadingBlock from '@/components/LoadingBlock.vue'
 
 const props = defineProps({
   open: Boolean, row: { type: Object, default: null },
@@ -39,7 +40,7 @@ onBeforeUnmount(() => { request++ })
 
 <template>
     <ModalDialog :open="open" @close="emit('update:open', false)" title="刮削资料" size="2xl" scrollable>
-      <div v-if="detailLoading" class="space-y-4 py-8" role="status"><div class="h-6 w-1/2 animate-pulse rounded bg-gray-800"></div><div class="h-32 animate-pulse rounded bg-gray-800/60"></div><p class="text-xs text-gray-500">正在读取已保存的资料…</p></div>
+      <LoadingBlock v-if="detailLoading" :rows="2" label="正在读取已保存的资料…" />
       <div v-else-if="detailError" class="space-y-3 py-6"><p class="text-sm text-red-400" role="alert">{{ detailError }}</p><button class="btn-ghost" @click="load">重新加载</button></div>
       <div v-else-if="detail" class="space-y-6">
         <div class="flex flex-col gap-5 sm:flex-row">

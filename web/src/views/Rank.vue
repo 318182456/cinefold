@@ -138,7 +138,8 @@ onUnmounted(() => { disposed=true; request++; pollRequest++; clearTimeout(timer)
     <div v-if="subscription.phase !== 'idle' || subscriptionError" class="card space-y-2 text-xs text-gray-400"><p>{{ ({queued:'排队中',running:'正在订阅',completed:'订阅处理完成',partial:'部分订阅失败',interrupted:'任务已中断',failed:'任务失败'})[subscription.phase] || subscription.phase }}<span v-if="subscription.total != null"> · {{ subscription.done || 0 }} / {{ subscription.total }} 部 · 新增 {{ subscription.subscribed || 0 }} · 已订阅/下载中/已入库 {{ subscription.existing || 0 }} · 被过滤 {{ subscription.filtered || 0 }}</span></p><p v-if="subscription.current" class="text-brand">{{ subscription.current }}</p><p v-if="subscription.error || subscriptionError" class="text-red-400">{{ subscription.error || subscriptionError }}</p><p v-for="row in subscription.failures || []" :key="row.code" class="text-red-400">{{ row.code }} · {{ row.error }}</p><p v-if="subscription.running">任务在后台执行，完成后卡片会自动更新；也可以离开此页。</p></div>
     <SelectionBar v-if="items.length" :sel="sel" />
 
-    <LoadingBlock v-if="loading" :rows="4" />
+    <LoadingBlock v-if="loading && items.length" :rows="0" label="正在更新榜单，保留当前内容…" />
+    <LoadingBlock v-if="loading && !items.length" :rows="4" />
 
     <template v-else-if="items.length">
       <div class="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">

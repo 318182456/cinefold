@@ -53,7 +53,7 @@ onBeforeUnmount(() => {
           @click.stop
         />
         <button
-          class="absolute right-4 top-4 rounded-full bg-black/50 px-3 py-1 text-sm text-gray-200 hover:bg-black/70"
+          class="absolute right-4 top-4 rounded-full bg-black/50 px-3 py-1 text-sm text-white hover:bg-black/70"
           @click.stop="emit('close')"
         >
           关闭

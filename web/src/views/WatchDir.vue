@@ -15,6 +15,7 @@ const toast = useToast()
 
 const items = ref([])
 const loading = ref(false)
+const hasLoaded = ref(false)
 const libraryPath = ref('')
 const libraryExists = ref(false)
 const deleteEnabled = ref(false)
@@ -205,6 +206,7 @@ async function load() {
     watchingStarting.value = !!data.watching_starting
     syncInterval.value = data.sync_interval || 30
     autoSync.value = data.auto_sync !== false
+    hasLoaded.value = true
 
     // 建监听要几分钟，轮询着等它好，省得用户自己刷页面
     if (watchingStarting.value) startWatchPoll()
@@ -556,7 +558,8 @@ onUnmounted(() => {
       </button>
     </div>
 
-    <LoadingBlock v-if="loading" :rows="4" />
+    <LoadingBlock v-if="loading && hasLoaded" :rows="0" label="正在更新监控目录，保留当前内容…" />
+    <LoadingBlock v-if="loading && !hasLoaded" :rows="4" />
 
     <p v-else-if="!items.length" class="card text-center text-sm text-gray-500">
       还没有监控目录。添加后，目录里的文件增删会自动同步为媒体库的硬链接。

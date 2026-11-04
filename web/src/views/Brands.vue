@@ -1,7 +1,7 @@
 <script setup>
 import PagePanel from '@/components/PagePanel.vue'
 import MobileSection from '@/components/MobileSection.vue'
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { getBrands, getBrandCodes } from '@/api'
 import { useToast } from '@/composables/useToast'
 import { useCodeSelection } from '@/composables/useCodeSelection'
@@ -19,6 +19,9 @@ const items = ref([])
 const loading = ref(false)
 const loadingList = ref(false)
 const error = ref('')
+const loadedScope = ref('')
+let request = 0, disposed = false
+onUnmounted(() => { disposed = true; request++ })
 
 // 只看预定发布 / 只看已发布 / 全部
 const filter = ref('all')
@@ -35,6 +38,7 @@ const RANGES = [
   { value: '60:90', label: '全部' },
 ]
 const range = ref('7:14')
+const hasSnapshot = computed(() => loadedScope.value === `${active.value}:${range.value}`)
 
 // 番号、标题、演员任一命中即可
 function matchKeyword(item, word) {
@@ -90,20 +94,25 @@ async function load() {
 }
 
 async function select(key) {
+  if (!key || disposed) return
+  const id = ++request, scope = `${key}:${range.value}`
   active.value = key
   loadingList.value = true
-  items.value = []
+  if (loadedScope.value !== scope) items.value = []
   error.value = ''
   try {
     const [past, future] = range.value.split(':').map(Number)
     const data = await getBrandCodes(key, past, future)
+    if (disposed || id !== request) return
     items.value = data.items || []
+    loadedScope.value = scope
   } catch (err) {
+    if (disposed || id !== request) return
     // toast 会消失，抓取失败留在页面上更好排查
     error.value = err.message
     toast.error(err.message)
   } finally {
-    loadingList.value = false
+    if (!disposed && id === request) loadingList.value = false
   }
 }
 
@@ -140,24 +149,24 @@ onMounted(load)
           :class="filter === 'all' ? 'bg-brand text-white' : 'btn-ghost'"
           @click="filter = 'all'"
         >
-          全部 {{ base.length }}
+          全部 {{ loadingList && !hasSnapshot ? '—' : base.length }}
         </button>
         <button
           class="btn px-3 py-1 text-xs"
           :class="filter === 'upcoming' ? 'bg-brand text-white' : 'btn-ghost'"
           @click="filter = 'upcoming'"
         >
-          预定发布 {{ upcoming.length }}
+          预定发布 {{ loadingList && !hasSnapshot ? '—' : upcoming.length }}
         </button>
         <button
           class="btn px-3 py-1 text-xs"
           :class="filter === 'released' ? 'bg-brand text-white' : 'btn-ghost'"
           @click="filter = 'released'"
         >
-          已发布 {{ released.length }}
+          已发布 {{ loadingList && !hasSnapshot ? '—' : released.length }}
         </button>
         <button class="btn-ghost px-3 py-1 text-xs" :disabled="loadingList" @click="select(active)">
-          刷新
+          {{ loadingList ? '刷新中…' : '刷新' }}
         </button>
       </div>
 
@@ -187,9 +196,11 @@ onMounted(load)
       </div>
 
       </MobileSection>
-      <LoadingBlock v-if="loadingList" :rows="4" />
+      <LoadingBlock v-if="loadingList && hasSnapshot" :rows="0" label="正在更新厂牌作品，保留当前内容…" />
+      <p v-if="error && hasSnapshot" class="text-sm text-red-400" role="alert">刷新失败，保留上次结果：{{ error }}</p>
+      <LoadingBlock v-if="loadingList && !hasSnapshot" :rows="4" label="正在获取厂牌作品…" slow-hint="首次抓取厂牌官网可能耗时较长，仍在等待返回结果。" />
 
-      <div v-else-if="error" class="card space-y-1 border border-red-900/50">
+      <div v-else-if="error && !hasSnapshot" class="card space-y-1 border border-red-900/50">
         <p class="text-sm text-red-400">抓取失败</p>
         <p class="text-xs text-gray-400">{{ error }}</p>
         <p class="text-[11px] text-gray-600">

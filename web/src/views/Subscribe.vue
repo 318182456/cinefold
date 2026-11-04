@@ -56,12 +56,13 @@ function chooseStatus(value) {
   router.push({ query: { ...route.query, status: value === null ? 'all' : String(value) } })
 }
 watch(() => route.query.status, value => {
+  items.value = []
   status.value = value === 'all' ? null : /^[0-5]$/.test(String(value ?? '')) ? Number(value) : 1
   sel.clear()
   if (page.value !== 1) page.value = 1
   else load()
 }, { immediate: true })
-watch(page, load)
+watch(page, () => { items.value = []; load() })
 </script>
 
 <template>
@@ -84,7 +85,8 @@ watch(page, load)
     </template>
 
 
-    <LoadingBlock v-if="loading" :rows="4" />
+    <LoadingBlock v-if="loading && items.length" :rows="0" label="正在更新订阅，保留当前内容…" />
+    <LoadingBlock v-if="loading && !items.length" :rows="4" />
 
     <template v-else-if="items.length">
       <div class="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">

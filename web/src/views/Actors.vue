@@ -27,6 +27,7 @@ const worksPage = ref(1), worksSize = ref(PAGE_SIZE), worksTotal = ref(0), works
 const sync = ref({ running: false, phase: 'idle', imported: 0, error: '' }), syncSubmitting = ref(false)
 const syncPollError = ref(''), batchBusy = ref(false), batchResult = ref(null)
 const photos = ref({ running: false }), photoError = ref('')
+const loadedProfileScope = ref('')
 let photoTimer, photoBusy = false
 function missingPhotos() {
   return selectedName.value ? (profile.value && (!actor.value.photo || actor.value.needs_name_lookup) ? [actorName.value] : [])
@@ -112,7 +113,7 @@ async function loadDirectory() {
 function searchDirectory() { directoryPage.value = 1; items.value = []; directoryTotal.value = 0; loadDirectory() }
 function setDirectoryMode(mode) { router.push({ query: { ...route.query, mode: mode === 'subscribed' ? 'subscribed' : undefined } }) }
 function turnDirectoryPage(step) {
-  directoryPage.value = Math.min(directoryPages.value, Math.max(1, directoryPage.value + step)); loadDirectory()
+  directoryPage.value = Math.min(directoryPages.value, Math.max(1, directoryPage.value + step)); items.value = []; loadDirectory()
 }
 function openProfile(name) {
   const value = String(name || '').trim()
@@ -150,11 +151,14 @@ async function loadProfile() {
   const name = selectedName.value
   if (!name || disposed) return
   const id = ++profileRequest, syncVersion = syncEpoch
-  profileLoading.value = true; profileError.value = ''; works.value = []; worksTotal.value = 0
+  const scope = `${name}:${worksPage.value}:${worksFilter.value}`
+  profileLoading.value = true; profileError.value = ''
+  if (loadedProfileScope.value !== scope) { works.value = []; worksTotal.value = 0 }
   try {
     const result = await getActorProfile({ name, page: worksPage.value, size: PAGE_SIZE, filter: worksFilter.value })
     if (disposed || id !== profileRequest || selectedName.value !== name) return
     profile.value = result; works.value = result.items || []; worksTotal.value = result.total || 0
+    loadedProfileScope.value = scope
     worksSize.value = result.size || PAGE_SIZE; worksPage.value = result.page || worksPage.value
     fillPhotos()
     if (syncVersion === syncEpoch) {
@@ -276,7 +280,8 @@ onUnmounted(() => { disposed = true; clearTimeout(photoTimer); directoryRequest 
         <button class="btn-ghost" :disabled="loading">搜索目录</button><button type="button" class="btn-primary" :disabled="!keyword.trim() || loading" @click="openSearchProfile">查找并打开档案</button>
       </form>
       <p v-if="directoryError" class="text-xs text-red-400">{{ directoryError }}</p>
-      <LoadingBlock v-if="loading" :rows="3" />
+      <LoadingBlock v-if="loading && items.length" :rows="0" label="正在更新演员目录，保留当前内容…" />
+      <LoadingBlock v-if="loading && !items.length" :rows="3" />
       <div v-else-if="items.length" class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
         <article v-for="item in items" :key="item.name" class="card flex items-center gap-3 transition-colors hover:border-gray-700">
           <button class="h-14 w-14 shrink-0 overflow-hidden rounded-full bg-gray-800" :aria-label="`打开 ${item.display_name || item.name} 的档案`" @click="openProfile(item.name)"><PrivateImage :src="item.photo ? proxyImage(item.photo) : ''" :alt="item.display_name || item.name" fallback-text="暂无照片" img-class="h-full w-full object-cover" /></button>
@@ -327,7 +332,7 @@ onUnmounted(() => { disposed = true; clearTimeout(photoTimer); directoryRequest 
       </MobileSection>
       <section id="actor-work-results" class="scroll-mt-4 space-y-3">
         <div class="flex flex-wrap items-center justify-between gap-2"><h2 class="text-sm font-medium text-gray-300">{{ workFilters.find(item => item.key === worksFilter)?.label }}<span v-if="!profileLoading" class="ml-2 text-xs text-gray-500">{{ worksTotal }} 部</span></h2><span class="text-xs text-gray-500">收藏和已观看状态来自本地已记录的数据</span></div>
-        <LoadingBlock v-if="profileLoading" :rows="3" /><div v-else-if="works.length" class="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3"><CodeCard v-for="item in works" :key="item.code" :item="item" @changed="loadProfile" /></div><EmptyState v-else :text="profileError ? '作品暂时无法读取' : '当前筛选下没有已保存作品'" hint="可切换筛选，或选择来源更新演员资料与作品。" />
+        <LoadingBlock v-if="profileLoading && works.length" :rows="0" label="正在更新演员作品，保留当前内容…" /><LoadingBlock v-if="profileLoading && !works.length" :rows="3" /><div v-else-if="works.length" class="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3"><CodeCard v-for="item in works" :key="item.code" :item="item" @changed="loadProfile" /></div><EmptyState v-else :text="profileError ? '作品暂时无法读取' : '当前筛选下没有已保存作品'" hint="可切换筛选，或选择来源更新演员资料与作品。" />
         <div v-if="worksTotal" class="flex items-center justify-end gap-3 text-xs text-gray-500"><span>{{ worksPage }} / {{ worksPages }} 页 · {{ worksTotal }} 部</span><button class="btn-ghost !text-xs" :disabled="profileLoading || worksPage <= 1" @click="turnWorksPage(-1)">上一页</button><button class="btn-ghost !text-xs" :disabled="profileLoading || worksPage >= worksPages" @click="turnWorksPage(1)">下一页</button></div>
       </section>
     </template>

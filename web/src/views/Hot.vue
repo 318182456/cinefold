@@ -39,6 +39,7 @@ async function load() {
 const sel = useCodeSelection(items, load)
 
 watch(page, () => {
+  items.value = []
   sel.clear()
   load()
 })
@@ -55,7 +56,8 @@ onMounted(load)
     </template>
 
 
-    <LoadingBlock v-if="loading" :rows="4" />
+    <LoadingBlock v-if="loading && items.length" :rows="0" label="正在更新推荐，保留当前内容…" />
+    <LoadingBlock v-if="loading && !items.length" :rows="4" />
 
     <template v-else-if="items.length">
       <div class="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
