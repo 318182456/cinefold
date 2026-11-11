@@ -1734,3 +1734,58 @@ def test_refresh_sizes_can_skip_subtitles(tmp_path):
             row = session.get(MediaLink, str(video))
             if row is not None:
                 session.delete(row)
+
+
+def _register_callback_identity(link, source):
+    info = source.stat()
+    with session_scope() as session:
+        row = session.get(MediaLink, str(link))
+        row.inode, row.device = info.st_ino, info.st_dev
+
+
+def _remove_callback_directory(link, sidecar):
+    link.unlink()
+    sidecar.unlink()
+    link.parent.rmdir()
+
+
+def test_emby_removed_last_video_directory_cleans_only_registered_source(callback_media):
+    source, link, sidecar, torrent_hash, deleted = callback_media
+    _register_callback_identity(link, source)
+    _remove_callback_directory(link, sidecar)
+    result = medialink.handle_emby_deleted(str(link))
+    assert not result.get('ignored') and not result['errors']
+    assert not source.exists() and len(deleted) == 2
+    assert medialink.handle_emby_deleted(str(link))['ignored'] is True
+
+
+@pytest.mark.parametrize('condition', ['identity_missing', 'source_replaced', 'root_missing', 'other_hardlink', 'renamed_directory', 'permission'])
+def test_emby_missing_parent_keeps_source_when_storage_cannot_be_confirmed(callback_media, monkeypatch, condition):
+    source, link, sidecar, torrent_hash, deleted = callback_media
+    _register_callback_identity(link, source)
+    if condition == 'renamed_directory':
+        link.parent.rename(link.parent.with_name('moved'))
+    else:
+        _remove_callback_directory(link, sidecar)
+    if condition == 'identity_missing':
+        with session_scope() as session:
+            session.get(MediaLink, str(link)).inode = None
+    elif condition == 'source_replaced':
+        source.rename(source.with_suffix('.original'))
+        source.write_bytes(b'replacement')
+    elif condition == 'root_missing':
+        link.parent.parent.rename(link.parent.parent.with_name('unmounted'))
+    elif condition == 'other_hardlink':
+        os.link(source, source.with_suffix('.retained'))
+    elif condition == 'permission':
+        real_scandir = medialink.os.scandir
+        def scandir(path):
+            if Path(path) == link.parent.parent:
+                raise PermissionError('unavailable')
+            return real_scandir(path)
+        monkeypatch.setattr(medialink.os, 'scandir', scandir)
+    result = medialink.handle_emby_deleted(str(link))
+    assert result['ignored'] is True and source.exists() and deleted == []
+    with session_scope() as session:
+        assert session.get(MediaLink, str(link)) is not None
+        assert session.get(History, torrent_hash) is not None

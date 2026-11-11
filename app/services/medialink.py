@@ -1329,6 +1329,51 @@ class _IgnoredDeleteCallback(ValueError):
     pass
 
 
+def _require_online_library_after_parent_removed(path: Path, row: MediaLink) -> None:
+    """Emby may remove an empty movie/actor directory with the last video.
+
+    ASVS 5.3.2: only the exact registered path is eligible; the surviving
+    library and original source identity must prove this is not a lost mount
+    or a moved hard link. Missing identity remains a manual-review case.
+    """
+    library = get_settings().medialink_library_path
+    if not library or not row.device or not row.inode or not row.source_path:
+        raise _IgnoredDeleteCallback('播放目录已消失且缺少存储身份，保留源文件')
+    root = Path(library).absolute()
+    try:
+        relative = path.relative_to(root)
+        if not relative.parts or '..' in relative.parts or root.resolve(strict=True) != root:
+            raise _IgnoredDeleteCallback('播放路径不在可确认的媒体库内')
+        root_stat = root.lstat()
+        if not stat.S_ISDIR(root_stat.st_mode) or root_stat.st_dev != row.device:
+            raise _IgnoredDeleteCallback('媒体库存储身份不一致，可能挂载不可用')
+        # Every surviving ancestor must be a readable directory on the recorded
+        # device. Never follow a symbolic link or a replacement nested mount.
+        current = root
+        for part in relative.parts[:-1]:
+            with os.scandir(current) as entries:
+                next(entries, None)
+            candidate = current / part
+            try:
+                info = candidate.lstat()
+            except FileNotFoundError:
+                break
+            if not stat.S_ISDIR(info.st_mode) or info.st_dev != row.device:
+                raise _IgnoredDeleteCallback('播放目录的存储身份不一致，保留源文件')
+            current = candidate
+        source = Path(row.source_path).absolute()
+        info = source.lstat()
+        if (not stat.S_ISREG(info.st_mode) or source.resolve(strict=True) != source
+                or (info.st_dev, info.st_ino) != (row.device, row.inode)):
+            raise _IgnoredDeleteCallback('源文件身份已变化，保留源文件')
+        if info.st_nlink != 1:
+            raise _IgnoredDeleteCallback('源文件仍有其他硬链接，可能影片已移动')
+    except _IgnoredDeleteCallback:
+        raise
+    except (OSError, ValueError) as exc:
+        raise _IgnoredDeleteCallback('媒体库或源文件不可核验，保留源文件') from exc
+
+
 def _require_missing_callback_link(link_path, links):
     # 不采用文件名回退：不同目录可能有同名影片。
     if (not link_path or len(links) != 1
@@ -1341,9 +1386,11 @@ def _require_missing_callback_link(link_path, links):
         path.lstat()  # 包括失效符号链接；权限错误也不能当作文件消失。
     except FileNotFoundError:
         try:
-            # 目录也消失时无法区分真实删除与挂载掉线，保留源文件供人工处理。
+            # 空目录可能随影片一起删除；缺失时追加媒体库与源文件身份核验。
             if path.parent.is_symlink() or not stat.S_ISDIR(path.parent.stat().st_mode):
                 raise _IgnoredDeleteCallback('播放目录不可用，无法确认影片已删除')
+        except FileNotFoundError:
+            _require_online_library_after_parent_removed(path, links[0])
         except OSError as exc:
             raise _IgnoredDeleteCallback('播放目录不可用，无法确认影片已删除') from exc
     except OSError as exc:
