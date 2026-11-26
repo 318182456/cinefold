@@ -850,6 +850,10 @@ def _sidecar_files(video: Path) -> tuple[list[Path], list[Path]]:
 
     try:
         entries = list(parent.iterdir())
+    except FileNotFoundError:
+        # Emby may already have removed the last video's empty directory.
+        logger.debug(f"附属目录已不存在，跳过清理: {parent}")
+        return [], []
     except OSError as exc:
         logger.warning(f"无法列出目录 {parent}: {exc}")
         return [], []
@@ -1525,7 +1529,7 @@ def _handle_media_deleted(
                 torrent_files.append(p)
     source_paths.update(torrent_files)
 
-    logger.warning(
+    logger.info(
         f"[{result.code}] 媒体联动删除{'（演练）' if dry_run else ''} —— "
         f"删种 {len(hashes_to_delete)} 个: {', '.join(hashes_to_delete) or '无'}; "
         f"保留做种 {len(hashes_to_keep)} 个: {', '.join(hashes_to_keep) or '无'}; "
@@ -1702,7 +1706,8 @@ def _handle_media_deleted(
         from app.services import drop_media_exists_cache
         drop_media_exists_cache(result.code)
 
-        logger.warning(
+        log_result = logger.warning if result.errors else logger.info
+        log_result(
             f"[{result.code}] 联动删除完成 —— 种子 {len(result.torrents_deleted)}"
             f"{f'（另有 {len(result.torrents_kept)} 个合集种子保留做种）' if result.torrents_kept else ''}，"
             f"文件 {len(result.files_deleted)}，"

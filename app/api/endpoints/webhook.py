@@ -232,7 +232,7 @@ async def emby_webhook(request: Request):
 
     # 联动删除会真的删掉种子和源文件，事后追责全靠这行 —— 被忽略的事件有日志，
     # 真正执行删除的反而没有，出事时只能看到"删了什么"，看不到"谁让删的"
-    logger.warning(
+    logger.info(
         f"[{code or '?'}] 收到 Emby 删除回调，事件={event or '未提供'}，"
         f"来源={request.client.host if request.client else '?'}，"
         f"路径={link_path or '未提供'}"
