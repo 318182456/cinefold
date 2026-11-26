@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 from app.services.scrapemaintenance import guarded as maintenance_guarded
+from app.services.storageidentity import filesystem_id
 
 import os
 import stat
@@ -30,7 +31,7 @@ from datetime import datetime
 from pathlib import Path
 
 from loguru import logger
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update, or_
 
 from app.core.config import get_settings
 from app.database.models import Code, CodeStatus, History, MediaLink, PendingDelete
@@ -406,6 +407,7 @@ def register_scrape(
 
     inode, device = _stat_ids(source_path)
     candidates: list[str] = []
+    storage_id = filesystem_id(source_path)
 
     if link_path:
         # 模板给的路径要验一下确实指向同一份数据，否则宁可不要
@@ -440,6 +442,7 @@ def register_scrape(
                 existing.source_path = source_path
                 existing.inode = inode
                 existing.device = device
+                existing.filesystem_id = storage_id
                 # 探到了才写。探不到时保留旧值，别把已知的大小抹成空
                 if size is not None:
                     existing.size = size
@@ -451,6 +454,7 @@ def register_scrape(
                     source_path=source_path,
                     inode=inode,
                     device=device,
+                    filesystem_id=storage_id,
                     size=size,
                     size_probe_time=probed_at,
                 ))
@@ -1329,6 +1333,63 @@ class _IgnoredDeleteCallback(ValueError):
     pass
 
 
+def refresh_storage_identities() -> dict:
+    """Revalidate existing hard-link pairs, never infer identity from a missing link."""
+    root = Path(get_settings().medialink_library_path or '').absolute()
+    counts = {'checked': 0, 'updated': 0}
+    try:
+        if not get_settings().medialink_library_path or root.resolve(strict=True) != root:
+            return counts
+        device = root.stat().st_dev
+        storage_id = filesystem_id(root)
+        if not storage_id:
+            return counts
+    except OSError:
+        return counts
+    cursor = ''
+    while True:
+        with session_scope() as session:
+            rows = list(session.scalars(select(MediaLink).where(
+                MediaLink.link_path > cursor,
+                or_(MediaLink.filesystem_id.is_(None), MediaLink.device != device),
+            ).order_by(MediaLink.link_path).limit(200)))
+            if not rows:
+                break
+            cursor = rows[-1].link_path
+            for row in rows:
+                counts['checked'] += 1
+                try:
+                    link, source = Path(row.link_path), Path(row.source_path)
+                    # ASVS 5.3.2: use only registered, resolved paths in the library.
+                    if (not link.is_absolute() or not source.is_absolute()
+                            or not link.is_relative_to(root)
+                            or link.resolve(strict=True) != link or source.resolve(strict=True) != source):
+                        continue
+                    linked, original = link.lstat(), source.lstat()
+                    if (not stat.S_ISREG(linked.st_mode) or not stat.S_ISREG(original.st_mode)
+                            or (linked.st_dev, linked.st_ino) != (original.st_dev, original.st_ino)
+                            or original.st_dev != device or original.st_ino != row.inode
+                            or filesystem_id(source) != storage_id
+                            or (row.filesystem_id and row.filesystem_id != storage_id)
+                            or (row.size is not None and original.st_size != row.size)):
+                        continue
+                    if row.device != device and (row.size is None or _norm_path(str(link)) == _norm_path(str(source))):
+                        continue
+                    # A concurrent re-scrape/replacement must win over this backfill.
+                    result = session.execute(update(MediaLink).where(
+                        MediaLink.link_path == row.link_path,
+                        MediaLink.source_path == row.source_path,
+                        MediaLink.inode == row.inode, MediaLink.device == row.device,
+                        MediaLink.filesystem_id == row.filesystem_id,
+                        MediaLink.size == row.size,
+                    ).values(device=device, filesystem_id=storage_id),
+                        execution_options={'synchronize_session': False})
+                    counts['updated'] += result.rowcount
+                except (OSError, ValueError):
+                    continue
+    return counts
+
+
 def _require_online_library_after_parent_removed(path: Path, row: MediaLink) -> None:
     """Emby may remove an empty movie/actor directory with the last video.
 
@@ -1345,10 +1406,12 @@ def _require_online_library_after_parent_removed(path: Path, row: MediaLink) -> 
         if not relative.parts or '..' in relative.parts or root.resolve(strict=True) != root:
             raise _IgnoredDeleteCallback('播放路径不在可确认的媒体库内')
         root_stat = root.lstat()
-        if not stat.S_ISDIR(root_stat.st_mode) or root_stat.st_dev != row.device:
+        storage_id = row.filesystem_id
+        if (not stat.S_ISDIR(root_stat.st_mode)
+                or (filesystem_id(root) != storage_id if storage_id else root_stat.st_dev != row.device)):
             raise _IgnoredDeleteCallback('媒体库存储身份不一致，可能挂载不可用')
-        # Every surviving ancestor must be a readable directory on the recorded
-        # device. Never follow a symbolic link or a replacement nested mount.
+        # Compare current ancestors against the current verified filesystem,
+        # not a device number recorded before a NAS restart.
         current = root
         for part in relative.parts[:-1]:
             with os.scandir(current) as entries:
@@ -1358,13 +1421,15 @@ def _require_online_library_after_parent_removed(path: Path, row: MediaLink) -> 
                 info = candidate.lstat()
             except FileNotFoundError:
                 break
-            if not stat.S_ISDIR(info.st_mode) or info.st_dev != row.device:
+            if not stat.S_ISDIR(info.st_mode) or info.st_dev != root_stat.st_dev:
                 raise _IgnoredDeleteCallback('播放目录的存储身份不一致，保留源文件')
             current = candidate
         source = Path(row.source_path).absolute()
         info = source.lstat()
         if (not stat.S_ISREG(info.st_mode) or source.resolve(strict=True) != source
-                or (info.st_dev, info.st_ino) != (row.device, row.inode)):
+                or info.st_dev != root_stat.st_dev or info.st_ino != row.inode
+                or (storage_id and filesystem_id(source) != storage_id)
+                or (row.size is not None and info.st_size != row.size)):
             raise _IgnoredDeleteCallback('源文件身份已变化，保留源文件')
         if info.st_nlink != 1:
             raise _IgnoredDeleteCallback('源文件仍有其他硬链接，可能影片已移动')

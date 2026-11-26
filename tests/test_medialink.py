@@ -1743,6 +1743,104 @@ def _register_callback_identity(link, source):
         row.inode, row.device = info.st_ino, info.st_dev
 
 
+def test_stable_filesystem_identity_accepts_device_number_drift(callback_media, monkeypatch):
+    source, link, sidecar, torrent_hash, deleted = callback_media
+    _register_callback_identity(link, source)
+    monkeypatch.setattr(medialink, 'filesystem_id', lambda path: 'persistent-fs')
+    with session_scope() as session:
+        row = session.get(MediaLink, str(link))
+        row.device += 100
+        row.filesystem_id = 'persistent-fs'
+    _remove_callback_directory(link, sidecar)
+    result = medialink.handle_emby_deleted(str(link))
+    assert not result.get('ignored') and not result['errors']
+    assert not source.exists() and len(deleted) == 2
+
+
+@pytest.mark.parametrize('condition', ['unknown_fs', 'changed_fs', 'changed_inode', 'changed_size'])
+def test_device_drift_does_not_bypass_file_identity(callback_media, monkeypatch, condition):
+    source, link, sidecar, torrent_hash, deleted = callback_media
+    _register_callback_identity(link, source)
+    monkeypatch.setattr(medialink, 'filesystem_id', lambda path: 'current-fs')
+    with session_scope() as session:
+        row = session.get(MediaLink, str(link))
+        row.device += 100
+        row.filesystem_id = None if condition == 'unknown_fs' else 'old-fs' if condition == 'changed_fs' else 'current-fs'
+        row.size = source.stat().st_size + (1 if condition == 'changed_size' else 0)
+        if condition == 'changed_inode': row.inode += 1
+    _remove_callback_directory(link, sidecar)
+    result = medialink.handle_emby_deleted(str(link))
+    assert result['ignored'] and source.exists() and not deleted
+
+
+def test_storage_backfill_verifies_pair_before_updating_and_allows_future_delete(callback_media, monkeypatch):
+    source, link, sidecar, torrent_hash, deleted = callback_media
+    _register_callback_identity(link, source)
+    monkeypatch.setattr(medialink, 'filesystem_id', lambda path: 'persistent-fs')
+    with session_scope() as session:
+        row = session.get(MediaLink, str(link))
+        row.device += 100
+        row.size = source.stat().st_size
+    assert medialink.refresh_storage_identities()['updated'] == 1
+    with session_scope() as session:
+        row = session.get(MediaLink, str(link))
+        assert row.filesystem_id == 'persistent-fs' and row.device == source.stat().st_dev
+    assert medialink.refresh_storage_identities()['checked'] == 0
+    _remove_callback_directory(link, sidecar)
+    assert not medialink.handle_emby_deleted(str(link)).get('ignored')
+    assert not source.exists()
+
+
+@pytest.mark.parametrize('condition', ['missing_link', 'replaced_source', 'wrong_inode', 'unknown_size', 'changed_fs', 'symlink'])
+def test_storage_backfill_refuses_unproven_pairs(callback_media, monkeypatch, condition):
+    source, link, sidecar, torrent_hash, deleted = callback_media
+    _register_callback_identity(link, source)
+    monkeypatch.setattr(medialink, 'filesystem_id', lambda path: 'persistent-fs')
+    with session_scope() as session:
+        row = session.get(MediaLink, str(link))
+        row.device += 100
+        old_device = row.device
+        row.size = None if condition == 'unknown_size' else source.stat().st_size
+        if condition == 'wrong_inode':row.inode += 1
+        if condition == 'changed_fs':row.filesystem_id = 'other-fs'
+    if condition == 'missing_link':link.unlink()
+    if condition == 'replaced_source':
+        source.rename(source.with_suffix('.original'))
+        source.write_bytes(b'replacement')
+    if condition == 'symlink':
+        link.unlink()
+        try:link.symlink_to(source)
+        except OSError:pytest.skip('symlinks unavailable')
+    assert medialink.refresh_storage_identities()['updated'] == 0
+    with session_scope() as session:
+        assert session.get(MediaLink, str(link)).device == old_device
+    assert source.exists() and not deleted
+
+
+def test_storage_backfill_does_not_overwrite_concurrent_registration(callback_media, monkeypatch):
+    source, link, sidecar, torrent_hash, deleted = callback_media
+    _register_callback_identity(link, source)
+    original_inode = source.stat().st_ino
+    with session_scope() as session:
+        row = session.get(MediaLink, str(link))
+        row.device += 100
+        row.size = source.stat().st_size
+    calls = []
+    def identity(path):
+        calls.append(str(path))
+        if len(calls) == 2:
+            with session_scope() as session:
+                row = session.get(MediaLink, str(link))
+                row.inode = original_inode + 1
+                row.filesystem_id = 'new-registration'
+        return 'persistent-fs'
+    monkeypatch.setattr(medialink, 'filesystem_id', identity)
+    assert medialink.refresh_storage_identities()['updated'] == 0
+    with session_scope() as session:
+        row = session.get(MediaLink, str(link))
+        assert row.inode == original_inode + 1 and row.filesystem_id == 'new-registration'
+
+
 def _remove_callback_directory(link, sidecar):
     link.unlink()
     sidecar.unlink()

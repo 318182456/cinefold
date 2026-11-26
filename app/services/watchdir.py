@@ -1865,6 +1865,8 @@ def _register(
     每个文件一个事务的话，提交本身（SQLite 上一次 fsync 约 18ms）就成了
     大头：几千个文件光提交要好几分钟。
     """
+    from app.services.storageidentity import filesystem_id
+    storage_id = filesystem_id(source_path)
     try:
         st = os.stat(source_path)
         inode, device = (st.st_ino or None), (st.st_dev or None)
@@ -1878,6 +1880,7 @@ def _register(
             existing.source_path = source_path
             existing.inode = inode
             existing.device = device
+            existing.filesystem_id = storage_id
         else:
             s.add(MediaLink(
                 link_path=link_path,
@@ -1885,6 +1888,7 @@ def _register(
                 source_path=source_path,
                 inode=inode,
                 device=device,
+                filesystem_id=storage_id,
             ))
 
         _register_alias(s, code, source_path)

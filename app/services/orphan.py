@@ -30,6 +30,7 @@
 from __future__ import annotations
 
 import os
+from app.services.storageidentity import filesystem_id
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -444,6 +445,7 @@ def recover_records(dry_run: bool = True) -> dict:
                 source_path=row["source_path"],
                 inode=inode,
                 device=device,
+                filesystem_id=filesystem_id(row['source_path']),
                 # 源文件已经不在的，直接把删除时间补上，免得下一轮扫描
                 # 才发现、把时间记成「重建那一刻」
                 source_gone_time=None if row["source_exists"] else now,

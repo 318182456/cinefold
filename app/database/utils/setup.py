@@ -106,6 +106,7 @@ def update_database() -> None:
         ("media_link", "size", "BIGINT"),
         ("media_link", "size_probe_time", "TIMESTAMP"),
         ("media_link", "has_subtitle", "BOOLEAN"),
+        ("media_link", "filesystem_id", "VARCHAR(80)"),
         # AI 影评。整张 review 表由 create_all 建，这里只补后加的列
         ("review", "style", "VARCHAR(128)"),
     ]

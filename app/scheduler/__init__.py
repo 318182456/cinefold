@@ -350,7 +350,7 @@ def refresh_link_sizes() -> int:
     每轮只探一批，把回填摊到多轮里。库大又挂在 NAS 上时，一次全量能跑
     到分钟级，摊开跑对页面响应更友好；探完一轮就不再重复探。
     """
-    from app.services.medialink import refresh_sizes, refresh_subtitles
+    from app.services.medialink import refresh_sizes, refresh_subtitles, refresh_storage_identities
 
     try:
         # 大小与字幕分两步，代价差一个数量级（实测 2000 条：0.6s vs 20s）：
@@ -359,6 +359,9 @@ def refresh_link_sizes() -> int:
         #
         # 所以大小不限量，一轮全填完 —— 上万条也就几秒，页面的体积排序
         # 和筛选立刻可用。字幕分批磨，慢慢来。
+        identities = refresh_storage_identities()
+        if identities['updated']:
+            logger.info(f"[任务] 已核验并更新 {identities['updated']} 条媒体存储身份")
         result = refresh_sizes(with_subtitle=False)
         refresh_subtitles(limit=_SUBTITLE_BATCH)
     except Exception as exc:
